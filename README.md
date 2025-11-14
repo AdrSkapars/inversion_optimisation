@@ -1,1 +1,1 @@
-# inversion_optimisation
+Inversion and Elicitation of LLMs Through Discrete Optimisation
