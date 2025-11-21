@@ -10,7 +10,30 @@ from inversion_optimisation.utils import load_dataset_tokens, DotDict
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 
 
-def onehot_text_search(cfg, model, device="cuda"):
+def grad_descent_search_initialisation(input_len, num_targets, init_strategy, loaded_true_tokens, max_batch_size, max_chunk_size, model, device):
+    with torch.no_grad():
+        # Loaded
+        if init_strategy == "loaded":
+            with open(f"/content/drive/MyDrive/Postgrad/LLM/Saves/WhiteBox/Minimum Input/initialisations/initial_tokens_{num_targets}_{input_len}.pkl", 'rb') as file:
+                initialisation_tokens = pickle.load(file).to(device)
+            return model.embed(initialisation_tokens)
+
+        # Normal
+        elif "normal" in init_strategy:
+            normal_embed = torch.empty((num_targets, input_len, model.cfg.d_model))
+            _ = nn.init.normal_(normal_embed, std=model.cfg.initializer_range)
+            if init_strategy == "normal":
+                return normal_embed
+
+        # Zeros
+        elif init_strategy == "zeros":
+            return torch.zeros((num_targets, input_len, model.cfg.d_model))
+
+        else:
+            raise ValueError("Invalid initialisation strategy")
+        
+
+def grad_descent_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
         with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
@@ -28,16 +51,8 @@ def onehot_text_search(cfg, model, device="cuda"):
         loaded_true_outputs = pickle.load(file).to("cpu")
 
     # Get the initialisation based on strategy
-    if cfg.init_strategy == "loaded":
-        with open(f"/content/initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
-            initialisation_tokens = pickle.load(file).to(device)
-        initialisation_embeds = F.one_hot(initialisation_tokens, num_classes=model.embed.W_E.size(0)).to(model.embed.W_E.dtype).to("cpu")
-    elif cfg.init_strategy == "normal":
-        normal_embed = torch.empty((cfg.num_targets, cfg.input_len, model.embed.W_E.size(0)))
-        _ = nn.init.normal_(normal_embed, std=0.05)
-        initialisation_embeds = normal_embed.to("cpu")
-    elif cfg.init_strategy == "zeros":
-        initialisation_embeds = torch.zeros((cfg.num_targets, cfg.input_len, model.embed.W_E.size(0))).to("cpu")
+    initialisation_embeds = grad_descent_search_initialisation(
+        cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
     state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
@@ -79,7 +94,7 @@ def onehot_text_search(cfg, model, device="cuda"):
                 num_new_items = min((cfg.max_batch_size - len(state.batch_results)), state.num_remain_items)
                 state.num_remain_items -= num_new_items
 
-                # Initialise new target and add to end
+                # Initialise new target and add to end (batched)
                 true_tokens = loaded_true_tokens[state.loaded_i:state.loaded_i+num_new_items].to(device)
                 new_true_outputs = loaded_true_outputs[state.loaded_i:state.loaded_i+num_new_items].to(device)
                 state.true_outputs = torch.cat((state.true_outputs, new_true_outputs))
@@ -112,34 +127,19 @@ def onehot_text_search(cfg, model, device="cuda"):
         # Do one epoch of optimisation on batch
         for optimizer in state.optimizers:
             optimizer.zero_grad()
-        pred_embed_pre = torch.cat([torch.cat([param for param in optimizer.param_groups[0]['params']], dim=1)
+        pred_embed = torch.cat([torch.cat([param for param in optimizer.param_groups[0]['params']], dim=1)
                                     for optimizer in state.optimizers], dim=0).to(device)
-        pred_one_hot = torch.softmax(pred_embed_pre / cfg.temp, dim=-1)
-        pred_embed = (pred_one_hot @ model.embed.W_E)
         pred_embed_full = torch.cat((pred_embed, model.embed(state.true_outputs[:,:-1])), dim=1)
         if "gpt" not in cfg.model_name and "tiny" not in cfg.model_name:
             pred_embed_full = pred_embed_full
         else:
             pred_embed_full = pred_embed_full + model.pos_embed(pred_embed_full[:,:,0].detach())
         pred_logits = model(pred_embed_full, start_at_layer=0)
-
+        
         pred_logprobs = F.softmax(pred_logits[:,cfg.input_len-1:,:], dim=-1).clamp(min=1e-12).log()
         pred_logits_target = torch.gather(pred_logprobs, 2, state.true_outputs.unsqueeze(-1)).squeeze(-1)
         pred_logits_diff = (pred_logits_target - pred_logprobs.max(dim=-1).values)
         loss = - pred_logits_diff.mean()
-
-        if cfg.reg_weight is not None:
-            # Compute regularisation penalty
-            if state.epoch >= 0:
-                # # Size of input penalty
-                # reg_penalty = (pred_one_hot).pow(2).sum(dim=-1).sqrt() * -1
-                # reg_penalty = reg_penalty.mean(dim=-1).mean(dim=-1)
-
-                # Fluency penalty
-                reg_penalty = pred_logits[:,:-1,:].softmax(dim=-1).log().gather(2, pred_one_hot[:,1:,:].argmax(dim=-1).unsqueeze(-1)).squeeze(-1) * -1
-                reg_penalty = reg_penalty.mean(dim=-1).mean(dim=-1)
-
-                loss = loss + (cfg.reg_weight * reg_penalty)
 
         loss.backward()
         for optimizer in state.optimizers:
@@ -164,13 +164,40 @@ def onehot_text_search(cfg, model, device="cuda"):
                     for j in range(cfg.input_len):
                         state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
 
+            # Only check for stopping on some epochs
+            if state.epoch % cfg.check_con_epochs != 0:
+                state.elapsed_time += time.time() - start_time
+                continue
+
+            # Use nearest neighbour to get back tokens from embeddings
+            pred_tokens = []
+            for i in range(0, pred_embed.size(0), cfg.max_chunk_size):
+                batch_chunk = pred_embed[i:i+cfg.max_chunk_size]
+                # Cosine similarity
+                if cfg.con_distance == "cos sim":
+                    tokens_sim_chunk = F.cosine_similarity(
+                        batch_chunk.unsqueeze(2),
+                        model.embed.W_E.unsqueeze(0).unsqueeze(0),
+                        dim=-1
+                    )
+                    pred_tokens_chunk = torch.argmax(tokens_sim_chunk, dim=-1)
+
+                # Euclidean distance
+                elif cfg.con_distance == "euc dist":
+                    tokens_sim_chunk = torch.cdist(batch_chunk.squeeze(0), model.embed.W_E, p=2)
+                    pred_tokens_chunk = torch.argmin(tokens_sim_chunk, dim=-1)
+                    if pred_tokens_chunk.dim() == 1:
+                        pred_tokens_chunk = pred_tokens_chunk.unsqueeze(0)
+
+                pred_tokens.append(pred_tokens_chunk)
+            pred_tokens = torch.cat(pred_tokens, dim=0)
+            
             # Update history of tokens over epochs
-            pred_tokens = torch.argmax(pred_one_hot, dim=-1)
             pred_tokens_full = torch.cat((pred_tokens, state.true_outputs[:,:-1]), dim=1)
             disc_pred_logits = model(pred_tokens_full)[:,cfg.input_len-1:,:]
-
             for i in range(len(state.batch_results)-1,-1,-1):
-                state.batch_results[i]["done_epochs"] += 1
+                # state.batch_results[i]["done_epochs"] += 1
+                state.batch_results[i]["done_epochs"] += cfg.check_con_epochs
 
                 # Remove item if have found a solution or reached final epoch
                 have_inverted = torch.equal(state.batch_results[i]["true_outputs"].detach(), disc_pred_logits[i].argmax(dim=-1).to("cpu").detach())
@@ -188,29 +215,18 @@ def onehot_text_search(cfg, model, device="cuda"):
     return state.results, round(state.elapsed_time, 3)
 
 
-def onehot_search(cfg, model, device="cuda"):
+
+def grad_descent_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
         with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
-    elif cfg.target_strategy == "privacy":
-        # Privacy dataset only allows num_targets == 500 currently
-        privacy_ds = load_dataset("AdrSkapars/pii-inversion-test-5k", split=f"length_{cfg.input_len}")
-        loaded_true_tokens = torch.cat([torch.tensor(item["tokens"]).to(torch.int64).unsqueeze(0) for item in privacy_ds], dim=0).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the initialisation based on strategy
-    if cfg.init_strategy == "loaded":
-        with open(f"/content/initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
-            initialisation_tokens = pickle.load(file).to(device)
-        initialisation_embeds = F.one_hot(initialisation_tokens, num_classes=model.embed.W_E.size(0)).to(model.embed.W_E.dtype).to("cpu")
-    elif cfg.init_strategy == "normal":
-        normal_embed = torch.empty((cfg.num_targets, cfg.input_len, model.embed.W_E.size(0)))
-        _ = nn.init.normal_(normal_embed, std=0.05)
-        initialisation_embeds = normal_embed.to("cpu")
-    elif cfg.init_strategy == "zeros":
-        initialisation_embeds = torch.zeros((cfg.num_targets, cfg.input_len, model.embed.W_E.size(0))).to("cpu")
+    initialisation_embeds = grad_descent_search_initialisation(
+        cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
     state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
@@ -236,8 +252,7 @@ def onehot_search(cfg, model, device="cuda"):
         start_time = time.time()
 
         # Checkpoint current progress if hour has passed
-        # if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 3):
-        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 6):
+        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 3):
             print("\nSAVING STATE")
             state.checkpoint_elapsed_time = state.elapsed_time
             torch.save(state, state_path)
@@ -285,29 +300,12 @@ def onehot_search(cfg, model, device="cuda"):
         # Do one epoch of optimisation on batch
         for optimizer in state.optimizers:
             optimizer.zero_grad()
-        pred_embed_pre = torch.cat([torch.cat([param for param in optimizer.param_groups[0]['params']], dim=1)
+        pred_embed = torch.cat([torch.cat([param for param in optimizer.param_groups[0]['params']], dim=1)
                                     for optimizer in state.optimizers], dim=0).to(device)
-        pred_one_hot = torch.softmax(pred_embed_pre / cfg.temp, dim=-1)
-        pred_embed = (pred_one_hot @ model.embed.W_E)
-        if "gpt" not in cfg.model_name and "tiny" not in cfg.model_name:
-            pred_embed_full = pred_embed
-        else:
-            pred_embed_full = pred_embed + model.pos_embed(pred_embed[:,:,0].detach())
+        pred_embed_full = pred_embed + model.pos_embed(pred_embed[:,:,0].detach())
         pred_logits = model(pred_embed_full, start_at_layer=0)
-        loss = torch.nn.HuberLoss()(state.true_logits.detach(), pred_logits[:,-1,:])
-
-        if cfg.reg_weight is not None:
-            # Compute regularisation penalty
-            if state.epoch >= 0:
-                # # Size of input penalty
-                # reg_penalty = (pred_one_hot).pow(2).sum(dim=-1).sqrt() * -1
-                # reg_penalty = reg_penalty.mean(dim=-1).mean(dim=-1)
-
-                # Fluency penalty
-                reg_penalty = pred_logits[:,:-1,:].softmax(dim=-1).log().gather(2, pred_one_hot[:,1:,:].argmax(dim=-1).unsqueeze(-1)).squeeze(-1) * -1
-                reg_penalty = reg_penalty.mean(dim=-1).mean(dim=-1)
-
-                loss = loss + (cfg.reg_weight * reg_penalty)
+        # loss = torch.nn.HuberLoss()(state.true_logits.detach(), pred_logits[:,-1,:])
+        loss = torch.nn.MSELoss()(state.true_logits.detach(), pred_logits[:,-1,:])
 
         loss.backward()
         for optimizer in state.optimizers:
@@ -332,17 +330,42 @@ def onehot_search(cfg, model, device="cuda"):
                     for j in range(cfg.input_len):
                         state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
 
-            # Assume largest one-hot token is the true one
-            pred_tokens = torch.argmax(pred_one_hot, dim=-1)
+            # Only check for stopping on some epochs
+            if state.epoch % cfg.check_con_epochs != 0:
+                state.elapsed_time += time.time() - start_time
+                continue
+
+            # Use nearest neighbour to get back tokens from embeddings
+            pred_tokens = []
+            for i in range(0, pred_embed.size(0), cfg.max_chunk_size):
+                batch_chunk = pred_embed[i:i+cfg.max_chunk_size]
+                # Cosine similarity
+                if cfg.con_distance == "cos sim":
+                    tokens_sim_chunk = F.cosine_similarity(
+                        batch_chunk.unsqueeze(2),
+                        model.embed.W_E.unsqueeze(0).unsqueeze(0),
+                        dim=-1
+                    )
+                    pred_tokens_chunk = torch.argmax(tokens_sim_chunk, dim=-1)
+
+                # Euclidean distance
+                elif cfg.con_distance == "euc dist":
+                    tokens_sim_chunk = torch.cdist(batch_chunk.squeeze(0), model.embed.W_E, p=2)
+                    pred_tokens_chunk = torch.argmin(tokens_sim_chunk, dim=-1)
+                    if pred_tokens_chunk.dim() == 1:
+                        pred_tokens_chunk = pred_tokens_chunk.unsqueeze(0)
+
+                pred_tokens.append(pred_tokens_chunk)
+            pred_tokens = torch.cat(pred_tokens, dim=0)
 
             # Update history of tokens over epochs
             disc_pred_logits = model(pred_tokens)[:,-1,:]
             for i in range(len(state.batch_results)-1,-1,-1):
-                state.batch_results[i]["done_epochs"] += 1
+                # state.batch_results[i]["done_epochs"] += 1
+                state.batch_results[i]["done_epochs"] += cfg.check_con_epochs
 
                 # Remove item if have found a solution or reached final epoch
-                threshold = 1e-4 if "tiny" in cfg.model_name else 1e-3
-                have_inverted = torch.allclose(state.true_logits[i], disc_pred_logits[i], atol=threshold, rtol=threshold)
+                have_inverted = torch.allclose(state.true_logits[i], disc_pred_logits[i], atol=1e-4, rtol=1e-4)
                 if have_inverted:
                     state.batch_results[i]["found_solution"] = True
                     state.num_success_items += 1
