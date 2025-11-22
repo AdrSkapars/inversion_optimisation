@@ -10,7 +10,7 @@ from inversion_optimisation.utils import load_dataset_tokens, DotDict
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 
 
-def grad_descent_search_initialisation(input_len, num_targets, init_strategy, loaded_true_tokens, max_batch_size, max_chunk_size, model, device):
+def embed_search_initialisation(input_len, num_targets, init_strategy, loaded_true_tokens, max_batch_size, max_chunk_size, model, device):
     with torch.no_grad():
         # Loaded
         if init_strategy == "loaded":
@@ -33,7 +33,7 @@ def grad_descent_search_initialisation(input_len, num_targets, init_strategy, lo
             raise ValueError("Invalid initialisation strategy")
         
 
-def grad_descent_text_search(cfg, model, device="cuda"):
+def embed_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
         with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
@@ -51,7 +51,7 @@ def grad_descent_text_search(cfg, model, device="cuda"):
         loaded_true_outputs = pickle.load(file).to("cpu")
 
     # Get the initialisation based on strategy
-    initialisation_embeds = grad_descent_search_initialisation(
+    initialisation_embeds = embed_search_initialisation(
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
@@ -216,7 +216,7 @@ def grad_descent_text_search(cfg, model, device="cuda"):
     return state.results, round(state.elapsed_time, 3)
 
 
-def grad_descent_search(cfg, model, device="cuda"):
+def embed_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
         with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
@@ -225,7 +225,7 @@ def grad_descent_search(cfg, model, device="cuda"):
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the initialisation based on strategy
-    initialisation_embeds = grad_descent_search_initialisation(
+    initialisation_embeds = embed_search_initialisation(
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
