@@ -14,7 +14,7 @@ def grad_descent_search_initialisation(input_len, num_targets, init_strategy, lo
     with torch.no_grad():
         # Loaded
         if init_strategy == "loaded":
-            with open(f"/content/drive/MyDrive/Postgrad/LLM/Saves/WhiteBox/Minimum Input/initialisations/initial_tokens_{num_targets}_{input_len}.pkl", 'rb') as file:
+            with open(f"/content/initial_tokens_{num_targets}_{input_len}.pkl", 'rb') as file:
                 initialisation_tokens = pickle.load(file).to(device)
             return model.embed(initialisation_tokens)
 
@@ -115,10 +115,11 @@ def grad_descent_text_search(cfg, model, device="cuda"):
                         new_pred_embed_pos = new_pred_embed[:,j:j+1]
                         new_pred_embed_pos.requires_grad = True
                         if j == 0:
-                            if cfg.bias_correction:
-                                state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
-                            else:
-                                state.optimizers.append(CustomAdam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            # if cfg.bias_correction:
+                            #     state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            # else:
+                            #     state.optimizers.append(CustomAdam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
                         else:
                             state.optimizers[-1].param_groups[0]['params'].append(new_pred_embed_pos)
 
@@ -146,23 +147,23 @@ def grad_descent_text_search(cfg, model, device="cuda"):
             optimizer.step()
 
         with torch.no_grad():
-            # Add decay to embeddings
-            for i in range(len(state.optimizers)):
-                for j in range(len(state.optimizers[i].param_groups[0]['params'])):
-                    state.optimizers[i].param_groups[0]['params'][j].mul_(cfg.decay_rate)
+            # # Add decay to embeddings
+            # for i in range(len(state.optimizers)):
+            #     for j in range(len(state.optimizers[i].param_groups[0]['params'])):
+            #         state.optimizers[i].param_groups[0]['params'][j].mul_(cfg.decay_rate)
 
-            # Intervene if sequence not found yet
-            for i in range(len(state.batch_results)):
-                targets_epoch = (state.batch_results[i]["done_epochs"]+1)
-                # Reset optimiser state
-                if targets_epoch % cfg.reset_epoch == 0:
-                    for j in range(cfg.input_len):
-                        del state.optimizers[i].state[state.optimizers[i].param_groups[0]['params'][j]]
+            # # Intervene if sequence not found yet
+            # for i in range(len(state.batch_results)):
+            #     targets_epoch = (state.batch_results[i]["done_epochs"]+1)
+            #     # Reset optimiser state
+            #     if targets_epoch % cfg.reset_epoch == 0:
+            #         for j in range(cfg.input_len):
+            #             del state.optimizers[i].state[state.optimizers[i].param_groups[0]['params'][j]]
 
-                # Reinitialise sequence
-                if targets_epoch % cfg.reinit_epoch == 0:
-                    for j in range(cfg.input_len):
-                        state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
+            #     # Reinitialise sequence
+            #     if targets_epoch % cfg.reinit_epoch == 0:
+            #         for j in range(cfg.input_len):
+            #             state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
 
             # Only check for stopping on some epochs
             if state.epoch % cfg.check_con_epochs != 0:
@@ -213,7 +214,6 @@ def grad_descent_text_search(cfg, model, device="cuda"):
             state.elapsed_time += time.time() - start_time
 
     return state.results, round(state.elapsed_time, 3)
-
 
 
 def grad_descent_search(cfg, model, device="cuda"):
@@ -288,10 +288,11 @@ def grad_descent_search(cfg, model, device="cuda"):
                         new_pred_embed_pos = new_pred_embed[:,j:j+1]
                         new_pred_embed_pos.requires_grad = True
                         if j == 0:
-                            if cfg.bias_correction:
-                                state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
-                            else:
-                                state.optimizers.append(CustomAdam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            # if cfg.bias_correction:
+                            #     state.optimizers.append(torch.optim.Adam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
+                            # else:
+                            #     state.optimizers.append(CustomAdam([new_pred_embed_pos], lr=cfg.learn_rate, betas=cfg.betas))
                         else:
                             state.optimizers[-1].param_groups[0]['params'].append(new_pred_embed_pos)
 
@@ -312,23 +313,23 @@ def grad_descent_search(cfg, model, device="cuda"):
             optimizer.step()
 
         with torch.no_grad():
-            # Add decay to embeddings
-            for i in range(len(state.optimizers)):
-                for j in range(len(state.optimizers[i].param_groups[0]['params'])):
-                    state.optimizers[i].param_groups[0]['params'][j].mul_(cfg.decay_rate)
+            # # Add decay to embeddings
+            # for i in range(len(state.optimizers)):
+            #     for j in range(len(state.optimizers[i].param_groups[0]['params'])):
+            #         state.optimizers[i].param_groups[0]['params'][j].mul_(cfg.decay_rate)
 
-            # Intervene if sequence not found yet
-            for i in range(len(state.batch_results)):
-                targets_epoch = (state.batch_results[i]["done_epochs"]+1)
-                # Reset optimiser state
-                if targets_epoch % cfg.reset_epoch == 0:
-                    for j in range(cfg.input_len):
-                        del state.optimizers[i].state[state.optimizers[i].param_groups[0]['params'][j]]
+            # # Intervene if sequence not found yet
+            # for i in range(len(state.batch_results)):
+            #     targets_epoch = (state.batch_results[i]["done_epochs"]+1)
+            #     # Reset optimiser state
+            #     if targets_epoch % cfg.reset_epoch == 0:
+            #         for j in range(cfg.input_len):
+            #             del state.optimizers[i].state[state.optimizers[i].param_groups[0]['params'][j]]
 
-                # Reinitialise sequence
-                if targets_epoch % cfg.reinit_epoch == 0:
-                    for j in range(cfg.input_len):
-                        state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
+            #     # Reinitialise sequence
+            #     if targets_epoch % cfg.reinit_epoch == 0:
+            #         for j in range(cfg.input_len):
+            #             state.optimizers[i].param_groups[0]['params'][j].normal_(std=0.1)
 
             # Only check for stopping on some epochs
             if state.epoch % cfg.check_con_epochs != 0:
