@@ -281,3 +281,25 @@ INV_MODEL_LOGITS_CFG = DotDict({
     "learning_rate" : 2e-4,
     "weight_decay" : 0.025,
 })
+
+PEZ_LOGITS_CFG = DotDict({
+    "learn_rate" : 1.7,
+    "con_distance" : {
+        0: "cos sim",
+        1: "euc dist",
+    }[1],
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia",
+        4: "privacy",
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "normal",
+        2: "zeros",
+    }[0],
+    "save_folder": "PEZ_TinyStories33M",
+    "model_name": "tiny-stories-33M",
+})

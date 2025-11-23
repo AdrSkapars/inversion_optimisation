@@ -284,8 +284,8 @@ def pez_search(cfg, model, device="cuda"):
             
         # Use gradients from discrete embeddings to update continuous embeddings
         pred_logits = model(pred_embed_discrete, start_at_layer=0)
-        # loss = torch.nn.HuberLoss()(state.true_logits.detach(), pred_logits[:,-1,:])
-        loss = torch.nn.MSELoss()(state.true_logits.detach(), pred_logits[:,-1,:])
+        loss = torch.nn.HuberLoss()(state.true_logits.detach(), pred_logits[:,-1,:])
+        # loss = torch.nn.MSELoss()(state.true_logits.detach(), pred_logits[:,-1,:])
         loss.backward()
         with torch.no_grad():
             state.pred_embed = state.pred_embed - (cfg.learn_rate * pred_embed_discrete.grad)
