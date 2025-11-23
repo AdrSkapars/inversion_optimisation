@@ -20,7 +20,7 @@ def gcg_text_search(cfg, model, device="cuda"):
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = str(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}")
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
