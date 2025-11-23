@@ -282,6 +282,31 @@ INV_MODEL_LOGITS_CFG = DotDict({
     "weight_decay" : 0.025,
 })
 
+PEZ_TEXT_CFG = DotDict({
+    "learn_rate" : 2.5,
+    "con_distance" : {
+        0: "cos sim",
+        1: "euc dist",
+    }[1],
+    "target_sample" : {
+        0: "random",
+        1: "greedy"
+    }[1],
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia"
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "normal",
+        2: "zeros",
+    }[0],
+    "save_folder": "PEZ_TinyStories33M_text",
+    "model_name": "tiny-stories-33M",
+})
+
 PEZ_LOGITS_CFG = DotDict({
     "learn_rate" : 1.7,
     "con_distance" : {
@@ -301,5 +326,54 @@ PEZ_LOGITS_CFG = DotDict({
         2: "zeros",
     }[0],
     "save_folder": "PEZ_TinyStories33M",
+    "model_name": "tiny-stories-33M",
+})
+
+ARCA_TEXT_CFG = DotDict({
+    "top_k" : 64,
+    "num_grad_samples" : 10,
+    "token_choice" : {
+        0: "uniform",
+        1: "weighted",
+    }[1],
+    "num_mutations" : 1,
+    "target_sample" : {
+        0: "random",
+        1: "greedy"
+    }[1],
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia"
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "zeros",
+    }[0],
+    "save_folder": "ARCA_TinyStories33M_text",
+    "model_name": "tiny-stories-33M",
+})
+
+ARCA_LOGITS_CFG = DotDict({
+    "top_k" : 128,
+    "num_grad_samples" : 10,
+    "token_choice" : {
+        0: "uniform",
+        1: "weighted",
+    }[0],
+    "num_mutations" : 1,
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia",
+        4: "privacy",
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "zeros",
+    }[0],
+    "save_folder": "ARCA_TinyStories33M",
     "model_name": "tiny-stories-33M",
 })
