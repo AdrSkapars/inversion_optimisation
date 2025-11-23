@@ -171,7 +171,7 @@ def pez_text_search(cfg, model, device="cuda"):
                     state.num_success_items += 1
                 if have_inverted or (cfg.max_epochs is not None and state.batch_results[i]["done_epochs"] >= cfg.max_epochs):
                     state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                    del state.pred_embed[i]
+                    state.pred_embed = torch.cat((state.pred_embed[:i], state.pred_embed[i+1:]))
                     state.true_outputs = torch.cat((state.true_outputs[:i], state.true_outputs[i+1:]))
                     state.results.append(state.batch_results.pop(i))
 
@@ -296,13 +296,13 @@ def pez_search(cfg, model, device="cuda"):
                 state.batch_results[i]["done_epochs"] += 1
 
                 # Remove item if have found a solution or reached final epoch
-                have_inverted = torch.allclose(state.true_logits[i], pred_logits[i], atol=1e-4, rtol=1e-4)
+                have_inverted = torch.allclose(state.true_logits[i,:], pred_logits[i,-1,:], atol=1e-4, rtol=1e-4)
                 if have_inverted:
                     state.batch_results[i]["found_solution"] = True
                     state.num_success_items += 1
                 if have_inverted or (cfg.max_epochs is not None and state.batch_results[i]["done_epochs"] >= cfg.max_epochs):
                     state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                    del state.pred_embed[i]
+                    state.pred_embed = torch.cat((state.pred_embed[:i], state.pred_embed[i+1:]))
                     state.true_logits = torch.cat((state.true_logits[:i], state.true_logits[i+1:]))
                     state.results.append(state.batch_results.pop(i))
 
