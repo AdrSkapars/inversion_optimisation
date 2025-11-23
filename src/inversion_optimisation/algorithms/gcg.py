@@ -5,12 +5,12 @@ import os
 import time
 from datasets import load_dataset
 
-from inversion_optimisation.utils import load_dataset_tokens, DotDict
+from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH
 
 def gcg_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     elif cfg.target_strategy == "privacy":
         # Privacy dataset only allows num_targets == 500 currently
@@ -20,7 +20,7 @@ def gcg_text_search(cfg, model, device="cuda"):
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
@@ -30,13 +30,13 @@ def gcg_text_search(cfg, model, device="cuda"):
 
     # Get the initialisation based on strategy
     if cfg.init_strategy == "loaded":
-        with open(f"/content/initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_initial_tokens = pickle.load(file)
     elif cfg.init_strategy == "zeros":
         loaded_initial_tokens = torch.zeros((cfg.num_targets, cfg.input_len)).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.adjusted_max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.adjusted_max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -211,7 +211,7 @@ def gcg_text_search(cfg, model, device="cuda"):
 def gcg_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     elif cfg.target_strategy == "privacy":
         # Privacy dataset only allows num_targets == 500 currently
@@ -222,13 +222,13 @@ def gcg_search(cfg, model, device="cuda"):
 
     # Get the initialisation based on strategy
     if cfg.init_strategy == "loaded":
-        with open(f"/content/initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"initial_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_initial_tokens = pickle.load(file)
     elif cfg.init_strategy == "zeros":
         loaded_initial_tokens = torch.zeros((cfg.num_targets, cfg.input_len)).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.adjusted_max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.adjusted_max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
