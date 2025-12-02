@@ -9,6 +9,9 @@ from datasets import load_dataset
 from inversion_optimisation.utils import load_dataset_tokens, DotDict
 from inversion_optimisation.algorithms.embed_search import embed_search_initialisation
 
+# Algorithm defined in https://arxiv.org/abs/2302.03668
+# 'Hard Prompts Made Easy: Gradient-Based Discrete Optimization for Prompt Tuning and Discovery'
+
 def pez_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
@@ -111,7 +114,7 @@ def pez_text_search(cfg, model, device="cuda"):
                         "done_epochs": 0,
                     })
 
-                    # Initialise new prediction and add to end, one optimiser per sequence
+                    # Initialise new prediction and add to end
                     new_pred_embed = initialisation_embeds[state.loaded_i+i:state.loaded_i+i+1].to(device)
                     state.pred_embed = torch.cat((state.pred_embed, new_pred_embed))
 
@@ -246,7 +249,7 @@ def pez_search(cfg, model, device="cuda"):
                         "done_epochs": 0,
                     })
 
-                    # Initialise new prediction and add to end, one optimiser per sequence
+                    # Initialise new prediction and add to end
                     new_pred_embed = initialisation_embeds[state.loaded_i+i:state.loaded_i+i+1].to(device)
                     state.pred_embed = torch.cat((state.pred_embed, new_pred_embed))
 
@@ -284,7 +287,6 @@ def pez_search(cfg, model, device="cuda"):
             
         # Use gradients from discrete embeddings to update continuous embeddings
         pred_logits = model(pred_embed_discrete, start_at_layer=0)
-        # loss = torch.nn.HuberLoss()(state.true_logits.detach(), pred_logits[:,-1,:])
         loss = torch.nn.MSELoss()(state.true_logits.detach(), pred_logits[:,-1,:])
         loss.backward()
         with torch.no_grad():

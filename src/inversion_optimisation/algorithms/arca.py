@@ -7,6 +7,8 @@ from datasets import load_dataset
 
 from inversion_optimisation.utils import load_dataset_tokens, DotDict
 
+# Algorithm defined in https://arxiv.org/abs/2303.04381
+# 'Automatically Auditing Large Language Models via Discrete Optimization'
 
 def arca_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset

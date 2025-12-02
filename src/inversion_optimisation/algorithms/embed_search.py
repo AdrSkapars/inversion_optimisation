@@ -9,6 +9,8 @@ from datasets import load_dataset
 from inversion_optimisation.utils import load_dataset_tokens, DotDict
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 
+# Algorithm defined in https://arxiv.org/abs/2507.01693 but its mostly just basic embedding search
+# 'GPT, But Backwards: Exactly Inverting Language Model Outputs'
 
 def embed_search_initialisation(input_len, num_targets, init_strategy, loaded_true_tokens, max_batch_size, max_chunk_size, model, device):
     with torch.no_grad():
