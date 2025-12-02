@@ -6,7 +6,7 @@ import os
 import time
 from datasets import load_dataset
 
-from inversion_optimisation.utils import load_dataset_tokens, DotDict
+from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 
 # Algorithm defined in https://arxiv.org/abs/2507.01693 but its mostly just basic embedding search
@@ -16,7 +16,7 @@ def embed_search_initialisation(input_len, num_targets, init_strategy, loaded_tr
     with torch.no_grad():
         # Loaded
         if init_strategy == "loaded":
-            with open(f"/content/initial_tokens_{num_targets}_{input_len}.pkl", 'rb') as file:
+            with open(DATA_PATH / f"initial_tokens_{num_targets}_{input_len}.pkl", 'rb') as file:
                 initialisation_tokens = pickle.load(file).to(device)
             return model.embed(initialisation_tokens)
 
@@ -38,13 +38,13 @@ def embed_search_initialisation(input_len, num_targets, init_strategy, loaded_tr
 def embed_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = str(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}")
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
@@ -57,7 +57,7 @@ def embed_text_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -221,7 +221,7 @@ def embed_text_search(cfg, model, device="cuda"):
 def embed_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
@@ -231,7 +231,7 @@ def embed_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)

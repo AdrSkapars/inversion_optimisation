@@ -6,7 +6,7 @@ import os
 import time
 from datasets import load_dataset
 
-from inversion_optimisation.utils import load_dataset_tokens, DotDict
+from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH
 from inversion_optimisation.algorithms.embed_search import embed_search_initialisation
 
 # Algorithm defined in https://arxiv.org/abs/2302.03668
@@ -15,13 +15,13 @@ from inversion_optimisation.algorithms.embed_search import embed_search_initiali
 def pez_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = str(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}")
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
@@ -34,7 +34,7 @@ def pez_text_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -165,7 +165,7 @@ def pez_text_search(cfg, model, device="cuda"):
             # Update history of tokens over epochs
             for i in range(len(state.batch_results)-1,-1,-1):
                 # state.batch_results[i]["done_epochs"] += 1
-                state.batch_results[i]["done_epochs"] += cfg.check_con_epochs
+                state.batch_results[i]["done_epochs"] += 1
 
                 # Remove item if have found a solution or reached final epoch
                 have_inverted = torch.equal(state.batch_results[i]["true_outputs"].detach(), pred_logits[i].argmax(dim=-1).to("cpu").detach())
@@ -174,7 +174,7 @@ def pez_text_search(cfg, model, device="cuda"):
                     state.num_success_items += 1
                 if have_inverted or (cfg.max_epochs is not None and state.batch_results[i]["done_epochs"] >= cfg.max_epochs):
                     state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                    del state.pred_embed[i]
+                    state.pred_embed = torch.cat((state.pred_embed[:i], state.pred_embed[i+1:]))
                     state.true_outputs = torch.cat((state.true_outputs[:i], state.true_outputs[i+1:]))
                     state.results.append(state.batch_results.pop(i))
 
@@ -186,7 +186,7 @@ def pez_text_search(cfg, model, device="cuda"):
 def pez_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
@@ -196,7 +196,7 @@ def pez_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -295,16 +295,16 @@ def pez_search(cfg, model, device="cuda"):
             # Update history of tokens over epochs
             for i in range(len(state.batch_results)-1,-1,-1):
                 # state.batch_results[i]["done_epochs"] += 1
-                state.batch_results[i]["done_epochs"] += cfg.check_con_epochs
+                state.batch_results[i]["done_epochs"] += 1
 
                 # Remove item if have found a solution or reached final epoch
-                have_inverted = torch.allclose(state.true_logits[i], pred_logits[i], atol=1e-4, rtol=1e-4)
+                have_inverted = torch.allclose(state.true_logits[i,:], pred_logits[i,-1,:], atol=1e-4, rtol=1e-4)
                 if have_inverted:
                     state.batch_results[i]["found_solution"] = True
                     state.num_success_items += 1
                 if have_inverted or (cfg.max_epochs is not None and state.batch_results[i]["done_epochs"] >= cfg.max_epochs):
                     state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                    del state.pred_embed[i]
+                    state.pred_embed = torch.cat((state.pred_embed[:i], state.pred_embed[i+1:]))
                     state.true_logits = torch.cat((state.true_logits[:i], state.true_logits[i+1:]))
                     state.results.append(state.batch_results.pop(i))
 

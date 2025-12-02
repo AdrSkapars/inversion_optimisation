@@ -3,8 +3,17 @@ from tqdm import tqdm
 import random
 from datasets import load_dataset
 import re
+from pathlib import Path
+
+# Define the paths to the data folder
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_PATH = REPO_ROOT / "data"
+
 
 class DotDict(dict):
+    """
+    A dictionary that can be accessed as an attribute.
+    """
     def __getattr__(self, name):
         return self.get(name)
     def __setattr__(self, name, value):
@@ -14,6 +23,9 @@ class DotDict(dict):
 
 
 def get_paper_summary_stats_new(results, epochs):
+    """
+    Get some summary stats for the results.
+    """
     # Work out some summary stats
     stats = {}
     percent_zero_loss = 0
@@ -58,6 +70,9 @@ def get_paper_summary_stats_new(results, epochs):
 
 
 def load_dataset_tokens(target_strategy, input_len, num_targets, include_bos, random_sentence, random_start, model):
+    """
+    Load the tokens from the dataset.
+    """
     name, split, ind = {
         "tinystories": ["roneneldan/TinyStories", "validation", "text"],
         "reddit": ["sentence-transformers/reddit", "train", "body"],
