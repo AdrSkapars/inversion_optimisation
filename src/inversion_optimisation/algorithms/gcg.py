@@ -7,6 +7,9 @@ from datasets import load_dataset
 
 from inversion_optimisation.utils import load_dataset_tokens, DotDict
 
+# Algorithm defined in https://arxiv.org/abs/2307.15043
+# 'Universal and Transferable Adversarial Attacks on Aligned Language Models'
+
 def gcg_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":

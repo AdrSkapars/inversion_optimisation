@@ -17,7 +17,6 @@ import logging
 
 from inversion_optimisation.utils import get_paper_summary_stats_new
 
-
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +26,8 @@ logging.basicConfig(
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Algorithm defined in https://arxiv.org/abs/2311.13647
+# 'Language Model Inversion'
 
 class LLMInversionModel(nn.Module):
     """

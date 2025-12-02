@@ -28,6 +28,8 @@ logging.basicConfig(
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Algorithm defined in https://arxiv.org/abs/2311.13647
+# 'Language Model Inversion'
 
 class LLMInversionModel(nn.Module):
     """

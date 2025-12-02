@@ -9,6 +9,8 @@ from datasets import load_dataset
 from inversion_optimisation.utils import load_dataset_tokens, DotDict
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 
+# Algorithm defined in https://arxiv.org/abs/2507.01693
+# 'GPT, But Backwards: Exactly Inverting Language Model Outputs'
 
 def onehot_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
