@@ -6,7 +6,7 @@ import os
 import time
 from datasets import load_dataset
 
-from inversion_optimisation.utils import load_dataset_tokens, DotDict
+from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH
 from inversion_optimisation.algorithms.optimisers import CustomAdam
 from inversion_optimisation.algorithms.embed_search import embed_search_initialisation
 
@@ -16,13 +16,13 @@ from inversion_optimisation.algorithms.embed_search import embed_search_initiali
 def pia_text_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
@@ -35,7 +35,7 @@ def pia_text_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -103,6 +103,7 @@ def pia_text_search(cfg, model, device="cuda"):
 
         # Do one epoch of optimisation on batch
         pred_embed = state.pred_embed
+        pred_embed.requires_grad = True
         pred_embed_full = torch.cat((pred_embed, model.embed(state.true_outputs[:,:-1])), dim=1)
         if "gpt" not in cfg.model_name and "tiny" not in cfg.model_name:
             pred_embed_full = pred_embed_full
@@ -140,69 +141,69 @@ def pia_text_search(cfg, model, device="cuda"):
             # Clamp to embedding space bounds
             state.pred_embed = torch.clamp(state.pred_embed, min=embed_min, max=embed_max)
             
-        done_epochs += 1
-        if done_epochs == cfg.max_epochs:
-            ############### STAGE 2: Adaptive discretisation ###############
-            batch_size, seq_len, d_model = pred_embed.shape
-            
-            # Find top-k nearest neighbors for each position in each sequence
-            top_k_indices = []
-            for i in range(0, batch_size, cfg.max_chunk_size):
-                batch_chunk = pred_embed[i:i+cfg.max_chunk_size]
-                # Shape: [chunk_size, seq_len, vocab_size]
-                distances = torch.cdist(batch_chunk, model.embed.W_E.unsqueeze(0).expand(batch_chunk.size(0), -1, -1), p=2)
-                # Get top-k closest tokens for each position
-                # Shape: [chunk_size, seq_len, k]
-                top_k_chunk = torch.topk(distances, k=cfg.top_k, dim=-1, largest=False).indices
-                top_k_indices.append(top_k_chunk)
-            
-            top_k_indices = torch.cat(top_k_indices, dim=0)  # Shape: [batch_size, seq_len, k]
-            
-            # Initialize pred_tokens with argmax (k=0, the closest neighbor)
-            pred_tokens = top_k_indices[:, :, 0].clone()  # Shape: [batch_size, seq_len]
-            
-            # Iterate through each position in the sequence
-            for pos in range(seq_len):
-                # Try each of the k substitutions
-                for k_idx in range(cfg.top_k):
-                    # Create candidate sequences with the k-th option at current position
-                    candidate_tokens = pred_tokens.clone()
-                    candidate_tokens[:, pos] = top_k_indices[:, pos, k_idx]
-                    
-                    # Calculate loss (no regularization)
-                    candidate_logits = model(candidate_tokens)               
-                    candidate_logprobs = F.softmax(candidate_logits[:,cfg.input_len-1:,:], dim=-1).clamp(min=1e-12).log()
-                    candidate_logits_target = torch.gather(candidate_logprobs, 2, state.true_outputs.unsqueeze(-1)).squeeze(-1)
-                    candidate_logits_diff = (candidate_logits_target - candidate_logprobs.max(dim=-1).values)
-                    candidate_loss = - candidate_logits_diff.mean() # Shape: [batch_size]
-                    
-                    # Update best choice for each sequence in batch
-                    if k_idx == 0:
-                        best_losses = candidate_loss
-                    else:
-                        improved_mask = candidate_loss < best_losses
-                        best_losses = torch.where(improved_mask, candidate_loss, best_losses)
-                        pred_tokens = torch.where(improved_mask, candidate_tokens[:, pos], pred_tokens)
-            
-            # Update results and clear batch
-            pred_tokens_full = torch.cat((pred_tokens, state.true_outputs[:,:-1]), dim=1)
-            disc_pred_logits = model(pred_tokens_full)[:,cfg.input_len-1:,:]
-            for i in range(len(state.batch_results)-1,-1,-1):
-                state.batch_results[i]["done_epochs"] = cfg.max_epochs
-
-                # Remove item if have found a solution or reached final epoch
-                have_inverted = torch.equal(state.batch_results[i]["true_outputs"].detach(), disc_pred_logits[i].argmax(dim=-1).to("cpu").detach())
-                if have_inverted:
-                    state.batch_results[i]["found_solution"] = True
-                    state.num_success_items += 1
-                    
-                state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                state.results.append(state.batch_results.pop(i))
+            done_epochs += 1
+            if done_epochs == cfg.max_epochs:
+                ############### STAGE 2: Adaptive discretisation ###############
+                batch_size, seq_len, d_model = pred_embed.shape
                 
-            state.pred_embed = torch.tensor([]).to(device)
-            state.true_outputs = torch.tensor([]).to(device).to(torch.int64)
+                # Find top-k nearest neighbors for each position in each sequence
+                top_k_indices = []
+                for i in range(0, batch_size, cfg.max_chunk_size):
+                    batch_chunk = pred_embed[i:i+cfg.max_chunk_size]
+                    # Shape: [chunk_size, seq_len, vocab_size]
+                    distances = torch.cdist(batch_chunk, model.embed.W_E.unsqueeze(0).expand(batch_chunk.size(0), -1, -1), p=2)
+                    # Get top-k closest tokens for each position
+                    # Shape: [chunk_size, seq_len, k]
+                    top_k_chunk = torch.topk(distances, k=cfg.top_k, dim=-1, largest=False).indices
+                    top_k_indices.append(top_k_chunk)
+                
+                top_k_indices = torch.cat(top_k_indices, dim=0)  # Shape: [batch_size, seq_len, k]
+                
+                # Initialize pred_tokens with argmax (k=0, the closest neighbor)
+                pred_tokens = top_k_indices[:, :, 0].clone()  # Shape: [batch_size, seq_len]
+                
+                # Iterate through each position in the sequence
+                for pos in range(seq_len):
+                    # Try each of the k substitutions
+                    for k_idx in range(cfg.top_k):
+                        # Create candidate sequences with the k-th option at current position
+                        candidate_tokens = pred_tokens.clone()
+                        candidate_tokens[:, pos] = top_k_indices[:, pos, k_idx]
+                        
+                        # Calculate loss (no regularization)
+                        candidate_logits = model(candidate_tokens)               
+                        candidate_logprobs = F.softmax(candidate_logits[:,cfg.input_len-1:,:], dim=-1).clamp(min=1e-12).log()
+                        candidate_logits_target = torch.gather(candidate_logprobs, 2, state.true_outputs.unsqueeze(-1)).squeeze(-1)
+                        candidate_logits_diff = (candidate_logits_target - candidate_logprobs.max(dim=-1).values)
+                        candidate_loss = - candidate_logits_diff.mean() # Shape: [batch_size]
+                        
+                        # Update best choice for each sequence in batch
+                        if k_idx == 0:
+                            best_losses = candidate_loss
+                        else:
+                            improved_mask = candidate_loss < best_losses
+                            best_losses = torch.where(improved_mask, candidate_loss, best_losses)
+                            pred_tokens = torch.where(improved_mask, candidate_tokens[:, pos], pred_tokens)
+                
+                # Update results and clear batch
+                pred_tokens_full = torch.cat((pred_tokens, state.true_outputs[:,:-1]), dim=1)
+                disc_pred_logits = model(pred_tokens_full)[:,cfg.input_len-1:,:]
+                for i in range(len(state.batch_results)-1,-1,-1):
+                    state.batch_results[i]["done_epochs"] = cfg.max_epochs
 
-        state.elapsed_time += time.time() - start_time
+                    # Remove item if have found a solution or reached final epoch
+                    have_inverted = torch.equal(state.batch_results[i]["true_outputs"].detach(), disc_pred_logits[i].argmax(dim=-1).to("cpu").detach())
+                    if have_inverted:
+                        state.batch_results[i]["found_solution"] = True
+                        state.num_success_items += 1
+                        
+                    state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
+                    state.results.append(state.batch_results.pop(i))
+                    
+                state.pred_embed = torch.tensor([]).to(device)
+                state.true_outputs = torch.tensor([]).to(device).to(torch.int64)
+
+            state.elapsed_time += time.time() - start_time
 
     return state.results, round(state.elapsed_time, 3)
 
@@ -210,7 +211,7 @@ def pia_text_search(cfg, model, device="cuda"):
 def pia_search(cfg, model, device="cuda"):
     # Get the targets used for all experiments based on dataset
     if cfg.target_strategy == "random":
-        with open(f"/content/true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
+        with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
@@ -220,7 +221,7 @@ def pia_search(cfg, model, device="cuda"):
         cfg.input_len, cfg.num_targets, cfg.init_strategy, cfg.loaded_true_tokens, cfg.max_batch_size, cfg.max_chunk_size, model, device).to("cpu")
 
     # Initialise state variables
-    state_path = f'/content/{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
+    state_path = DATA_PATH / f'{cfg.save_folder}/checkpoint_{cfg.input_len}_{cfg.num_targets}_{cfg.max_epochs}.pt'
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
@@ -287,6 +288,7 @@ def pia_search(cfg, model, device="cuda"):
 
         # Do one epoch of optimisation on batch
         pred_embed = state.pred_embed
+        pred_embed.requires_grad = True
         pred_embed_full = pred_embed + model.pos_embed(pred_embed[:,:,0].detach())
         pred_logits = model(pred_embed_full, start_at_layer=0)
         loss = torch.nn.MSELoss()(state.true_logits.detach(), pred_logits[:,-1,:])
@@ -359,21 +361,21 @@ def pia_search(cfg, model, device="cuda"):
                             best_losses = torch.where(improved_mask, candidate_loss, best_losses)
                             pred_tokens = torch.where(improved_mask, candidate_tokens[:, pos], pred_tokens)
 
-            # Update results and clear batch
-            disc_pred_logits = model(pred_tokens)
-            for i in range(len(state.batch_results)-1,-1,-1):
-                state.batch_results[i]["done_epochs"] = cfg.max_epochs
+                # Update results and clear batch
+                disc_pred_logits = model(pred_tokens)[:,-1,:]
+                for i in range(len(state.batch_results)-1,-1,-1):
+                    state.batch_results[i]["done_epochs"] = cfg.max_epochs
 
-                have_inverted = torch.allclose(state.true_logits[i], disc_pred_logits[i], atol=1e-4, rtol=1e-4)
-                if have_inverted:
-                    state.batch_results[i]["found_solution"] = True
-                    state.num_success_items += 1
+                    have_inverted = torch.allclose(state.true_logits[i], disc_pred_logits[i], atol=1e-4, rtol=1e-4)
+                    if have_inverted:
+                        state.batch_results[i]["found_solution"] = True
+                        state.num_success_items += 1
+                        
+                    state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
+                    state.results.append(state.batch_results.pop(i))
                     
-                state.batch_results[i]["pred_tokens"] = pred_tokens[i].to("cpu")
-                state.results.append(state.batch_results.pop(i))
-                
-            state.pred_embed = torch.tensor([]).to(device)
-            state.true_logits = torch.tensor([]).to(device)
+                state.pred_embed = torch.tensor([]).to(device)
+                state.true_logits = torch.tensor([]).to(device)
                     
         state.elapsed_time += time.time() - start_time
 
