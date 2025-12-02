@@ -183,7 +183,7 @@ def pia_text_search(cfg, model, device="cuda"):
                         else:
                             improved_mask = candidate_loss < best_losses
                             best_losses = torch.where(improved_mask, candidate_loss, best_losses)
-                            pred_tokens = torch.where(improved_mask, candidate_tokens[:, pos], pred_tokens)
+                            pred_tokens[improved_mask, pos] = candidate_tokens[improved_mask, pos]
                 
                 # Update results and clear batch
                 pred_tokens_full = torch.cat((pred_tokens, state.true_outputs[:,:-1]), dim=1)
@@ -359,7 +359,7 @@ def pia_search(cfg, model, device="cuda"):
                         else:
                             improved_mask = candidate_loss < best_losses
                             best_losses = torch.where(improved_mask, candidate_loss, best_losses)
-                            pred_tokens = torch.where(improved_mask, candidate_tokens[:, pos], pred_tokens)
+                            pred_tokens[improved_mask, pos] = candidate_tokens[improved_mask, pos]
 
                 # Update results and clear batch
                 disc_pred_logits = model(pred_tokens)[:,-1,:]
