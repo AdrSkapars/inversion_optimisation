@@ -331,6 +331,7 @@ PEZ_LOGITS_CFG = DotDict({
 
 PIA_TEXT_CFG = DotDict({
     "learn_rate" : 3.5,
+    "top_k" : 50256,
     "nn_weight" : 0.001,
     "target_sample" : {
         0: "random",
@@ -353,6 +354,7 @@ PIA_TEXT_CFG = DotDict({
 
 PIA_LOGITS_CFG = DotDict({
     "learn_rate" : 3.5,
+    "top_k" : 50256,
     "nn_weight" : 0.001,
     "target_strategy" : {
         0: "random",
