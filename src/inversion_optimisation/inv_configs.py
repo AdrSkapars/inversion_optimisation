@@ -329,6 +329,46 @@ PEZ_LOGITS_CFG = DotDict({
     "model_name": "tiny-stories-33M",
 })
 
+PIA_TEXT_CFG = DotDict({
+    "learn_rate" : 3.5,
+    "nn_weight" : 0.001,
+    "target_sample" : {
+        0: "random",
+        1: "greedy"
+    }[1],
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia"
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "normal",
+        2: "zeros",
+    }[1],
+    "save_folder": "PIA_TinyStories33M_text",
+    "model_name": "tiny-stories-33M",
+})
+
+PIA_LOGITS_CFG = DotDict({
+    "learn_rate" : 3.5,
+    "nn_weight" : 0.001,
+    "target_strategy" : {
+        0: "random",
+        1: "tinystories",
+        2: "reddit",
+        3: "wikipedia"
+    }[0],
+    "init_strategy" : {
+        0: "loaded",
+        1: "normal",
+        2: "zeros",
+    }[1],
+    "save_folder": "PIA_TinyStories33M",
+    "model_name": "tiny-stories-33M",
+})
+
 ARCA_TEXT_CFG = DotDict({
     "top_k" : 64,
     "num_grad_samples" : 10,
