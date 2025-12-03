@@ -22,7 +22,7 @@ def pia_text_search(cfg, model, device="cuda"):
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
     # Get the targets output
-    true_tokens_loc = DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}"
+    true_tokens_loc = str(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}_{cfg.output_len}")
     if cfg.target_sample == "random":
         true_tokens_loc += ".pkl"
     elif cfg.target_sample == "greedy":
@@ -171,7 +171,8 @@ def pia_text_search(cfg, model, device="cuda"):
                         candidate_tokens[:, pos] = top_k_indices[:, pos, k_idx]
                         
                         # Calculate loss (no regularization)
-                        candidate_logits = model(candidate_tokens)               
+                        candidate_tokens_full = torch.cat((candidate_tokens, state.true_outputs[:,:-1]), dim=1)
+                        candidate_logits = model(candidate_tokens_full)               
                         candidate_logprobs = F.softmax(candidate_logits[:,cfg.input_len-1:,:], dim=-1).clamp(min=1e-12).log()
                         candidate_logits_target = torch.gather(candidate_logprobs, 2, state.true_outputs.unsqueeze(-1)).squeeze(-1)
                         candidate_logits_diff = (candidate_logits_target - candidate_logprobs.max(dim=-1).values)
