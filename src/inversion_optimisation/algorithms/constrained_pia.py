@@ -39,6 +39,8 @@ def pia_text_search(cfg, model, device="cuda"):
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
+        if len(state.batch_results) > 0:
+            done_epochs = state.batch_results[-1]["done_epochs"]
     else:
         print("INITIALISING STATE")
         state = DotDict({
@@ -142,6 +144,9 @@ def pia_text_search(cfg, model, device="cuda"):
             state.pred_embed = torch.clamp(state.pred_embed, min=embed_min, max=embed_max)
             
             done_epochs += 1
+            for i in range(len(state.batch_results)-1,-1,-1):
+                state.batch_results[i]["done_epochs"] += 1
+                
             if done_epochs == cfg.max_epochs:
                 ############### STAGE 2: Adaptive discretisation ###############
                 batch_size, seq_len, d_model = pred_embed.shape
@@ -190,8 +195,6 @@ def pia_text_search(cfg, model, device="cuda"):
                 pred_tokens_full = torch.cat((pred_tokens, state.true_outputs[:,:-1]), dim=1)
                 disc_pred_logits = model(pred_tokens_full)[:,cfg.input_len-1:,:]
                 for i in range(len(state.batch_results)-1,-1,-1):
-                    state.batch_results[i]["done_epochs"] = cfg.max_epochs
-
                     # Remove item if have found a solution or reached final epoch
                     have_inverted = torch.equal(state.batch_results[i]["true_outputs"].detach(), disc_pred_logits[i].argmax(dim=-1).to("cpu").detach())
                     if have_inverted:
@@ -226,6 +229,8 @@ def pia_search(cfg, model, device="cuda"):
     if os.path.exists(state_path):
         print("LOADING STATE")
         state = torch.load(state_path, weights_only=False)
+        if len(state.batch_results) > 0:
+            done_epochs = state.batch_results[-1]["done_epochs"]
     else:
         print("INITIALISING STATE")
         state = DotDict({
@@ -319,6 +324,9 @@ def pia_search(cfg, model, device="cuda"):
             state.pred_embed = torch.clamp(state.pred_embed, min=embed_min, max=embed_max)
             
             done_epochs += 1
+            for i in range(len(state.batch_results)-1,-1,-1):
+                state.batch_results[i]["done_epochs"] += 1
+            
             if done_epochs == cfg.max_epochs:
                 ############### STAGE 2: Adaptive discretisation ###############
                 batch_size, seq_len, d_model = pred_embed.shape
@@ -365,8 +373,6 @@ def pia_search(cfg, model, device="cuda"):
                 # Update results and clear batch
                 disc_pred_logits = model(pred_tokens)[:,-1,:]
                 for i in range(len(state.batch_results)-1,-1,-1):
-                    state.batch_results[i]["done_epochs"] = cfg.max_epochs
-
                     have_inverted = torch.allclose(state.true_logits[i], disc_pred_logits[i], atol=1e-4, rtol=1e-4)
                     if have_inverted:
                         state.batch_results[i]["found_solution"] = True
