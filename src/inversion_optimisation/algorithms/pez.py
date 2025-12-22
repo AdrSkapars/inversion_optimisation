@@ -17,6 +17,10 @@ def pez_text_search(cfg, model, device="cuda"):
     if cfg.target_strategy == "random":
         with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
+    elif cfg.target_strategy == "privacy":
+        # Privacy dataset only allows num_targets == 500 currently
+        privacy_ds = load_dataset("AdrSkapars/pii-inversion-test-5k", split=f"length_{cfg.input_len}")
+        loaded_true_tokens = torch.cat([torch.tensor(item["tokens"]).to(torch.int64).unsqueeze(0) for item in privacy_ds], dim=0).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
@@ -188,6 +192,10 @@ def pez_search(cfg, model, device="cuda"):
     if cfg.target_strategy == "random":
         with open(DATA_PATH / f"true_tokens_{cfg.num_targets}_{cfg.input_len}.pkl", 'rb') as file:
             loaded_true_tokens = pickle.load(file).to("cpu")
+    elif cfg.target_strategy == "privacy":
+        # Privacy dataset only allows num_targets == 500 currently
+        privacy_ds = load_dataset("AdrSkapars/pii-inversion-test-5k", split=f"length_{cfg.input_len}")
+        loaded_true_tokens = torch.cat([torch.tensor(item["tokens"]).to(torch.int64).unsqueeze(0) for item in privacy_ds], dim=0).to("cpu")
     else:
         loaded_true_tokens = load_dataset_tokens(cfg.target_strategy, cfg.input_len, cfg.num_targets, include_bos=False, random_sentence=True, random_start=False, model=model)
 
