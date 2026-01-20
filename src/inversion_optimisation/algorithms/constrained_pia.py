@@ -68,7 +68,7 @@ def pia_text_search(cfg, model, device="cuda"):
         start_time = time.time()
 
         # Checkpoint current progress if hour has passed
-        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 3):
+        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 1):
             print("\nSAVING STATE")
             state.checkpoint_elapsed_time = state.elapsed_time
             torch.save(state, state_path)
@@ -262,7 +262,7 @@ def pia_search(cfg, model, device="cuda"):
         start_time = time.time()
 
         # Checkpoint current progress if hour has passed
-        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 3):
+        if state.elapsed_time - state.checkpoint_elapsed_time > (3600 * 1):
             print("\nSAVING STATE")
             state.checkpoint_elapsed_time = state.elapsed_time
             torch.save(state, state_path)
