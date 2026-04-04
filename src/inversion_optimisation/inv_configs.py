@@ -397,6 +397,12 @@ ARCA_TEXT_CFG = DotDict({
     "model_name": "tiny-stories-33M",
 })
 
+REVERSE_MODEL_TEXT_CFG = DotDict({
+    "reverse_model_id" : "Corning/Reverse-Model-7B-348B",
+    "save_folder": "ReverseModel_TinyStories33M_text",
+    "model_name": "tiny-stories-33M",
+})
+
 ARCA_LOGITS_CFG = DotDict({
     "top_k" : 128,
     "num_grad_samples" : 10,
