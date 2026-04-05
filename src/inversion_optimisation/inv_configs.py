@@ -403,6 +403,27 @@ REVERSE_MODEL_TEXT_CFG = DotDict({
     "model_name": "tiny-stories-33M",
 })
 
+REVERSE_MODEL_LORA_TEXT_CFG = DotDict({
+    "reverse_model_id" : "Corning/Reverse-Model-7B-348B",
+    "lora_rank" : 32,
+    "lora_alpha" : 64,
+    "lora_dropout" : 0.05,
+    "num_epochs" : 2,
+    "batch_size" : 8,
+    "gradient_accumulation_steps" : 4,
+    "learning_rate" : 2e-4,
+    "warmup_ratio" : 0.05,
+    "max_length" : 128,
+    "val_split" : 0.05,
+    "train_seed" : 42,
+    "num_train_examples" : 100000,
+    "min_input_len" : 1,
+    "max_input_len" : 10,
+    "num_output_tokens" : 25,
+    "save_folder": "ReverseModelLoRA_TinyStories33M_text",
+    "model_name": "tiny-stories-33M",
+})
+
 ARCA_LOGITS_CFG = DotDict({
     "top_k" : 128,
     "num_grad_samples" : 10,
