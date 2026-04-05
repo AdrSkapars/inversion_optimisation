@@ -3,6 +3,7 @@ import time
 import pickle
 import os
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 from tqdm import tqdm
 
 from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH, get_paper_summary_stats_new
@@ -11,8 +12,8 @@ from inversion_optimisation.utils import load_dataset_tokens, DotDict, DATA_PATH
 # 'LEDOM' — a causal LM trained right-to-left on reversed token sequences
 
 
-def load_reverse_model(model_id="Corning/Reverse-Model-7B-348B", device="cuda"):
-    """Load the LEDOM reverse language model and tokenizer."""
+def load_reverse_model(model_id="Corning/Reverse-Model-7B-348B", lora_path=None, device="cuda"):
+    """Load the LEDOM reverse language model and tokenizer, optionally with a LoRA adapter."""
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, use_fast=False, trust_remote_code=True
     )
@@ -20,7 +21,12 @@ def load_reverse_model(model_id="Corning/Reverse-Model-7B-348B", device="cuda"):
         model_id,
         device_map="auto",
         torch_dtype=torch.bfloat16,
-    ).eval()
+    )
+
+    if lora_path is not None:
+        rev_model = PeftModel.from_pretrained(rev_model, lora_path)
+
+    rev_model = rev_model.eval()
     return rev_model, tokenizer
 
 
@@ -100,9 +106,10 @@ def reverse_model_text_search(cfg, model, device="cuda"):
     with open(true_tokens_loc, 'rb') as file:
         loaded_true_outputs = pickle.load(file).to("cpu")
 
-    # Load the reverse model
+    # Load the reverse model (with optional LoRA adapter)
     model_id = cfg.get("reverse_model_id", "Corning/Reverse-Model-7B-348B")
-    rev_model, rev_tokenizer = load_reverse_model(model_id, device)
+    lora_path = cfg.get("lora_path", None)
+    rev_model, rev_tokenizer = load_reverse_model(model_id, lora_path=lora_path, device=device)
 
     # Run inversion
     results = []
