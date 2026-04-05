@@ -228,6 +228,8 @@ def train_reverse_model_lora(
     warmup_ratio=0.05,
     max_length=128,
     val_split=0.05,
+    logging_steps=50,
+    max_steps=-1,
     seed=42,
 ):
     """
@@ -247,6 +249,8 @@ def train_reverse_model_lora(
         warmup_ratio: Warmup ratio
         max_length: Max sequence length for training
         val_split: Fraction of data for validation
+        logging_steps: Log training loss every N steps
+        max_steps: Stop after N steps (-1 for full epochs)
         seed: Random seed
 
     Returns:
@@ -287,6 +291,7 @@ def train_reverse_model_lora(
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
+        max_steps=max_steps,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -294,11 +299,11 @@ def train_reverse_model_lora(
         warmup_ratio=warmup_ratio,
         weight_decay=0.01,
         bf16=True,
-        logging_steps=50,
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        logging_steps=logging_steps,
+        eval_strategy="epoch" if max_steps == -1 else "no",
+        save_strategy="epoch" if max_steps == -1 else "no",
         save_total_limit=2,
-        load_best_model_at_end=True,
+        load_best_model_at_end=True if max_steps == -1 else False,
         metric_for_best_model="eval_loss",
         seed=seed,
         report_to="none",
