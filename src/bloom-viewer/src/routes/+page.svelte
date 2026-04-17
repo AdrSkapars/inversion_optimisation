@@ -164,6 +164,29 @@
 	
 	let totalTranscriptCount = $derived(allTranscripts.length);
 
+	const qualityCols = [
+		{ key: 'meta_diversity', label: 'Diversity', invert: false },
+		{ key: 'average_unrealism', label: 'Unrealism', invert: true },
+		{ key: 'average_bugs', label: 'Bugs', invert: true },
+		{ key: 'average_evaluation_invalidity', label: 'Invalidity', invert: true },
+	];
+
+	function getSuiteRounds(suite: any) {
+		return (suite.subRows || [])
+			.filter((c: any) => c.type === 'folder' && /^round_(\d+)$/.test(c.name))
+			.map((c: any) => ({
+				number: parseInt(c.name.match(/^round_(\d+)$/)?.[1] ?? '0'),
+				path: c.path,
+				transcriptCount: c.transcriptCount || 0,
+				judgment: getJudgmentData(c.path),
+			}))
+			.sort((a: any, b: any) => a.number - b.number);
+	}
+
+	function getActiveCols(rounds: any[]) {
+		return qualityCols.filter(col => rounds.some(r => r.judgment?.summaryStatistics?.[col.key] != null));
+	}
+
 	function handleTranscriptSelect(transcript: any) {
 		// Use the file path directly from transcript metadata and prefix with currentPath if present
 		const filePath = transcript._filePath || '';
@@ -376,6 +399,62 @@
 											metajudgmentJustification={suiteJudgment.metajudgmentJustification}
 										/>
 									{/if}
+
+									<!-- Nested rounds table (when suite contains round_N subfolders) -->
+									{#if getSuiteRounds(suite).length >= 2}
+										{#each [getSuiteRounds(suite)] as suiteRounds}
+											{#each [getActiveCols(suiteRounds)] as suiteQualityCols}
+												<div class="bg-base-200 rounded-lg p-3">
+													<h4 class="font-semibold mb-2 text-sm">Iterative Refinement</h4>
+													<div class="overflow-x-auto">
+														<table class="table table-xs">
+															<thead>
+																<tr>
+																	<th>Round</th>
+																	<th>N</th>
+																	<th>Avg Score</th>
+																	<th>Elicit %</th>
+																	{#each suiteQualityCols as col}<th>{col.label}</th>{/each}
+																</tr>
+															</thead>
+															<tbody>
+																{#each suiteRounds as round}
+																	{@const stats = round.judgment?.summaryStatistics}
+																	{@const avgScore = stats?.average_behavior_presence_score}
+																	{@const rate = stats?.elicitation_rate}
+																	<tr>
+																		<td class="font-medium">R{round.number}</td>
+																		<td>{round.transcriptCount}</td>
+																		<td>
+																			{#if avgScore !== undefined}
+																				<span class="badge badge-sm" style={getScoreColorContinuous(avgScore)}>{avgScore.toFixed(1)}</span>
+																			{:else}<span class="text-base-content/50">—</span>{/if}
+																		</td>
+																		<td>
+																			{#if rate !== undefined}
+																				<span class="badge badge-sm" style={getScoreColorContinuous(rate * 10)}>{(rate * 100).toFixed(1)}%</span>
+																			{:else}<span class="text-base-content/50">—</span>{/if}
+																		</td>
+																		{#each suiteQualityCols as col}
+																			{@const val = stats?.[col.key]}
+																			<td>
+																				{#if val != null}
+																					<span class="badge badge-sm" style={getScoreColorContinuous(col.invert ? 10 - val : val)}>
+																						{typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(1) : val}
+																					</span>
+																				{:else}<span class="text-base-content/50">—</span>{/if}
+																			</td>
+																		{/each}
+																	</tr>
+																{/each}
+															</tbody>
+														</table>
+													</div>
+												</div>
+											{/each}
+										{/each}
+									{/if}
+
 									{#each (suite.subRows || []) as config}
 										{#if config.type === 'folder'}
 											{@const auditorModelShort = config.auditorModel?.split('/').pop() || 'Unknown'}
