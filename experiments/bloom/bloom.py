@@ -1970,7 +1970,7 @@ judge_model = "openrouter/google/gemma-3-27b-it"
 # judge_model = "openrouter/openai/gpt-5-nano"
 
 cfg = DotDict({
-    "folder_name": "runs_2",
+    "folder_name": "runs_3",
     # "folder_name": "runs/iterate_scenarios", ############################################################################ <---------
     
     "behavior_name": "racial-bias",
@@ -1989,8 +1989,8 @@ cfg = DotDict({
     },
     "ideation": {
         "model": judge_model,
-        "num_scenarios": 50,
-        "max_tokens": 50000,
+        "num_scenarios": 100,
+        "max_tokens": 120000,
     },
     "rollout": {
         "model": judge_model,
@@ -2118,13 +2118,10 @@ if __name__ == "__main__":
 
     base_folder = cfg.get("folder_name", "runs/default")
 
-    # --- Grid search over all feedback_type × insert_location combinations ---
-    num_rounds = 3
+    # --- Grid search over specific combinations ---
+    # num_rounds = 3
     top_k = 5
     bottom_k = 5
-
-    feedback_types  = ["transcripts", "scenarios", "summaries", "metajudge"]
-    insert_locations = ["understanding", "ideation", "rollout"]
 
     location_key_map = {
         "understanding": "behavior_understanding_additional",
@@ -2132,49 +2129,66 @@ if __name__ == "__main__":
         "rollout":       "rollout_system_additional",
     }
 
+    combinations = [
+        {"feedback_type": "transcripts", "insert_location": "understanding", "num_scenarios": 100, "hey":3},
+        {"feedback_type": "transcripts", "insert_location": "understanding", "num_scenarios": 150, "hey":2},
+        {"feedback_type": "transcripts", "insert_location": "understanding", "num_scenarios": 300, "hey":1},
+    ]
+
     had_error = False
 
-    for feedback_type in feedback_types:
-        for insert_location in insert_locations:
-            combo_name = f"{feedback_type}_{insert_location}"
-            combo_folder = f"{base_folder}/{combo_name}"
-            location_key = location_key_map[insert_location]
-            original_additional = cfg.get(location_key, "")
+    for combo in combinations:
+        num_rounds = combo["hey"]
+        
+        feedback_type = combo["feedback_type"]
+        insert_location = combo["insert_location"]
+        num_scenarios = combo["num_scenarios"]
+        combo_name = f"{feedback_type}_{insert_location}_{num_scenarios}"
+        combo_folder = f"{base_folder}/{combo_name}"
+        location_key = location_key_map[insert_location]
+        original_additional = cfg.get(location_key, "")
 
-            print("\n" + "=" * 60, flush=True)
-            print(f"# COMBINATION: {combo_name}", flush=True)
-            print("=" * 60, flush=True)
+        print("\n" + "=" * 60, flush=True)
+        print(f"# COMBINATION: {combo_name}", flush=True)
+        print("=" * 60, flush=True)
 
-            for round_num in range(1, num_rounds + 1):
-                print("\n" + "#" * 60, flush=True)
-                print(f"# ROUND {round_num}/{num_rounds}  [{feedback_type} → {insert_location}]", flush=True)
-                print("#" * 60, flush=True)
+        combo_folder = f"{base_folder}/{combo_name}"
+        location_key = location_key_map[insert_location]
+        original_additional = cfg.get(location_key, "")
+        original_num_scenarios = cfg.ideation.get("num_scenarios")
+        cfg.ideation["num_scenarios"] = num_scenarios
 
-                cfg.folder_name = f"{combo_folder}/round_{round_num}"
+        for round_num in range(1, num_rounds + 1):
+            print("\n" + "#" * 60, flush=True)
+            print(f"# ROUND {round_num}/{num_rounds}  [{feedback_type} → {insert_location}, {num_scenarios} scenarios]", flush=True)
+            print("#" * 60, flush=True)
 
-                if round_num > 1:
-                    prev_dir = (SCRIPT_DIR / combo_folder / f"round_{round_num - 1}").resolve()
-                    feedback = _build_iterative_feedback(prev_dir, feedback_type, top_k, bottom_k)
-                    if feedback:
-                        cfg[location_key] = original_additional + ("\n\n" if original_additional else "") + feedback
-                        print(f"  Injected {feedback_type} feedback (top={top_k}, bottom={bottom_k}) into {insert_location}", flush=True)
-                    else:
-                        print(f"  No feedback available from round {round_num - 1}, continuing without", flush=True)
+            cfg.folder_name = f"{combo_folder}/round_{round_num}"
 
-                result = run_pipeline(cfg)
-
-                if result:
-                    stats = result.get("summary_statistics", {})
-                    avg = stats.get("average_behavior_presence_score", 0)
-                    rate = stats.get("elicitation_rate", 0)
-                    print(f"\n  Round {round_num}: avg={avg:.2f}, elicitation_rate={rate:.2f}", flush=True)
+            if round_num > 1:
+                prev_dir = (SCRIPT_DIR / combo_folder / f"round_{round_num - 1}").resolve()
+                feedback = _build_iterative_feedback(prev_dir, feedback_type, top_k, bottom_k)
+                if feedback:
+                    cfg[location_key] = original_additional + ("\n\n" if original_additional else "") + feedback
+                    print(f"  Injected {feedback_type} feedback (top={top_k}, bottom={bottom_k}) into {insert_location}", flush=True)
                 else:
-                    print(f"\n  Round {round_num} FAILED", flush=True)
-                    had_error = True
-                    break
+                    print(f"  No feedback available from round {round_num - 1}, continuing without", flush=True)
 
-            # Reset the modified additional back to original before next combination
-            cfg[location_key] = original_additional
+            result = run_pipeline(cfg)
+
+            if result:
+                stats = result.get("summary_statistics", {})
+                avg = stats.get("average_behavior_presence_score", 0)
+                rate = stats.get("elicitation_rate", 0)
+                print(f"\n  Round {round_num}: avg={avg:.2f}, elicitation_rate={rate:.2f}", flush=True)
+            else:
+                print(f"\n  Round {round_num} FAILED", flush=True)
+                had_error = True
+                break
+
+        # Reset cfg back to original before next combination
+        cfg[location_key] = original_additional
+        cfg.ideation["num_scenarios"] = original_num_scenarios
 
     # Launch viewer pointing at base_folder (contains all combo subfolders)
     if not had_error:
