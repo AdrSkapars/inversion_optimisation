@@ -88,8 +88,16 @@
 
 	// Extract all unique score types for table columns
 	let scoreTypes = $derived.by(() => {
-		const result = [...new Set(allTranscripts.flatMap(t => Object.keys(t.scores || {})))].sort();
-		return result;
+		const all = [...new Set(allTranscripts.flatMap(t => Object.keys(t.scores || {})))];
+		// Fixed priority: behavior_presence first, logprob scores last, rest alphabetically in between
+		const first = ['behavior_presence'];
+		const last = ['avg_logprob'];
+		const middle = all.filter(k => !first.includes(k) && !last.includes(k)).sort();
+		return [
+			...first.filter(k => all.includes(k)),
+			...middle,
+			...last.filter(k => all.includes(k)),
+		];
 	});
 
 	// Collect score descriptions from all transcripts for tooltips
@@ -137,17 +145,18 @@
 		rounds.sort((a, b) => a.number - b.number);
 		return rounds;
 	});
-	let hasRounds = $derived(roundSuites.length >= 2);
+	let hasRounds = $derived(roundSuites.length >= 1);
 
 	// Detect which optional quality columns are present across all rounds
 	let roundQualityColumns = $derived.by(() => {
-		const possible: { key: string; label: string; invert: boolean }[] = [
+		const possible: { key: string; label: string; invert: boolean; raw?: boolean }[] = [
 			{ key: 'meta_diversity', label: 'Diversity', invert: false },
 			{ key: 'average_unrealism', label: 'Unrealism', invert: true },
 			{ key: 'average_bugs', label: 'Bugs', invert: true },
 			{ key: 'average_evaluation_invalidity', label: 'Invalidity', invert: true },
 			{ key: 'average_evaluation_awareness', label: 'Awareness', invert: true },
 			{ key: 'average_elicitation_difficulty', label: 'Difficulty', invert: false },
+			{ key: 'mean_avg_logprob', label: 'Avg Logprob', invert: false, raw: true },
 		];
 		return possible.filter(col =>
 			roundSuites.some(r => {
@@ -169,6 +178,7 @@
 		{ key: 'average_unrealism', label: 'Unrealism', invert: true },
 		{ key: 'average_bugs', label: 'Bugs', invert: true },
 		{ key: 'average_evaluation_invalidity', label: 'Invalidity', invert: true },
+		{ key: 'mean_avg_logprob', label: 'Avg Logprob', invert: false, raw: true },
 	];
 
 	function getSuiteRounds(suite: any) {
@@ -342,9 +352,15 @@
 												{@const val = stats?.[col.key]}
 												<td>
 													{#if val !== undefined && val !== null}
-														<span class="badge badge-sm" style={getScoreColorContinuous(col.invert ? 10 - val : val)}>
-															{typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(1) : val}{col.key.startsWith('meta_') ? '/10' : ''}
-														</span>
+														{#if col.raw}
+															<span class="badge badge-sm font-mono">
+																{typeof val === 'number' ? val.toFixed(3) : val}
+															</span>
+														{:else}
+															<span class="badge badge-sm" style={getScoreColorContinuous(col.invert ? 10 - val : val)}>
+																{typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(1) : val}{col.key.startsWith('meta_') ? '/10' : ''}
+															</span>
+														{/if}
 													{:else}
 														<span class="text-base-content/50">—</span>
 													{/if}
@@ -401,7 +417,7 @@
 									{/if}
 
 									<!-- Nested rounds table (when suite contains round_N subfolders) -->
-									{#if getSuiteRounds(suite).length >= 2}
+									{#if getSuiteRounds(suite).length >= 1}
 										{#each [getSuiteRounds(suite)] as suiteRounds}
 											{#each [getActiveCols(suiteRounds)] as suiteQualityCols}
 												<div class="bg-base-200 rounded-lg p-3">
@@ -439,9 +455,15 @@
 																			{@const val = stats?.[col.key]}
 																			<td>
 																				{#if val != null}
-																					<span class="badge badge-sm" style={getScoreColorContinuous(col.invert ? 10 - val : val)}>
-																						{typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(1) : val}
-																					</span>
+																					{#if col.raw}
+																						<span class="badge badge-sm font-mono">
+																							{typeof val === 'number' ? val.toFixed(3) : val}
+																						</span>
+																					{:else}
+																						<span class="badge badge-sm" style={getScoreColorContinuous(col.invert ? 10 - val : val)}>
+																							{typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(1) : val}
+																						</span>
+																					{/if}
 																				{:else}<span class="text-base-content/50">—</span>{/if}
 																			</td>
 																		{/each}

@@ -106,7 +106,8 @@ export function createColumns(scoreTypes: string[], data: TableRow[] = [], score
       cell: ({ row, getValue }) => {
         if (row.original.type === 'folder') return '';
         const score = getValue() as number;
-        return score !== undefined ? `${score}/10` : '';
+        if (score === undefined) return '';
+        return scoreType.includes('logprob') ? score.toFixed(3) : `${score}/10`;
       },
       enableSorting: true,
       enableResizing: true,

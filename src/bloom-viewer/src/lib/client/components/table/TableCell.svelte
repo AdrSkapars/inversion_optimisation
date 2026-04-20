@@ -159,8 +159,9 @@
       {#if cellValue !== null && cellValue !== undefined && cellValue !== '—'}
         {@const score = typeof cellValue === 'string' ? parseFloat(cellValue) : cellValue}
         {#if !isNaN(score)}
-          <span class="badge badge-sm font-mono break-words" style={getScoreColorContinuous(score)}>
-            {score}/10
+          {@const isLogprob = cell.column.id.includes('logprob')}
+          <span class="badge badge-sm font-mono break-words" style={isLogprob ? '' : getScoreColorContinuous(score)}>
+            {isLogprob ? score.toFixed(3) : `${score}/10`}
           </span>
         {:else}
           <span class="text-base-content/50 break-words">—</span>
