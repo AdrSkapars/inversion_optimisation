@@ -14,6 +14,7 @@ interface BloomMessage {
   content: string;
   source?: string;
   reasoning?: string;
+  targeted_response_start?: string;
 }
 
 interface BloomTranscript {
@@ -168,6 +169,10 @@ export function convertBloomTranscript(data: any): any {
 
   for (const msg of messages) {
     const source = msg.source || '';
+
+    // Skip target_system messages — already added above from meta.target_system_prompt
+    if (source === 'target_system') continue;
+
     let view: string[];
     if (source === 'evaluator') {
       view = ['evaluator', 'combined'];
@@ -194,6 +199,9 @@ export function convertBloomTranscript(data: any): any {
     };
     if (source === 'target' && msg.role === 'assistant') {
       eventMessage.model = targetModel;
+    }
+    if (msg.targeted_response_start) {
+      eventMessage.metadata = { targeted_response_start: msg.targeted_response_start };
     }
 
     events.push({

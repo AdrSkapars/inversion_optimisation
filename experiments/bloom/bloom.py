@@ -1974,6 +1974,7 @@ cfg = DotDict({
     # "folder_name": "runs/iterate_scenarios", ############################################################################ <---------
     
     "behavior_name": "racial-bias",
+    "prompt_preset": "racial-bias-v1",
     "examples": [],  # List of example dicts [{conversation: [{role, content}]}]
     "temperature": 1.0,
     "evaluator_reasoning_effort": "none",
@@ -2006,9 +2007,6 @@ cfg = DotDict({
         "additional_qualities": ["unrealism", "bugs"],
         "metajudgment_qualities": ["diversity"],
     },
-
-    # Prompt preset name (from prompt_presets in prompts.yaml) — set to "" for no overrides
-    "prompt_preset": "racial-bias-v1",
 })
 
 

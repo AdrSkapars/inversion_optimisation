@@ -527,10 +527,25 @@
 <!-- User Message Snippet -->
 {#snippet userMessage(message: UserMessage)}
   {@const textContent = extractTextFromContent(message.content)}
+  {@const targetedResponseStart = (message as any).metadata?.targeted_response_start ?? null}
   {#if textContent !== null}
     <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html highlightPlainText(textContent)}</span>
   {:else}
     <JsonViewer value={message.content} theme={$themeString} inlineShortContainers={80} />
+  {/if}
+  {#if targetedResponseStart}
+    <div class="mt-3 p-3 rounded-lg bg-amber-50/60 dark:bg-amber-950/25 border border-dashed border-amber-300 dark:border-amber-700/50">
+      <div class="flex items-center gap-1.5 mb-1.5">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 flex-shrink-0">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+        </svg>
+        <span class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">Evaluator's target response <span class="font-normal normal-case">(not what the model said)</span></span>
+      </div>
+      <div class="text-sm text-amber-900 dark:text-amber-100 whitespace-pre-wrap leading-relaxed italic">
+        {@html highlightPlainText(targetedResponseStart)}
+      </div>
+    </div>
   {/if}
 {/snippet}
 
