@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import traceback
 import webbrowser
 from datetime import datetime
@@ -128,6 +129,17 @@ def litellm_chat(
     **kwargs,
 ):
     """Simplified LiteLLM chat completion call with retries."""
+    # Dispatch to local model if model_id starts with "local/"
+    if model_id.startswith("local/"):
+        hf_name = model_id[len("local/"):]
+        all_messages = []
+        if system_prompt:
+            all_messages.append({"role": "system", "content": system_prompt})
+        all_messages.extend(messages)
+        temp = temperature if temperature is not None else DEFAULT_TEMPERATURE
+        text = local_chat(hf_name, all_messages, max_tokens=max_tokens, temperature=temp)
+        return _make_local_response(text)
+
     # Temperature validation for extended thinking
     if reasoning_effort and reasoning_effort != "none":
         assert temperature is None or temperature == DEFAULT_TEMPERATURE, (
@@ -221,15 +233,20 @@ def parse_message(response) -> Dict[str, Any]:
             result["content"] = content
             cleaned_content = content
 
-            # Check for XML-style thinking tags
-            if isinstance(content, str) and "<thinking>" in content and "</thinking>" in content:
-                thinking_matches = re.findall(r"<thinking>(.*?)</thinking>", content, re.DOTALL)
-                if thinking_matches:
-                    result["reasoning"] = "\n".join(thinking_matches)
-                    result["content"] = re.sub(
-                        r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL
-                    ).strip()
-                    cleaned_content = result["content"]
+            # Check for XML-style thinking tags (<thinking> = Anthropic, <think> = Qwen3/local)
+            if isinstance(content, str):
+                for open_tag, close_tag in [("<thinking>", "</thinking>"), ("<think>", "</think>")]:
+                    if open_tag in content and close_tag in content:
+                        pattern = re.escape(open_tag) + r"(.*?)" + re.escape(close_tag)
+                        thinking_matches = re.findall(pattern, content, re.DOTALL)
+                        if thinking_matches:
+                            result["reasoning"] = "\n".join(thinking_matches)
+                            result["content"] = re.sub(
+                                re.escape(open_tag) + r".*?" + re.escape(close_tag),
+                                "", content, flags=re.DOTALL
+                            ).strip()
+                            cleaned_content = result["content"]
+                        break
 
             cleaned_message["content"] = cleaned_content
 
@@ -323,6 +340,152 @@ def calculate_batch_size(
 
 
 # =============================================================================
+# Section 4.5: Local Model Support
+# =============================================================================
+
+# Threading lock — serialises all GPU inference calls since CUDA is not
+# thread-safe. bloom uses a thread-pool executor for parallel API calls;
+# local models must go one at a time through this lock.
+_LOCAL_INFERENCE_LOCK = threading.Lock()
+
+# Registry: hf_model_name → LocalModel instance (loaded once, kept in memory)
+_LOCAL_MODEL_REGISTRY: Dict[str, Any] = {}
+
+
+class LocalModel:
+    """Wraps a HuggingFace model + tokenizer loaded onto the local device."""
+
+    def __init__(self, hf_name: str):
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError:
+            raise ImportError(
+                "Local model support requires: pip install torch transformers accelerate"
+            )
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+        print(f"[local] Loading {hf_name} on {device} ({dtype})...", flush=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            hf_name,
+            device_map=device,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        self.model.eval()
+        self.device = device
+        self.torch = torch
+        print(f"[local] {hf_name} ready.", flush=True)
+
+
+def _get_local_model(hf_name: str) -> "LocalModel":
+    """Return the cached LocalModel, loading it on first call."""
+    if hf_name not in _LOCAL_MODEL_REGISTRY:
+        _LOCAL_MODEL_REGISTRY[hf_name] = LocalModel(hf_name)
+    return _LOCAL_MODEL_REGISTRY[hf_name]
+
+
+def _make_local_response(text: str):
+    """Wrap a plain string in a mock object that parse_message() accepts."""
+    import types
+    msg = types.SimpleNamespace(role="assistant", content=text)
+    choice = types.SimpleNamespace(message=msg)
+    return types.SimpleNamespace(choices=[choice])
+
+
+def local_chat(
+    hf_name: str,
+    messages: List[Dict],
+    max_tokens: int = 4000,
+    temperature: float = 1.0,
+) -> str:
+    """
+    Run a chat completion locally using a HuggingFace model.
+    Returns the raw generated text (may contain <think> tags for reasoning models).
+    Thread-safe via _LOCAL_INFERENCE_LOCK.
+    """
+    lm = _get_local_model(hf_name)
+    torch = lm.torch
+
+    # Apply the model's own chat template — handles Llama, Qwen, Mistral, etc.
+    prompt = lm.tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    with _LOCAL_INFERENCE_LOCK:
+        inputs = lm.tokenizer(prompt, return_tensors="pt").to(lm.device)
+        n_input = inputs["input_ids"].shape[1]
+
+        with torch.no_grad():
+            out = lm.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=max(temperature, 1e-6),
+                do_sample=temperature > 1e-4,
+                pad_token_id=lm.tokenizer.pad_token_id,
+            )
+
+        generated_ids = out[0, n_input:]
+        # skip_special_tokens=False so <think> tags are preserved for parse_message
+        return lm.tokenizer.decode(generated_ids, skip_special_tokens=False)
+
+
+def local_logprob(
+    hf_name: str,
+    context_messages: List[Dict],
+    target_text: str,
+) -> Optional[float]:
+    """
+    Exact teacher-forced average log-prob of target_text given context_messages.
+    Uses a single forward pass — much more reliable than the API echo trick.
+    Thread-safe via _LOCAL_INFERENCE_LOCK.
+    """
+    lm = _get_local_model(hf_name)
+    torch = lm.torch
+
+    # Format context with the model's chat template, including the generation
+    # prompt so the model is in the right state to predict the assistant response.
+    context_str = lm.tokenizer.apply_chat_template(
+        context_messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
+    target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
+
+    if not target_ids:
+        return None
+
+    full_ids = context_ids + target_ids
+
+    with _LOCAL_INFERENCE_LOCK:
+        input_tensor = torch.tensor([full_ids], dtype=torch.long, device=lm.device)
+        with torch.no_grad():
+            logits = lm.model(input_tensor).logits  # [1, seq_len, vocab]
+        log_probs = torch.log_softmax(logits[0], dim=-1)  # [seq_len, vocab]
+
+    # Position i in logits predicts token i+1.
+    # Target tokens start at index n_ctx in full_ids, so they are predicted
+    # by positions n_ctx-1 .. n_ctx+n_target-2 in logits.
+    n_ctx = len(context_ids)
+    target_lps = []
+    for i, tok_id in enumerate(target_ids):
+        pred_pos = n_ctx - 1 + i  # logit position that predicts this target token
+        target_lps.append(log_probs[pred_pos, tok_id].item())
+
+    return sum(target_lps) / len(target_lps)
+
+
+# =============================================================================
 # Section 5: Prompt Builders
 # =============================================================================
 def _get_override(prompts_yaml: Dict, key: str) -> str:
@@ -350,7 +513,7 @@ def build_behavior_understanding_prompt(behavior_name: str, description: str, pr
 
 def build_transcript_analysis_prompt(
     behavior_name: str, behavior_understanding: str, scientific_motivation: str,
-    transcript: str, example_name: str, prompts_yaml: Dict
+    transcript: str, prompts_yaml: Dict
 ) -> str:
     prompt = prompts_yaml["transcript_analysis_prompt"].format(
         behavior_name=behavior_name,
@@ -822,7 +985,7 @@ def run_understanding(cfg: DotDict, prompts_yaml: Dict, output_dir: Path) -> Dic
 
         analysis_prompt = build_transcript_analysis_prompt(
             behavior_name, understanding, scientific_motivation,
-            transcript_text, f"example_{i+1}", prompts_yaml
+            transcript_text, prompts_yaml
         )
         messages.append({"role": "user", "content": analysis_prompt})
 
@@ -1060,8 +1223,7 @@ class ConversationOrchestrator:
         content = parsed["content"] or ""
 
         # Add to evaluator history (full response with tags stays in evaluator context)
-        message = response["choices"][0]["message"]
-        self.evaluator_messages.append(message)
+        self.evaluator_messages.append(parsed["cleaned_message"])
 
         # Extract message and targeted response start from tagged output
         message_match = re.search(r"<message>(.*?)</message>", content, re.DOTALL)
@@ -1104,8 +1266,7 @@ class ConversationOrchestrator:
         reasoning = parsed["reasoning"]
 
         # Add to target history
-        message = response["choices"][0]["message"]
-        self.target_messages.append(message)
+        self.target_messages.append(parsed["cleaned_message"])
 
         # Add to transcript
         msg = {"role": "assistant", "content": content, "source": "target"}
@@ -2138,11 +2299,14 @@ def score_sequence_logprob(
     """
     Compute average log-prob per token of target_text given context_messages.
 
-    Uses the text completion endpoint with echo=True so every input token's
-    log-prob is returned, including the forced target_text tokens.
-    Requires a provider that supports echo on completions (e.g. together_ai/).
+    For local/ models: exact forward-pass teacher forcing (always works).
+    For API models: uses text completion endpoint with echo=True (Together AI base models only).
     Returns None if scoring fails or the provider doesn't support it.
     """
+    # Dispatch to exact local logprob if using a local model
+    if model_id.startswith("local/"):
+        return local_logprob(model_id[len("local/"):], context_messages, target_text)
+
     # Build a plain-text prompt from context messages.
     # A simple universal template is used; scores are meaningful relative to
     # each other within a run (same model + same format = comparable).
@@ -2451,9 +2615,6 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
         print(f'  $env:TRANSCRIPT_DIR = "{results_dir.resolve()}"', flush=True)
         print(f"  npm run dev", flush=True)
 
-
-
-
 # =============================================================================
 # Section 11: Config & Main
 # =============================================================================
@@ -2471,7 +2632,7 @@ target_model = "openrouter/qwen/qwen3-8b"
 # target_model = "together_ai/google/gemma-4-31B-it"
 
 cfg = DotDict({
-    "folder_name": "runs_5/mistral_target_response", ############################################################################ <---------
+    "folder_name": "runs_5/mistral_target_response",
     
     "behavior_name": "racial-bias",
     "prompt_preset": "racial-bias-v1",
@@ -2521,7 +2682,7 @@ if __name__ == "__main__":
     # viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
     # env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_5")}
     # subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
-    
+
     # Load behavior description and prompt preset from prompts.yaml
     _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
 
