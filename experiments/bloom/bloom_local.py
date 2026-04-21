@@ -3381,7 +3381,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_6_local/base_gemma_qwen",
+    "folder_name": "runs_6_local/base_gemma_qwen_short",
     
     "behavior_name": "racial-bias",
     "prompt_preset": "racial-bias-v1",
@@ -3402,13 +3402,13 @@ cfg = DotDict({
     },
     "ideation": {
         "model": judge_model,
-        "num_scenarios": 50,
-        "max_tokens": 50000,
+        "num_scenarios": 25, #50,
+        "max_tokens": 25000, #50000,
     },
     "rollout": {
         "model": judge_model,
         "target": target_model,
-        "max_turns": 2,
+        "max_turns": 1, #2,
         "max_tokens": 2000,
         "num_reps": 1,
     },
@@ -3416,9 +3416,9 @@ cfg = DotDict({
         "model": judge_model,
         "max_tokens": 2000,
         "num_samples": 1,
-        "additional_qualities": ["unrealism", "bugs"],
+        "additional_qualities": [], #["unrealism", "bugs"],
         "metajudgment_qualities": ["diversity"],
-        "metajudgment": True,  # Set to False to skip the metajudge step
+        "metajudgment": False, #True, # Set to False to skip the metajudge step
     },
     "logprob_scoring": {
         "enabled": True,
