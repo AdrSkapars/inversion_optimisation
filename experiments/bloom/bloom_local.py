@@ -428,10 +428,29 @@ def batch_generate_local(
             pad_token_id=pad_id,
         )
 
+    # Collect all EOS token ids from tokenizer + model config
+    eos_ids: set = set()
+    if lm.tokenizer.eos_token_id is not None:
+        eos_ids.add(lm.tokenizer.eos_token_id)
+    cfg_eos = getattr(lm.model.config, "eos_token_id", None)
+    if isinstance(cfg_eos, list):
+        eos_ids.update(cfg_eos)
+    elif cfg_eos is not None:
+        eos_ids.add(cfg_eos)
+
     results = []
     for i in range(len(tokenized)):
         # Slice off only the generated tokens (everything after the left-padded input)
         generated = out[i, max_len:]
+
+        # Truncate at first EOS token so it doesn't appear in decoded text.
+        # We still decode with skip_special_tokens=False to preserve <think> tags.
+        if eos_ids:
+            for j, tok_id in enumerate(generated.tolist()):
+                if tok_id in eos_ids:
+                    generated = generated[:j]
+                    break
+
         results.append(lm.tokenizer.decode(generated, skip_special_tokens=False))
     return results
 
@@ -761,6 +780,7 @@ def build_judgment_system(additional_qualities: List[str], quality_descriptions:
         qualities_text += f"{i}. {quality.replace('-', ' ').title()} (1-10): {desc}\n"
 
     base = prompts_yaml["judgment_system"].format(additional_qualities_text=qualities_text).strip()
+    base += "\n\nKeep your thinking brief — a few sentences at most. Get straight to the structured output."
     additional = _get_override(prompts_yaml, "judgment_system_additional")
     if additional:
         base += "\n\n" + additional.strip()
@@ -2280,9 +2300,11 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
         judgments.sort(key=lambda x: (x["variation_number"], x["repetition_number"]))
 
         # Meta-judgment
-        metajudgment_result = await run_metajudgment(
-            behavior_name, judgments, cfg, prompts_yaml, quality_descriptions, executor
-        )
+        metajudgment_result = None
+        if cfg.judgment.get("metajudgment", True):
+            metajudgment_result = await run_metajudgment(
+                behavior_name, judgments, cfg, prompts_yaml, quality_descriptions, executor
+            )
 
         # Statistics
         additional_qualities = cfg.judgment.get("additional_qualities", [])
@@ -2675,7 +2697,7 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
     """
     Stage 5: for every evaluator turn in every transcript in round_dir/transcripts/,
     score P(targeted_response_start | conversation context up to that turn).
-    Saves results to round_dir/logprob_scores.json.
+    Merges per-transcript avg_logprob and mean_avg_logprob summary into judgment.json.
     """
     lp_cfg = cfg.get("logprob_scoring", {})
     if not lp_cfg.get("enabled", False):
@@ -2777,9 +2799,6 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
         print(f"\n  Mean avg logprob: {summary['mean_avg_logprob']:.4f} "
               f"over {len(valid_scores)} turns", flush=True)
 
-    output = {"scores": results, "summary": summary}
-    save_json(output, round_dir / "logprob_scores.json")
-
     # --- Merge into judgment.json ---
     # Group per-turn scores by transcript name, average across turns per transcript
     from collections import defaultdict
@@ -2846,22 +2865,34 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     prompts_yaml = load_prompts(cfg)
 
     # Stage 1: Understanding
-    try:
-        understanding_results = run_understanding(cfg, prompts_yaml, output_dir)
-    except Exception as e:
-        print(f"\nERROR: Understanding stage failed: {e}", flush=True)
-        if DEBUG_MODE:
-            traceback.print_exc()
-        return None
+    understanding_path = output_dir / "understanding.json"
+    if understanding_path.exists():
+        print("UNDERSTANDING STAGE - skipped (understanding.json already exists)", flush=True)
+        with open(understanding_path, "r", encoding="utf-8") as f:
+            understanding_results = json.load(f)
+    else:
+        try:
+            understanding_results = run_understanding(cfg, prompts_yaml, output_dir)
+        except Exception as e:
+            print(f"\nERROR: Understanding stage failed: {e}", flush=True)
+            if DEBUG_MODE:
+                traceback.print_exc()
+            return None
 
     # Stage 2: Ideation
-    try:
-        ideation_results = run_ideation(cfg, prompts_yaml, output_dir, understanding_results)
-    except Exception as e:
-        print(f"\nERROR: Ideation stage failed: {e}", flush=True)
-        if DEBUG_MODE:
-            traceback.print_exc()
-        return None
+    ideation_path = output_dir / "ideation.json"
+    if ideation_path.exists():
+        print("IDEATION STAGE - skipped (ideation.json already exists)", flush=True)
+        with open(ideation_path, "r", encoding="utf-8") as f:
+            ideation_results = json.load(f)
+    else:
+        try:
+            ideation_results = run_ideation(cfg, prompts_yaml, output_dir, understanding_results)
+        except Exception as e:
+            print(f"\nERROR: Ideation stage failed: {e}", flush=True)
+            if DEBUG_MODE:
+                traceback.print_exc()
+            return None
 
     # Stage 3: Rollout
     try:
@@ -2960,6 +2991,7 @@ cfg = DotDict({
         "num_samples": 1,
         "additional_qualities": ["unrealism", "bugs"],
         "metajudgment_qualities": ["diversity"],
+        "metajudgment": True,  # Set to False to skip the metajudge step
     },
 
     "logprob_scoring": {
@@ -2972,7 +3004,7 @@ cfg = DotDict({
 if __name__ == "__main__":
     # # Just run viewer
     # viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
-    # env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_5")}
+    # env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_6_local")}
     # subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
 
     # Load behavior description and prompt preset from prompts.yaml
