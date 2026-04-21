@@ -2621,10 +2621,10 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 
 # judge_model = "claude-haiku-4.5"
 # judge_model = "openrouter/qwen/qwen3-8b"
-judge_model = "openrouter/google/gemma-3-27b-it"
+judge_model = "local/google/gemma-3-27b-it"
 # judge_model = "openrouter/openai/gpt-5-nano"
 
-target_model = "openrouter/qwen/qwen3-8b"
+target_model = "local/Qwen/Qwen3-4B"
 # target_model = "together_ai/Qwen/Qwen3.5-9B"
 # target_model = "together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo"
 # target_model = "together_ai/meta-llama/Meta-Llama-3-8B-Instruct-Lite"
@@ -2632,7 +2632,7 @@ target_model = "openrouter/qwen/qwen3-8b"
 # target_model = "together_ai/google/gemma-4-31B-it"
 
 cfg = DotDict({
-    "folder_name": "runs_5/mistral_target_response",
+    "folder_name": "runs_6_local/base",
     
     "behavior_name": "racial-bias",
     "prompt_preset": "racial-bias-v1",
