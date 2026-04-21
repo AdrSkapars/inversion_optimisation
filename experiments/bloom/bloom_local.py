@@ -3375,13 +3375,13 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 # Section 11: Config & Main
 # =============================================================================
 
-# judge_model = "local/google/gemma-3-27b-it"
-judge_model = "local/Qwen/Qwen3-4B"
+judge_model = "local/google/gemma-3-27b-it"
+# judge_model = "local/Qwen/Qwen3-4B"
 
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_6_local/base_qwenx2",
+    "folder_name": "runs_6_local/base_gemma_qwen",
     
     "behavior_name": "racial-bias",
     "prompt_preset": "racial-bias-v1",
@@ -3390,7 +3390,7 @@ cfg = DotDict({
     "evaluator_reasoning_effort": "none",
     "target_reasoning_effort": "none",
     "max_concurrent": 10,
-    "batch_size": 25,         # For local models: number of variations processed per forward pass
+    "batch_size": 5,         # For local models: number of variations processed per forward pass
     "anonymous_target": False,
     "debug": True,
     "refine_history_rounds": 1,  # None = all rounds, 0 = no history (fresh prompt), N = last N rounds
@@ -3420,7 +3420,6 @@ cfg = DotDict({
         "metajudgment_qualities": ["diversity"],
         "metajudgment": True,  # Set to False to skip the metajudge step
     },
-
     "logprob_scoring": {
         "enabled": True,
         "model": target_model,  # should match rollout.target
