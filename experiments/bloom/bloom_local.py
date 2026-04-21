@@ -396,22 +396,37 @@ def batch_generate_local(
     messages_list: List[List[Dict]],
     max_new_tokens: int,
     temperature: float,
+    no_think: bool = False,
 ) -> List[str]:
     """
     Run a batched generation pass for a list of conversations.
     Uses left-padding so all sequences end flush before generation begins.
     Returns one decoded string per conversation (may contain <think> tags).
+
+    no_think: if True, pre-fills <think>\\n\\n</think> after the generation prompt
+    so that thinking models (e.g. Qwen3) skip their reasoning phase entirely.
     """
     if not messages_list:
         return []
 
     torch = lm.torch
 
-    # Tokenize via the model's own chat template
-    tokenized = [
-        lm.tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True)
-        for msgs in messages_list
-    ]
+    # Tokenize via the model's own chat template.
+    # When no_think=True, append an empty thinking block to the prompt string so
+    # the model treats the thinking phase as already complete.
+    if no_think:
+        tokenized = []
+        for msgs in messages_list:
+            prompt = lm.tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True
+            )
+            prompt += "<think>\n\n</think>\n"
+            tokenized.append(lm.tokenizer.encode(prompt, add_special_tokens=False))
+    else:
+        tokenized = [
+            lm.tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True)
+            for msgs in messages_list
+        ]
 
     max_len = max(len(t) for t in tokenized)
     pad_id = lm.tokenizer.pad_token_id
@@ -1237,6 +1252,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
             [[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]],
             max_new_tokens=max_tokens,
             temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
+            no_think=reasoning_effort == "none",
         )[0]
         all_scenarios = parse_scenarios_response(raw)
         print(f"Got {len(all_scenarios)} scenarios (expected {num_scenarios})", flush=True)
@@ -1831,6 +1847,8 @@ def run_rollout_batched_local(
     max_tokens = cfg.rollout.get("max_tokens", 4000)
     batch_size = cfg.get("batch_size", 4)
     temperature = cfg.get("temperature", DEFAULT_TEMPERATURE)
+    no_think_eval = cfg.get("evaluator_reasoning_effort", "none") == "none"
+    no_think_target = cfg.get("target_reasoning_effort", "none") == "none"
 
     evaluator_model_id = cfg.rollout.model
     target_model_id = cfg.rollout.target
@@ -1890,7 +1908,7 @@ def run_rollout_batched_local(
                 {"role": "user", "content": rp},
             ])
 
-        setup_outputs = batch_generate_local(lm_eval, setup_inputs, max_tokens, temperature)
+        setup_outputs = batch_generate_local(lm_eval, setup_inputs, max_tokens, temperature, no_think=no_think_eval)
 
         # Initialise per-variation state
         states = []
@@ -1930,7 +1948,7 @@ def run_rollout_batched_local(
         for s in states:
             s["eval_msgs"].append({"role": "user", "content": kickoff_prompt})
 
-        kickoff_outputs = batch_generate_local(lm_eval, [s["eval_msgs"] for s in states], max_tokens, temperature)
+        kickoff_outputs = batch_generate_local(lm_eval, [s["eval_msgs"] for s in states], max_tokens, temperature, no_think=no_think_eval)
 
         for s, raw in zip(states, kickoff_outputs):
             parsed = parse_message(_make_local_response(raw))
@@ -1955,7 +1973,7 @@ def run_rollout_batched_local(
                 break
 
             # Target responds
-            target_outputs = batch_generate_local(lm_target, [s["target_msgs"] for s in active], max_tokens, temperature)
+            target_outputs = batch_generate_local(lm_target, [s["target_msgs"] for s in active], max_tokens, temperature, no_think=no_think_target)
 
             for s, raw in zip(active, target_outputs):
                 parsed = parse_message(_make_local_response(raw))
@@ -1980,7 +1998,7 @@ def run_rollout_batched_local(
                 break
 
             # Evaluator generates next user message
-            eval_outputs = batch_generate_local(lm_eval, [s["eval_msgs"] for s in still_active], max_tokens, temperature)
+            eval_outputs = batch_generate_local(lm_eval, [s["eval_msgs"] for s in still_active], max_tokens, temperature, no_think=no_think_eval)
 
             for s, raw in zip(still_active, eval_outputs):
                 parsed = parse_message(_make_local_response(raw))
@@ -2483,6 +2501,7 @@ def run_judgment_batched_local(
     max_tokens = cfg.judgment.get("max_tokens", 4000)
     batch_size = cfg.get("batch_size", 4)
     temperature = cfg.get("temperature", DEFAULT_TEMPERATURE)
+    no_think = cfg.get("evaluator_reasoning_effort", "none") == "none"
     anonymous_target = cfg.get("anonymous_target", False)
     target_model_name = None if anonymous_target else cfg.rollout.get("target", "unknown")
 
@@ -2569,7 +2588,7 @@ def run_judgment_batched_local(
              {"role": "user", "content": e["judge_prompt"]}]
             for e in chunk
         ]
-        outputs = batch_generate_local(lm, messages_list, max_tokens, temperature)
+        outputs = batch_generate_local(lm, messages_list, max_tokens, temperature, no_think=no_think)
         for e, raw in zip(chunk, outputs):
             parsed = parse_message(_make_local_response(raw))
             e["initial_response"] = parsed["content"] or raw
@@ -2585,7 +2604,7 @@ def run_judgment_batched_local(
                  {"role": "user", "content": scoring_prompt}]
                 for e in chunk
             ]
-            outputs = batch_generate_local(lm, messages_list, max_tokens, temperature)
+            outputs = batch_generate_local(lm, messages_list, max_tokens, temperature, no_think=no_think)
             for e, raw in zip(chunk, outputs):
                 parsed = parse_message(_make_local_response(raw))
                 e["sample_responses"].append(parsed["content"] or raw)
@@ -2663,7 +2682,7 @@ def run_judgment_batched_local(
             raw = batch_generate_local(lm, [
                 [{"role": "system", "content": mj_system},
                  {"role": "user", "content": mj_prompt}]
-            ], max_tokens, temperature)[0]
+            ], max_tokens, temperature, no_think=no_think)[0]
             parsed = parse_message(_make_local_response(raw))
             mj_content = parsed["content"] or raw
 
@@ -2927,6 +2946,7 @@ async def run_parallel_round(
         batch_size = cfg.get("batch_size", 4)
         max_tokens = cfg.judgment.get("max_tokens", 4000)
         temperature = cfg.get("temperature", DEFAULT_TEMPERATURE)
+        no_think = cfg.get("evaluator_reasoning_effort", "none") == "none"
 
         sorted_vars = sorted(history_by_var.items())  # [(var_num, history), ...]
 
@@ -2944,7 +2964,7 @@ async def run_parallel_round(
                 for _, _, system, user in chunk
             ]
             print(f"  Refining scenarios {[v for v, _, _, _ in chunk]}...", flush=True)
-            outputs = batch_generate_local(lm, messages_list, max_tokens, temperature)
+            outputs = batch_generate_local(lm, messages_list, max_tokens, temperature, no_think=no_think)
 
             for (var_num, history, _, _), raw in zip(chunk, outputs):
                 parsed = parse_message(_make_local_response(raw))
@@ -3270,7 +3290,7 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
 async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
     global DEBUG_MODE
-    DEBUG_MODE = cfg.get("debug", False)
+    DEBUG_MODE = cfg.get("debug", True)
 
     # Resolve output directory
     folder_name = cfg.get("folder_name", "runs/default")
@@ -3381,48 +3401,47 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_6_local/base_gemma_qwen_short",
-    
-    "behavior_name": "racial-bias",
-    "prompt_preset": "racial-bias-v1",
-    "examples": [],  # List of example dicts [{conversation: [{role, content}]}]
-    "temperature": 1.0,
-    "evaluator_reasoning_effort": "none",
-    "target_reasoning_effort": "none",
-    "max_concurrent": 10,
-    "batch_size": 5,         # For local models: number of variations processed per forward pass
-    "anonymous_target": False,
-    "debug": True,
-    "refine_history_rounds": 1,  # None = all rounds, 0 = no history (fresh prompt), N = last N rounds
-    "viewer_dir": "src/bloom-viewer",  # Path to bloom-viewer (empty string to disable)
+    "folder_name": "runs_6_local/base_gemma_qwen_short",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+
+    "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
+    "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
+    "examples": [],                          # seed transcripts: [{conversation: [{role, content}]}]; used to ground understanding/ideation
+
+    "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
+    "evaluator_reasoning_effort": "none",    # "none" suppresses thinking entirely; "low/medium/high" sets API token budget (local models just think freely)
+    "target_reasoning_effort": "none",       # same as above but for the target model during rollout
+    "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
+    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "num_rounds": 1,                         # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+    "refine_history_rounds": 1,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
 
     "understanding": {
-        "model": judge_model,
-        "max_tokens": 2000,
+        "model": judge_model,                # model that analyses the behavior and any seed transcripts
+        "max_tokens": 2000,                  # max output tokens for the understanding call
     },
     "ideation": {
-        "model": judge_model,
-        "num_scenarios": 25, #50,
-        "max_tokens": 25000, #50000,
+        "model": judge_model,                # model that generates evaluation scenarios
+        "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
+        "max_tokens": 25000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
     },
     "rollout": {
-        "model": judge_model,
-        "target": target_model,
-        "max_turns": 1, #2,
-        "max_tokens": 2000,
-        "num_reps": 1,
+        "model": judge_model,                # evaluator model — steers the conversation to elicit the behavior
+        "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
+        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one evaluator follow-up)
+        "max_tokens": 2000,                  # max output tokens per generation call during rollout
+        "num_reps": 1,                       # independent repetitions per scenario (different random seeds)
     },
     "judgment": {
-        "model": judge_model,
-        "max_tokens": 2000,
-        "num_samples": 1,
-        "additional_qualities": [], #["unrealism", "bugs"],
-        "metajudgment_qualities": ["diversity"],
-        "metajudgment": False, #True, # Set to False to skip the metajudge step
+        "model": judge_model,                # model that scores transcripts for behavior presence
+        "max_tokens": 2000,                  # max output tokens per judgment call
+        "num_samples": 1,                    # score samples per transcript to average (higher = less variance)
+        "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
+        "metajudgment_qualities": ["diversity"],             # qualities assessed across all transcripts in the metajudge step
+        "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "logprob_scoring": {
-        "enabled": True,
-        "model": target_model,  # should match rollout.target
+        "enabled": True,                     # score log P(targeted_response_start | context) for each evaluator turn
+        "model": target_model,               # model to score with; should match rollout.target; local models use a batched forward pass
     },
 })
 
@@ -3435,7 +3454,6 @@ if __name__ == "__main__":
 
     # Load behavior description and prompt preset from prompts.yaml
     _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
-
     _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
     if not _behavior_desc:
         raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
@@ -3452,56 +3470,42 @@ if __name__ == "__main__":
         print(f"Loaded prompt preset: {_preset_name}", flush=True)
 
     base_folder = cfg.get("folder_name", "runs/default")
-
-    num_rounds = 1
-
+    num_rounds = cfg.get("num_rounds", 1)
     async def run_parallel() -> bool:
         """Returns True if there was an error."""
         # Round 1: full pipeline
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
         print("#" * 60, flush=True)
-
         round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
         cfg.folder_name = f"{base_folder}/round_1"
         result = await run_pipeline(cfg)
-
         if not result:
             print("\n  Round 1 FAILED", flush=True)
             return True
-
         stats = result.get("summary_statistics", {})
         print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
               f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
-
         await run_logprob_scoring(round_1_dir, cfg)
-
         # Load understanding from round 1 for reuse in all subsequent rounds
         with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
             understanding_results = json.load(f)
         ideation_results = {"variations": []}  # variations come from refinements in round 2+
-
         prompts_yaml = load_prompts(cfg)
-
+        
         # Rounds 2+: refine each scenario using full accumulated history
         completed_round_dirs: List[Path] = [round_1_dir]
-
         for round_num in range(2, num_rounds + 1):
             print("\n" + "#" * 60, flush=True)
             print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
             print("#" * 60, flush=True)
-
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
-
             output_dir.mkdir(parents=True, exist_ok=True)
             save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
-
             result = await run_parallel_round(
                 completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
             )
-
             completed_round_dirs.append(output_dir)
-
             if result:
                 stats = result.get("summary_statistics", {})
                 print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
@@ -3510,14 +3514,12 @@ if __name__ == "__main__":
             else:
                 print(f"\n  Round {round_num} FAILED", flush=True)
                 return True
-
         return False
-
     had_error = asyncio.run(run_parallel())
 
     # Launch viewer unless there was an error
     if not had_error:
-        viewer_dir = cfg.get("viewer_dir", "")
+        viewer_dir = cfg.get("viewer_dir", "src/bloom-viewer")
         if viewer_dir:
             results_dir = (SCRIPT_DIR / base_folder).resolve()
             launch_viewer(viewer_dir, results_dir)
