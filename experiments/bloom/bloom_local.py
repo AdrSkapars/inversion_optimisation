@@ -2917,20 +2917,13 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 # Section 11: Config & Main
 # =============================================================================
 
-# judge_model = "claude-haiku-4.5"
-# judge_model = "openrouter/qwen/qwen3-8b"
-judge_model = "local/google/gemma-3-27b-it"
-# judge_model = "openrouter/openai/gpt-5-nano"
+# judge_model = "local/google/gemma-3-27b-it"
+judge_model = "local/Qwen/Qwen3-4B"
 
 target_model = "local/Qwen/Qwen3-4B"
-# target_model = "together_ai/Qwen/Qwen3.5-9B"
-# target_model = "together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo"
-# target_model = "together_ai/meta-llama/Meta-Llama-3-8B-Instruct-Lite"
-# target_model = "together_ai/mistralai/Mistral-Small-24B-Instruct-2501"
-# target_model = "together_ai/google/gemma-4-31B-it"
 
 cfg = DotDict({
-    "folder_name": "runs_6_local/base",
+    "folder_name": "runs_6_local/base_qwenx2",
     
     "behavior_name": "racial-bias",
     "prompt_preset": "racial-bias-v1",
@@ -2939,7 +2932,7 @@ cfg = DotDict({
     "evaluator_reasoning_effort": "none",
     "target_reasoning_effort": "none",
     "max_concurrent": 10,
-    "batch_size": 4,         # For local models: number of variations processed per forward pass
+    "batch_size": 25,         # For local models: number of variations processed per forward pass
     "anonymous_target": False,
     "debug": True,
     "refine_history_rounds": 1,  # None = all rounds, 0 = no history (fresh prompt), N = last N rounds
