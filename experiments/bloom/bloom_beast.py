@@ -1820,6 +1820,33 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     return rollout_results
 
 
+def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
+    """Build a boolean mask over the vocabulary that blocks non-Latin tokens.
+    Blocked: non-ASCII characters, and the chars in blocked_chars.
+    Also blocks any explicitly listed multi-token strings by token ID.
+    Returns a bool tensor of shape [vocab_size] on CPU (move to device before use)."""
+    vocab_size = model_vocab_size or len(tokenizer)
+    blocked_chars = set('\'"<|\\/\n*1234567890')
+    mask = torch_module.ones(vocab_size, dtype=torch_module.bool)
+
+    extra_blocked_tokens = ["..."]
+    blocked_ids: set = set()
+    for tok_str in extra_blocked_tokens:
+        ids = tokenizer.encode(tok_str, add_special_tokens=False)
+        blocked_ids.update(ids)
+
+    for token_id in range(vocab_size):
+        if token_id in blocked_ids:
+            mask[token_id] = False
+            continue
+        text = tokenizer.decode([token_id])
+        for ch in text:
+            if ch in blocked_chars or ord(ch) >= 128:
+                mask[token_id] = False
+                break
+    return mask
+
+
 def _sample_top_p(torch_module, probs, p: float, num_samples: int):
     """Nucleus (top-p) sampling. probs: [batch, vocab]. Returns [batch, num_samples]."""
     probs_sort, probs_idx = torch_module.sort(probs, dim=-1, descending=True)
@@ -1875,6 +1902,7 @@ def _beast_single_trial_local(
     top_p: float,
     suffix_only: bool,
     baseline_msg: str,
+    latin_mask: Optional[Any] = None,   # bool tensor [vocab_size] on lm_eval.device, or None
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search scored by log P(TRS | target_ctx + msg).
     Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores."""
@@ -1887,6 +1915,8 @@ def _beast_single_trial_local(
         inp = torch.tensor([prefix_tokens], dtype=torch.long, device=device)
         logits = lm_eval.model(input_ids=inp, use_cache=False).logits
         logits_last = logits[0, -1] / max(temperature, 1e-8)
+        if latin_mask is not None:
+            logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
         if temperature < 1e-4:
             first_tokens = torch.topk(logits_last, k1).indices
         else:
@@ -1910,6 +1940,8 @@ def _beast_single_trial_local(
                 inp = torch.tensor(batch, dtype=torch.long, device=device)
                 logits = lm_eval.model(input_ids=inp, use_cache=False).logits
                 logits_last = logits[:, -1] / max(temperature, 1e-8)
+                if latin_mask is not None:
+                    logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
                 if temperature < 1e-4:
                     sampled = torch.topk(logits_last, k2).indices    # [batch, k2]
                 else:
@@ -2016,12 +2048,21 @@ def beast_search_evaluator_message(
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
+    # ── Build latin mask (once, on lm_eval device) ────────────────────────
+    use_latin_mask = beast_cfg.get("latin_mask", False)
+    latin_mask = None
+    if use_latin_mask:
+        torch = lm_eval.torch
+        vocab_size = lm_eval.model.config.vocab_size
+        latin_mask = build_latin_token_mask(torch, lm_eval.tokenizer, vocab_size).to(lm_eval.device)
+        print(f"    Latin mask built ({latin_mask.sum().item()} / {vocab_size} tokens allowed)", flush=True)
+
     # ── Run single BEAST trial ────────────────────────────────────────────
     print(f"    BEAST search (k1={k1}, k2={k2}, len={suffix_length}) ...", flush=True)
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_eval, lm_target, prefix_tokens, target_msgs, trs,
         k1, k2, suffix_length, ngram, pool_size, max_batch_sz,
-        temperature, top_p, suffix_only, baseline_msg,
+        temperature, top_p, suffix_only, baseline_msg, latin_mask,
     )
 
     # ── Decode pool into (msg_text, score) pairs, best first ─────────────
@@ -3689,7 +3730,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_6_local/base_gemma_qwen_short_nothink",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3727,8 +3768,8 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "beast": {
-        "k1": 15,                            # beam width: number of beams kept after each scoring step
-        "k2": 15,                            # candidates per beam per step: each beam element expands to k2 next tokens
+        "k1": 5,                            # beam width: number of beams kept after each scoring step
+        "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
         "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
         "pool_size": 20,                     # max candidates kept in the pool
@@ -3736,7 +3777,8 @@ cfg = DotDict({
         "temperature": 1.0,                  # sampling temperature for token expansion
         "top_p": 1.0,                        # nucleus sampling p for token expansion
         "suffix_only": False,                # False = search suffix to append to baseline_msg; True = generate standalone message from scratch
-        "reward_tokens": 5,                  # first N tokens of TRS used as reward signal (0 = full TRS)
+        "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
+        "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
     },
 })
 
@@ -3744,7 +3786,7 @@ cfg = DotDict({
 if __name__ == "__main__":
     # # Just run viewer
     # viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
-    # env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_6_local")}
+    # env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_7_beast")}
     # subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
 
     # Load behavior description and prompt preset from prompts.yaml
