@@ -2053,7 +2053,11 @@ def beast_search_evaluator_message(
     latin_mask = None
     if use_latin_mask:
         torch = lm_eval.torch
-        vocab_size = lm_eval.model.config.vocab_size
+        vocab_size = (
+            getattr(lm_eval.model.config, "vocab_size", None)
+            or getattr(getattr(lm_eval.model.config, "text_config", None), "vocab_size", None)
+            or lm_eval.tokenizer.vocab_size
+        )
         latin_mask = build_latin_token_mask(torch, lm_eval.tokenizer, vocab_size).to(lm_eval.device)
         print(f"    Latin mask built ({latin_mask.sum().item()} / {vocab_size} tokens allowed)", flush=True)
 
