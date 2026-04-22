@@ -3746,7 +3746,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_7_beast/beast",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast_15k1",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3784,8 +3784,8 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "beast": {
-        "k1": 5,                            # beam width: number of beams kept after each scoring step
-        "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
+        "k1": 15,                            # beam width: number of beams kept after each scoring step
+        "k2": 15,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
         "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
         "pool_size": 20,                     # max candidates kept in the pool
