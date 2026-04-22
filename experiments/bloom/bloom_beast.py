@@ -1965,7 +1965,9 @@ def _beast_single_trial_local(
         logits = lm_eval.model(input_ids=inp, use_cache=False).logits
         logits_last = logits[0, -1] / max(temperature, 1e-8)
         if latin_mask is not None:
-            logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
+            masked = logits_last.masked_fill(~latin_mask, -float("inf"))
+            # Fall back to unmasked if every token is blocked
+            logits_last = masked if torch.isfinite(masked).any() else logits_last
         if temperature < 1e-4:
             first_tokens = torch.topk(logits_last, k1).indices
         else:
@@ -1990,7 +1992,10 @@ def _beast_single_trial_local(
                 logits = lm_eval.model(input_ids=inp, use_cache=False).logits
                 logits_last = logits[:, -1] / max(temperature, 1e-8)
                 if latin_mask is not None:
-                    logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
+                    masked = logits_last.masked_fill(~latin_mask, -float("inf"))
+                    # Fall back row-by-row where every token is blocked
+                    fully_blocked = ~torch.isfinite(masked).any(dim=-1, keepdim=True)
+                    logits_last = torch.where(fully_blocked, logits_last, masked)
                 if temperature < 1e-4:
                     sampled = torch.topk(logits_last, k2).indices    # [batch, k2]
                 else:
@@ -3808,7 +3813,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_7_beast/beast_",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast_5gram",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3849,7 +3854,7 @@ cfg = DotDict({
         "k1": 5,                            # beam width: number of beams kept after each scoring step
         "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
-        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
+        "ngram": 5,                          # tokens generated between scoring rounds (1 = score every token)
         "pool_size": 20,                     # max candidates kept in the pool
         "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                  # sampling temperature for token expansion
