@@ -1993,7 +1993,7 @@ def beast_search_evaluator_message(
     sample_max_tokens: int,
     sample_temperature: float,
     batch_size: int = 4,
-) -> Tuple[List[Tuple[str, float]], str]:
+) -> Tuple[List[Tuple[str, float, str, str]], str]:
     """
     Two-phase adversarial evaluator message search.
 
@@ -2003,10 +2003,10 @@ def beast_search_evaluator_message(
 
     Phase 2 — BEAST: token-level beam search using lm_eval for token generation
       and lm_target for scoring log P(trs | target_msgs + decoded_msg).
-      Runs num_trials independent trials and merges into a global pool.
 
     Returns:
-      pool  — List[(msg_text, score)] sorted best-first (highest score = best)
+      pool  — List[(msg_text, score, baseline, suffix)] sorted best-first
+              baseline + suffix == msg_text; suffix is the BEAST-generated part
       trs   — the targeted response start string used as the reward signal
     """
     # ── Phase 1: normal sample ──────────────────────────────────────────────
@@ -2018,7 +2018,7 @@ def beast_search_evaluator_message(
 
     if not trs:
         # No TRS generated — return just the normal message as the single pool entry
-        return [(baseline_msg, 0.0)], ""
+        return [(baseline_msg, 0.0, baseline_msg, "")], ""
 
     # ── Extract BEAST hyperparams ──────────────────────────────────────────
     k1            = beast_cfg.get("k1", 15)
@@ -2065,24 +2065,25 @@ def beast_search_evaluator_message(
         temperature, top_p, suffix_only, baseline_msg, latin_mask,
     )
 
-    # ── Decode pool into (msg_text, score) pairs, best first ─────────────
+    # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
     order = sorted(range(len(global_pool_scores)),
                    key=lambda i: global_pool_scores[i], reverse=True)
-    pool: List[Tuple[str, float]] = []
+    pool: List[Tuple[str, float, str, str]] = []
     seen: set = set()
     for i in order:
-        seq   = global_pool_seqs[i]
-        score = global_pool_scores[i]
+        seq         = global_pool_seqs[i]
+        score       = global_pool_scores[i]
         suffix_text = lm_eval.tokenizer.decode(seq[prefix_length:], skip_special_tokens=False)
-        msg_text = suffix_text if suffix_only else (baseline_msg + suffix_text)
         # Strip any <targeted_response_start> block that leaked into the suffix
-        msg_text = re.sub(r"<targeted_response_start>.*", "", msg_text, flags=re.DOTALL).strip()
+        suffix_text = re.sub(r"<targeted_response_start>.*", "", suffix_text, flags=re.DOTALL).strip()
+        baseline    = "" if suffix_only else baseline_msg
+        msg_text    = suffix_text if suffix_only else (baseline_msg + suffix_text)
         if msg_text and msg_text not in seen:
             seen.add(msg_text)
-            pool.append((msg_text, score))
+            pool.append((msg_text, score, baseline, suffix_text))
 
     if not pool:
-        pool = [(baseline_msg, 0.0)]  # fallback to Phase 1 baseline
+        pool = [(baseline_msg, 0.0, baseline_msg, "")]  # fallback to Phase 1 baseline
 
     return pool, trs
 
@@ -2240,15 +2241,22 @@ def run_rollout_batched_local(
             "variation_number": var_idx,
             "turn": "kickoff",
             "trs": trs_kickoff,
-            "pool": [{"message": msg, "score": round(sc, 4) if sc not in (None, -float("inf")) else None}
-                     for msg, sc in kickoff_pool],
+            "pool": [
+                {
+                    "baseline": base,
+                    "suffix":   suf,
+                    "message":  msg,
+                    "score":    round(sc, 4) if sc not in (None, -float("inf")) else None,
+                }
+                for msg, sc, base, suf in kickoff_pool
+            ],
         })
 
         top_candidates = kickoff_pool[:num_per_scenario]
         print(f"  v{var_idx}: pool_size={len(kickoff_pool)}, running top {len(top_candidates)} as reps", flush=True)
 
         # ── Run each top candidate as a separate transcript rep ──────────
-        for rep, (kickoff_msg, kickoff_score) in enumerate(top_candidates, 1):
+        for rep, (kickoff_msg, kickoff_score, kickoff_baseline, kickoff_suffix) in enumerate(top_candidates, 1):
             # Per-rep state (copies so reps are independent)
             target_msgs    = list(target_msgs_base)
             transcript_msgs = list(transcript_msgs_base)
@@ -2264,6 +2272,8 @@ def run_rollout_batched_local(
             kick_entry: Dict[str, Any] = {
                 "role": "user", "content": target_content, "source": "evaluator",
                 "targeted_response_start": trs_kickoff,
+                "beast_baseline": kickoff_baseline,
+                "beast_suffix":   kickoff_suffix,
             }
             if kickoff_score not in (None, -float("inf")):
                 kick_entry["targeted_response_start_logprob"] = round(kickoff_score, 4)
@@ -2302,7 +2312,7 @@ def run_rollout_batched_local(
                     eval_msgs_turn, target_msgs,
                     beast_cfg, no_think_eval, max_tokens, temperature, batch_size,
                 )
-                next_msg, next_score = turn_pool[0]
+                next_msg, next_score, next_baseline, next_suffix = turn_pool[0]
 
                 if "<END>" in next_msg:
                     break
@@ -2314,6 +2324,8 @@ def run_rollout_batched_local(
                 turn_entry: Dict[str, Any] = {
                     "role": "user", "content": next_msg, "source": "evaluator",
                     "targeted_response_start": turn_trs,
+                    "beast_baseline": next_baseline,
+                    "beast_suffix":   next_suffix,
                 }
                 if next_score not in (None, -float("inf")):
                     turn_entry["targeted_response_start_logprob"] = round(next_score, 4)

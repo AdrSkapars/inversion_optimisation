@@ -123,6 +123,24 @@
     }
   }
 
+  // Render content with BEAST baseline/suffix distinction.
+  // baseline is rendered normally; suffix gets an amber underline + slight tint.
+  function renderWithBeastSuffix(text: string, baseline: string, suffix: string): string {
+    if (!suffix) return highlightPlainText(text);
+
+    const escapeHtml = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+       .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
+    const escapedBaseline = highlightPlainText(escapeHtml(baseline));
+    const escapedSuffix   = highlightPlainText(escapeHtml(suffix));
+
+    return (
+      escapedBaseline +
+      `<mark class="beast-suffix rounded px-0.5">${escapedSuffix}</mark>`
+    );
+  }
+
   // Helper function to highlight text in plain content (non-markdown)
   function highlightPlainText(text: string): string {
     if (!highlightText || !text.includes(highlightText)) {
@@ -360,6 +378,19 @@
       background-color: transparent;
     }
   }
+
+  /* BEAST suffix highlight — blue tint, static (no animation) */
+  :global(mark.beast-suffix) {
+    background-color: rgb(219 234 254); /* blue-100 */
+    color: rgb(30 64 175);              /* blue-800 */
+    border-radius: 2px;
+    padding: 0 2px;
+  }
+
+  :global(.dark mark.beast-suffix) {
+    background-color: rgb(30 58 138 / 0.5); /* blue-900/50 */
+    color: rgb(147 197 253);                /* blue-300 */
+  }
 </style>
 
 <!-- Message Card Container -->
@@ -528,8 +559,10 @@
 {#snippet userMessage(message: UserMessage)}
   {@const textContent = extractTextFromContent(message.content)}
   {@const targetedResponseStart = (message as any).metadata?.targeted_response_start ?? null}
+  {@const beastBaseline = (message as any).metadata?.beast_baseline ?? null}
+  {@const beastSuffix = (message as any).metadata?.beast_suffix ?? null}
   {#if textContent !== null}
-    <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html highlightPlainText(textContent)}</span>
+    <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html beastSuffix ? renderWithBeastSuffix(textContent, beastBaseline ?? '', beastSuffix) : highlightPlainText(textContent)}</span>
   {:else}
     <JsonViewer value={message.content} theme={$themeString} inlineShortContainers={80} />
   {/if}

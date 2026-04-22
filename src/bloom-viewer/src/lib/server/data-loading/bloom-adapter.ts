@@ -15,6 +15,8 @@ interface BloomMessage {
   source?: string;
   reasoning?: string;
   targeted_response_start?: string;
+  beast_baseline?: string;
+  beast_suffix?: string;
 }
 
 interface BloomTranscript {
@@ -200,9 +202,11 @@ export function convertBloomTranscript(data: any): any {
     if (source === 'target' && msg.role === 'assistant') {
       eventMessage.model = targetModel;
     }
-    if (msg.targeted_response_start) {
-      eventMessage.metadata = { targeted_response_start: msg.targeted_response_start };
-    }
+    const meta: Record<string, any> = {};
+    if (msg.targeted_response_start) meta.targeted_response_start = msg.targeted_response_start;
+    if (msg.beast_baseline !== undefined) meta.beast_baseline = msg.beast_baseline;
+    if (msg.beast_suffix !== undefined)   meta.beast_suffix   = msg.beast_suffix;
+    if (Object.keys(meta).length > 0) eventMessage.metadata = meta;
 
     events.push({
       type: 'transcript_event',
