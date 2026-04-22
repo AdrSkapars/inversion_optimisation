@@ -3796,7 +3796,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_7_beast/beast_15k1",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast_100reward",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3806,7 +3806,7 @@ cfg = DotDict({
     "evaluator_reasoning_effort": "none",    # "none" suppresses thinking entirely; "low/medium/high" sets API token budget (local models just think freely)
     "target_reasoning_effort": "none",       # same as above but for the target model during rollout
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
-    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "batch_size": 4,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
     "num_rounds": 1,                         # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
     "refine_history_rounds": 1,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
 
@@ -3834,8 +3834,8 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "beast": {
-        "k1": 15,                            # beam width: number of beams kept after each scoring step
-        "k2": 15,                            # candidates per beam per step: each beam element expands to k2 next tokens
+        "k1": 5,                            # beam width: number of beams kept after each scoring step
+        "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
         "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
         "pool_size": 20,                     # max candidates kept in the pool
@@ -3843,7 +3843,7 @@ cfg = DotDict({
         "temperature": 1.0,                  # sampling temperature for token expansion
         "top_p": 1.0,                        # nucleus sampling p for token expansion
         "suffix_only": False,                # False = search suffix to append to baseline_msg; True = generate standalone message from scratch
-        "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
+        "reward_tokens": 100,                  # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
     },
 })
