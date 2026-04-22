@@ -1186,22 +1186,66 @@ def run_understanding(cfg: DotDict, prompts_yaml: Dict, output_dir: Path) -> Dic
 # Section 7: Stage 2 - Ideation
 # =============================================================================
 def parse_scenarios_response(response_text: str) -> List[Dict[str, Any]]:
-    """Parse scenarios from <scenario> tags."""
-    scenarios = []
-    scenario_matches = re.findall(r"<scenario>(.*?)</scenario>", response_text, re.DOTALL)
-    if scenario_matches:
-        for match in scenario_matches:
-            clean = re.sub(r"\s+", " ", match.strip())
+    """Parse scenarios from <scenario> tags or heading patterns.
+
+    Handles three formats the model may produce:
+      1. Proper wrapping:  <scenario>...</scenario> per scenario
+      2. Separator style:  content <scenario> content <scenario> ... </scenario>
+         (model uses <scenario> as an end-marker; content may also precede the first tag)
+      3. No tags:          **Scenario N: ...** headings only
+    """
+    def _clean(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip())
+
+    def _has_heading(text: str) -> bool:
+        return bool(re.search(r"\*\*Scenario \d+:", text))
+
+    scenarios: list[dict] = []
+
+    # ── Strategy 1: <scenario> as separator / end-marker ─────────────────────
+    # Split on every <scenario> tag; each resulting block is one scenario's text.
+    # Also handles proper wrapping because the splits land between tags.
+    if "<scenario>" in response_text:
+        parts = re.split(r"<scenario>", response_text)
+        for part in parts:
+            # Strip a trailing </scenario> (and anything after it)
+            part = re.sub(r"</scenario>.*", "", part, flags=re.DOTALL).strip()
+            if not part:
+                continue
+            # A block may still contain multiple "**Scenario N:**" headings if the
+            # model wrapped several in one tag — split those out too.
+            if _has_heading(part):
+                sub_blocks = re.split(r"(?=\*\*Scenario \d+:)", part)
+                for sub in sub_blocks:
+                    sub = sub.strip()
+                    if sub and _has_heading(sub):
+                        scenarios.append({"description": _clean(sub)})
+            else:
+                # Content without a heading (e.g. brainstorm preamble) — skip
+                pass
+        if scenarios:
+            return scenarios
+
+    # ── Strategy 2: proper <scenario>...</scenario> pairs ────────────────────
+    matches = re.findall(r"<scenario>(.*?)</scenario>", response_text, re.DOTALL)
+    if matches:
+        for m in matches:
+            sub_blocks = re.split(r"(?=\*\*Scenario \d+:)", m)
+            for sub in sub_blocks:
+                sub = sub.strip()
+                if sub:
+                    scenarios.append({"description": _clean(sub)})
+        if scenarios:
+            return scenarios
+
+    # ── Strategy 3: no tags — split on **Scenario N: headings ────────────────
+    splits = re.split(r"\*\*Scenario \d+:", response_text)
+    if len(splits) > 1:
+        for split in splits[1:]:
+            clean = _clean(split)
             if clean:
                 scenarios.append({"description": clean})
-    else:
-        # Fallback: split by "Scenario X:" patterns
-        splits = re.split(r"\*\*Scenario \d+:", response_text)
-        if len(splits) > 1:
-            for split in splits[1:]:
-                clean = re.sub(r"\s+", " ", split.strip())
-                if clean:
-                    scenarios.append({"description": clean})
+
     return scenarios
 
 
@@ -1309,6 +1353,12 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
             all_scenarios.extend(batch_scenarios)
 
     print(f"Total scenarios generated: {len(all_scenarios)}", flush=True)
+
+    if len(all_scenarios) < num_scenarios:
+        raise RuntimeError(
+            f"Ideation produced only {len(all_scenarios)} scenario(s) but {num_scenarios} were requested. "
+            f"Check the model output — the parser may have failed to split scenarios correctly."
+        )
 
     # Save results - use "variations" key for compatibility
     results = {
