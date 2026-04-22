@@ -1915,8 +1915,7 @@ def _score_beast_candidates(
     prefix_length: int,
     target_msgs: List[Dict],
     trs: str,
-    suffix_only: bool,
-    baseline_msg: str,
+    baseline_prefix: str,
     max_batch_size: int,
 ) -> List[float]:
     """Score BEAST candidate token sequences by log P(trs | target_msgs + decoded_msg).
@@ -1926,7 +1925,7 @@ def _score_beast_candidates(
     items: List[Tuple[List[Dict], str]] = []
     for seq in candidates:
         suffix_text = lm_eval.tokenizer.decode(seq[prefix_length:], skip_special_tokens=False)
-        msg_text = suffix_text if suffix_only else (baseline_msg + suffix_text)
+        msg_text = baseline_prefix + suffix_text
         items.append((list(target_msgs) + [{"role": "user", "content": msg_text}], trs))
 
     all_scores: List[float] = []
@@ -1950,11 +1949,11 @@ def _beast_single_trial_local(
     max_batch_size: int,
     temperature: float,
     top_p: float,
-    suffix_only: bool,
-    baseline_msg: str,
+    baseline_prefix: str,
     latin_mask: Optional[Any] = None,   # bool tensor [vocab_size] on lm_eval.device, or None
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search scored by log P(TRS | target_ctx + msg).
+    baseline_prefix is prepended to the decoded suffix when scoring against lm_target.
     Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores."""
     torch = lm_eval.torch
     device = lm_eval.device
@@ -2014,7 +2013,7 @@ def _beast_single_trial_local(
         # ── Score all candidates with lm_target ──
         scores = _score_beast_candidates(
             lm_eval, lm_target, expanded, prefix_length,
-            target_msgs, trs, suffix_only, baseline_msg, max_batch_size,
+            target_msgs, trs, baseline_prefix, max_batch_size,
         )
 
         # ── Keep top k1 as new beam ──
@@ -2079,8 +2078,22 @@ def beast_search_evaluator_message(
     max_batch_sz  = batch_size
     temperature   = beast_cfg.get("temperature", 1.0)
     top_p         = beast_cfg.get("top_p", 1.0)
-    suffix_only   = beast_cfg.get("suffix_only", False)
-    reward_tokens = beast_cfg.get("reward_tokens", 0)
+    suffix_after_tokens = beast_cfg.get("suffix_after_tokens", None)
+    reward_tokens       = beast_cfg.get("reward_tokens", 0)
+
+    # ── Compute baseline_prefix: the part of baseline_msg kept before the suffix ──
+    # None  → keep full baseline_msg (append suffix after it)
+    # 0     → keep nothing (BEAST generates the whole message from scratch)
+    # N > 0 → keep first N lm_eval tokens of baseline_msg
+    if suffix_after_tokens is None:
+        baseline_prefix = baseline_msg
+    elif suffix_after_tokens == 0:
+        baseline_prefix = ""
+    else:
+        bm_ids = lm_eval.tokenizer.encode(baseline_msg, add_special_tokens=False)
+        baseline_prefix = lm_eval.tokenizer.decode(
+            bm_ids[:suffix_after_tokens], skip_special_tokens=True
+        )
 
     # ── Truncate TRS to first reward_tokens target-model tokens ──────────
     if reward_tokens > 0 and trs:
@@ -2093,8 +2106,7 @@ def beast_search_evaluator_message(
     )
     if no_think_eval:
         prompt_str += "<think>\n\n</think>\n"
-    if not suffix_only:
-        prompt_str += baseline_msg   # extend prefix so search appends to baseline
+    prompt_str += baseline_prefix   # empty string when suffix_after_tokens == 0
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
@@ -2116,7 +2128,7 @@ def beast_search_evaluator_message(
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_eval, lm_target, prefix_tokens, target_msgs, trs,
         k1, k2, suffix_length, ngram, pool_size, max_batch_sz,
-        temperature, top_p, suffix_only, baseline_msg, latin_mask,
+        temperature, top_p, baseline_prefix, latin_mask,
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -2130,8 +2142,8 @@ def beast_search_evaluator_message(
         suffix_text = lm_eval.tokenizer.decode(seq[prefix_length:], skip_special_tokens=False)
         # Strip any <targeted_response_start> block that leaked into the suffix
         suffix_text = re.sub(r"<targeted_response_start>.*", "", suffix_text, flags=re.DOTALL).strip()
-        baseline    = "" if suffix_only else baseline_msg
-        msg_text    = suffix_text if suffix_only else (baseline_msg + suffix_text)
+        baseline    = baseline_prefix
+        msg_text    = baseline_prefix + suffix_text
         if msg_text and msg_text not in seen:
             seen.add(msg_text)
             pool.append((msg_text, score, baseline, suffix_text))
@@ -3796,7 +3808,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_7_beast/beast_100reward",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast_",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3806,7 +3818,7 @@ cfg = DotDict({
     "evaluator_reasoning_effort": "none",    # "none" suppresses thinking entirely; "low/medium/high" sets API token budget (local models just think freely)
     "target_reasoning_effort": "none",       # same as above but for the target model during rollout
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
-    "batch_size": 4,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
     "num_rounds": 1,                         # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
     "refine_history_rounds": 1,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
 
@@ -3842,8 +3854,8 @@ cfg = DotDict({
         "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                  # sampling temperature for token expansion
         "top_p": 1.0,                        # nucleus sampling p for token expansion
-        "suffix_only": False,                # False = search suffix to append to baseline_msg; True = generate standalone message from scratch
-        "reward_tokens": 100,                  # first N tokens of TRS used as reward signal (0 = full TRS)
+        "suffix_after_tokens": None,         # None = append suffix after full baseline; 0 = generate whole message from scratch; N = keep first N tokens of baseline then let BEAST continue
+        "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
     },
 })
