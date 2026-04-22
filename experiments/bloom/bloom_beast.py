@@ -1899,11 +1899,27 @@ def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
 
 def _sample_top_p(torch_module, probs, p: float, num_samples: int):
     """Nucleus (top-p) sampling. probs: [batch, vocab]. Returns [batch, num_samples]."""
+    # Sanitize before anything touches multinomial: nan/inf → 0, all-zero rows → uniform.
+    probs = torch_module.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    row_sums = probs.sum(dim=-1, keepdim=True)
+    zero_rows = row_sums <= 0
+    if zero_rows.any():
+        uniform = torch_module.ones_like(probs) / probs.shape[-1]
+        probs = torch_module.where(zero_rows.expand_as(probs), uniform,
+                                   probs / row_sums.clamp(min=1e-12))
+
     probs_sort, probs_idx = torch_module.sort(probs, dim=-1, descending=True)
     probs_cumsum = torch_module.cumsum(probs_sort, dim=-1)
     mask = probs_cumsum - probs_sort > p
     probs_sort[mask] = 0.0
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True).clamp(min=1e-12))
+    # Guard again: top-p masking can zero every token in edge cases
+    row_sums2 = probs_sort.sum(dim=-1, keepdim=True)
+    zero_rows2 = row_sums2 <= 0
+    if zero_rows2.any():
+        uniform2 = torch_module.ones_like(probs_sort) / probs_sort.shape[-1]
+        probs_sort = torch_module.where(zero_rows2.expand_as(probs_sort), uniform2, probs_sort)
+
     sampled = torch_module.multinomial(probs_sort, num_samples=num_samples)
     return torch_module.gather(probs_idx, -1, sampled)
 
@@ -1965,7 +1981,9 @@ def _beast_single_trial_local(
         logits = lm_eval.model(input_ids=inp, use_cache=False).logits
         logits_last = logits[0, -1] / max(temperature, 1e-8)
         if latin_mask is not None:
-            logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
+            masked = logits_last.masked_fill(~latin_mask, -float("inf"))
+            # Fall back to unmasked if every token is blocked
+            logits_last = masked if torch.isfinite(masked).any() else logits_last
         if temperature < 1e-4:
             first_tokens = torch.topk(logits_last, k1).indices
         else:
@@ -1990,7 +2008,10 @@ def _beast_single_trial_local(
                 logits = lm_eval.model(input_ids=inp, use_cache=False).logits
                 logits_last = logits[:, -1] / max(temperature, 1e-8)
                 if latin_mask is not None:
-                    logits_last = logits_last.masked_fill(~latin_mask, -float("inf"))
+                    masked = logits_last.masked_fill(~latin_mask, -float("inf"))
+                    # Fall back row-by-row where every token is blocked
+                    fully_blocked = ~torch.isfinite(masked).any(dim=-1, keepdim=True)
+                    logits_last = torch.where(fully_blocked, logits_last, masked)
                 if temperature < 1e-4:
                     sampled = torch.topk(logits_last, k2).indices    # [batch, k2]
                 else:
@@ -3808,7 +3829,7 @@ judge_model = "local/google/gemma-3-27b-it"
 target_model = "local/Qwen/Qwen3-4B"
 
 cfg = DotDict({
-    "folder_name": "runs_7_beast/beast_",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_7_beast/beast_5gram",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3829,7 +3850,7 @@ cfg = DotDict({
     "ideation": {
         "model": judge_model,                # model that generates evaluation scenarios
         "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
-        "max_tokens": 25000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
+        "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
     },
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
@@ -3849,7 +3870,7 @@ cfg = DotDict({
         "k1": 5,                            # beam width: number of beams kept after each scoring step
         "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
-        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
+        "ngram": 5,                          # tokens generated between scoring rounds (1 = score every token)
         "pool_size": 20,                     # max candidates kept in the pool
         "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                  # sampling temperature for token expansion
