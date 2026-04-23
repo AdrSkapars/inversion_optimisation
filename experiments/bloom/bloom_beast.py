@@ -3897,7 +3897,7 @@ if __name__ == "__main__":
     if False:
         # Just run viewer
         viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
-        env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_7_beast")}
+        env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
         subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
 
     else:

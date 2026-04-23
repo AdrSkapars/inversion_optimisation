@@ -73,6 +73,23 @@
   });
 
   let errorMessage = $derived(filePath ? '' : 'Invalid transcript path');
+
+  // Detect "round_N" pattern in the path and compute sibling-round navigation links.
+  // Matches paths like:  {base}/round_{N}/transcripts/transcript_v{var}r{rep}.json
+  let roundNav = $derived.by(() => {
+    if (!filePath) return null;
+    const match = filePath.match(/^(.*)\/round_(\d+)(\/transcripts\/transcript_v\d+r\d+\.json)$/);
+    if (!match) return null;
+    const [, base, roundStr, tail] = match;
+    const current = parseInt(roundStr, 10);
+    const makeUrl = (n: number) =>
+      `/transcript/${base}/round_${n}${tail}`.replace(/\/+/g, '/');
+    return {
+      current,
+      prevUrl: current > 1 ? makeUrl(current - 1) : null,
+      nextUrl: makeUrl(current + 1),   // we don't know if it exists; clicking shows 404 if not
+    };
+  });
 </script>
 
 <svelte:head>
@@ -82,6 +99,29 @@
 <div class="min-h-screen bg-base-100">
   <div class="navbar bg-base-200">
     <div class="flex-1">
+      {#if roundNav}
+        <div class="flex items-center gap-1 mr-3 flex-shrink-0">
+          {#if roundNav.prevUrl}
+            <a
+              href={roundNav.prevUrl}
+              class="btn btn-xs btn-ghost font-mono"
+              title="View this scenario in round {roundNav.current - 1}"
+            >
+              ← round {roundNav.current - 1}
+            </a>
+          {:else}
+            <span class="btn btn-xs btn-ghost font-mono opacity-40 pointer-events-none">← round ?</span>
+          {/if}
+          <span class="text-xs font-mono font-semibold px-1">round {roundNav.current}</span>
+          <a
+            href={roundNav.nextUrl}
+            class="btn btn-xs btn-ghost font-mono"
+            title="View this scenario in round {roundNav.current + 1} (if it exists)"
+          >
+            round {roundNav.current + 1} →
+          </a>
+        </div>
+      {/if}
       <div class="breadcrumbs text-sm">
         <ul>
           <li><a href="/" class="font-mono text-xs">Home</a></li>
