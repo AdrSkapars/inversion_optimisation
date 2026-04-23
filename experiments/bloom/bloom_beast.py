@@ -1876,7 +1876,7 @@ def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
     Also blocks any explicitly listed multi-token strings by token ID.
     Returns a bool tensor of shape [vocab_size] on CPU (move to device before use)."""
     vocab_size = model_vocab_size or len(tokenizer)
-    blocked_chars = set('\'<|\\/\n') ##################('\'"<|\\/\n*1234567890')
+    blocked_chars = set('\'"<|\\/\n*1234567890')
     mask = torch_module.ones(vocab_size, dtype=torch_module.bool)
 
     extra_blocked_tokens = ["..."]
@@ -3828,122 +3828,135 @@ judge_model = "local/google/gemma-3-27b-it"
 
 target_model = "local/Qwen/Qwen3-4B"
 
+cfg = DotDict({
+    "folder_name": "runs_7_beast/beast_5gram",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+
+    "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
+    "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
+    "examples": [],                          # seed transcripts: [{conversation: [{role, content}]}]; used to ground understanding/ideation
+
+    "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
+    "evaluator_reasoning_effort": "none",    # "none" suppresses thinking entirely; "low/medium/high" sets API token budget (local models just think freely)
+    "target_reasoning_effort": "none",       # same as above but for the target model during rollout
+    "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
+    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "num_rounds": 1,                         # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+    "refine_history_rounds": 1,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+
+    "understanding": {
+        "model": judge_model,                # model that analyses the behavior and any seed transcripts
+        "max_tokens": 2000,                  # max output tokens for the understanding call
+    },
+    "ideation": {
+        "model": judge_model,                # model that generates evaluation scenarios
+        "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
+        "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
+    },
+    "rollout": {
+        "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
+        "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
+        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
+        "max_tokens": 2000,                  # max output tokens per generation call during rollout
+    },
+    "judgment": {
+        "model": judge_model,                # model that scores transcripts for behavior presence
+        "max_tokens": 2000,                  # max output tokens per judgment call
+        "num_samples": 1,                    # score samples per transcript to average (higher = less variance)
+        "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
+        "metajudgment_qualities": ["diversity"],             # qualities assessed across all transcripts in the metajudge step
+        "metajudgment": False, #True,        # set False to skip the metajudge step entirely
+    },
+    "beast": {
+        "k1": 5,                            # beam width: number of beams kept after each scoring step
+        "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
+        "suffix_length": 20,                 # evaluator message length to search in tokens
+        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
+        "pool_size": 20,                     # max candidates kept in the pool
+        "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
+        "temperature": 1.0,                  # sampling temperature for token expansion
+        "top_p": 1.0,                        # nucleus sampling p for token expansion
+        "suffix_after_tokens": None,         # None = append suffix after full baseline; 0 = generate whole message from scratch; N = keep first N tokens of baseline then let BEAST continue
+        "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
+        "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
+    },
+})
+
 
 if __name__ == "__main__":
-    cfg = DotDict({
-        "folder_name": "runs_7_beast/beast_allow_numbers",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    if False:
+        # Just run viewer
+        viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
+        env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_7_beast")}
+        subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
 
-        "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
-        "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
-        "examples": [],                          # seed transcripts: [{conversation: [{role, content}]}]; used to ground understanding/ideation
+    else:
+        # Load behavior description and prompt preset from prompts.yaml
+        _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
+        _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
+        if not _behavior_desc:
+            raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
+        cfg["behavior_description"] = _behavior_desc.strip()
 
-        "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
-        "evaluator_reasoning_effort": "none",    # "none" suppresses thinking entirely; "low/medium/high" sets API token budget (local models just think freely)
-        "target_reasoning_effort": "none",       # same as above but for the target model during rollout
-        "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
-        "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
-        "num_rounds": 1,                         # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
-        "refine_history_rounds": 1,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+        _preset_name = cfg.get("prompt_preset", "")
+        if _preset_name:
+            _preset = _prompts.get("prompt_presets", {}).get(_preset_name)
+            if not _preset:
+                raise ValueError(f"No prompt preset found for '{_preset_name}' in prompts.yaml")
+            for k, v in _preset.items():
+                if k not in cfg:  # cfg overrides take priority
+                    cfg[k] = v.strip() if isinstance(v, str) else v
+            print(f"Loaded prompt preset: {_preset_name}", flush=True)
 
-        "understanding": {
-            "model": judge_model,                # model that analyses the behavior and any seed transcripts
-            "max_tokens": 2000,                  # max output tokens for the understanding call
-        },
-        "ideation": {
-            "model": judge_model,                # model that generates evaluation scenarios
-            "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
-            "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
-        },
-        "rollout": {
-            "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
-            "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
-            "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
-            "max_tokens": 2000,                  # max output tokens per generation call during rollout
-        },
-        "judgment": {
-            "model": judge_model,                # model that scores transcripts for behavior presence
-            "max_tokens": 2000,                  # max output tokens per judgment call
-            "num_samples": 1,                    # score samples per transcript to average (higher = less variance)
-            "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
-            "metajudgment_qualities": ["diversity"],             # qualities assessed across all transcripts in the metajudge step
-            "metajudgment": False, #True,        # set False to skip the metajudge step entirely
-        },
-        "beast": {
-            "k1": 5,                            # beam width: number of beams kept after each scoring step
-            "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
-            "suffix_length": 20,                 # evaluator message length to search in tokens
-            "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
-            "pool_size": 20,                     # max candidates kept in the pool
-            "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
-            "temperature": 1.0,                  # sampling temperature for token expansion
-            "top_p": 1.0,                        # nucleus sampling p for token expansion
-            "suffix_after_tokens": None,         # None = append suffix after full baseline; 0 = generate whole message from scratch; N = keep first N tokens of baseline then let BEAST continue
-            "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
-            "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
-        },
-    })
-
-
-    # Load behavior description and prompt preset from prompts.yaml
-    _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
-    _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
-    if not _behavior_desc:
-        raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
-    cfg["behavior_description"] = _behavior_desc.strip()
-
-    _preset_name = cfg.get("prompt_preset", "")
-    if _preset_name:
-        _preset = _prompts.get("prompt_presets", {}).get(_preset_name)
-        if not _preset:
-            raise ValueError(f"No prompt preset found for '{_preset_name}' in prompts.yaml")
-        for k, v in _preset.items():
-            if k not in cfg:  # cfg overrides take priority
-                cfg[k] = v.strip() if isinstance(v, str) else v
-        print(f"Loaded prompt preset: {_preset_name}", flush=True)
-
-    base_folder = cfg.get("folder_name", "runs/default")
-    num_rounds = cfg.get("num_rounds", 1)
-    async def run_parallel() -> bool:
-        """Returns True if there was an error."""
-        # Round 1: full pipeline
-        print("\n" + "#" * 60, flush=True)
-        print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
-        print("#" * 60, flush=True)
-        round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
-        cfg.folder_name = f"{base_folder}/round_1"
-        result = await run_pipeline(cfg)
-        if not result:
-            print("\n  Round 1 FAILED", flush=True)
-            return True
-        stats = result.get("summary_statistics", {})
-        print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-              f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
-        # Logprob scoring is computed inline during rollout — no separate stage needed.
-        # Load understanding from round 1 for reuse in all subsequent rounds
-        with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
-            understanding_results = json.load(f)
-        ideation_results = {"variations": []}  # variations come from refinements in round 2+
-        prompts_yaml = load_prompts(cfg)
-
-        # Rounds 2+: refine each scenario using full accumulated history
-        completed_round_dirs: List[Path] = [round_1_dir]
-        for round_num in range(2, num_rounds + 1):
+        base_folder = cfg.get("folder_name", "runs/default")
+        num_rounds = cfg.get("num_rounds", 1)
+        async def run_parallel() -> bool:
+            """Returns True if there was an error."""
+            # Round 1: full pipeline
             print("\n" + "#" * 60, flush=True)
-            print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
+            print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
             print("#" * 60, flush=True)
-            output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
-            output_dir.mkdir(parents=True, exist_ok=True)
-            save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
-            result = await run_parallel_round(
-                completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
-            )
-            completed_round_dirs.append(output_dir)
-            if result:
-                stats = result.get("summary_statistics", {})
-                print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-                      f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
-            else:
-                print(f"\n  Round {round_num} FAILED", flush=True)
+            round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
+            cfg.folder_name = f"{base_folder}/round_1"
+            result = await run_pipeline(cfg)
+            if not result:
+                print("\n  Round 1 FAILED", flush=True)
                 return True
-        return False
-    had_error = asyncio.run(run_parallel())
+            stats = result.get("summary_statistics", {})
+            print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
+                f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
+            # Logprob scoring is computed inline during rollout — no separate stage needed.
+            # Load understanding from round 1 for reuse in all subsequent rounds
+            with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
+                understanding_results = json.load(f)
+            ideation_results = {"variations": []}  # variations come from refinements in round 2+
+            prompts_yaml = load_prompts(cfg)
+
+            # Rounds 2+: refine each scenario using full accumulated history
+            completed_round_dirs: List[Path] = [round_1_dir]
+            for round_num in range(2, num_rounds + 1):
+                print("\n" + "#" * 60, flush=True)
+                print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
+                print("#" * 60, flush=True)
+                output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
+                output_dir.mkdir(parents=True, exist_ok=True)
+                save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
+                result = await run_parallel_round(
+                    completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
+                )
+                completed_round_dirs.append(output_dir)
+                if result:
+                    stats = result.get("summary_statistics", {})
+                    print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
+                        f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
+                else:
+                    print(f"\n  Round {round_num} FAILED", flush=True)
+                    return True
+            return False
+        had_error = asyncio.run(run_parallel())
+
+        # # Launch viewer unless there was an error
+        # if not had_error:
+        #     viewer_dir = cfg.get("viewer_dir", "src/bloom-viewer")
+        #     if viewer_dir:
+        #         results_dir = (SCRIPT_DIR / base_folder).resolve()
+        #         launch_viewer(viewer_dir, results_dir)
