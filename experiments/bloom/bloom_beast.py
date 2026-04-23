@@ -2090,6 +2090,11 @@ def beast_search_evaluator_message(
         # No TRS generated — return just the normal message as the single pool entry
         return [(baseline_msg, 0.0, baseline_msg, "")], ""
 
+    # ── Short-circuit if BEAST is disabled ──────────────────────────────────
+    # Skip the entire beam search and return the Phase 1 baseline as-is.
+    if not beast_cfg.get("use_beast", True):
+        return [(baseline_msg, 0.0, baseline_msg, "")], trs
+
     # ── Extract BEAST hyperparams ──────────────────────────────────────────
     k1            = beast_cfg.get("k1", 15)
     k2            = beast_cfg.get("k2", 15)
@@ -3867,10 +3872,11 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "beast": {
+        "use_beast": True,                   # False = skip beam search entirely, use Phase 1 baseline message as-is
         "k1": 5,                            # beam width: number of beams kept after each scoring step
         "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
         "suffix_length": 20,                 # evaluator message length to search in tokens
-        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token)
+        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token), affects suffix_length
         "pool_size": 20,                     # max candidates kept in the pool
         "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                  # sampling temperature for token expansion
