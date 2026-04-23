@@ -1404,10 +1404,30 @@ _RE_TRS_CLEANUP = re.compile(r"[\s.…]+$")
 
 def _extract_message_tags(content: str) -> Tuple[str, str]:
     """Extract <message> and <targeted_response_start> from evaluator output.
-    Returns (user_message, targeted_response_start)."""
+    Returns (user_message, targeted_response_start).
+
+    Robust to the common failure mode where the evaluator forgets the OPENING
+    <message> tag but still emits </message> and the TRS tags afterward. In that
+    case we take the text before the first structural tag as the user message,
+    so the target never receives leaked tag content.
+    """
     msg_match = _RE_MESSAGE.search(content)
     trs_match = _RE_TRS.search(content)
-    user_msg = msg_match.group(1).strip() if msg_match else content
+
+    if msg_match:
+        user_msg = msg_match.group(1).strip()
+    else:
+        # No opening <message> tag — cut off at the first structural boundary we can find.
+        # Any of </message>, <targeted_response_start>, or </targeted_response_start>
+        # marks the end of what the evaluator "intended" as the message body.
+        cut_match = re.search(
+            r"</message>|<targeted_response_start>|</targeted_response_start>",
+            content,
+        )
+        user_msg = (content[: cut_match.start()] if cut_match else content).strip()
+        # Strip any leftover stray opening tag fragment at the start
+        user_msg = re.sub(r"^\s*<message>\s*", "", user_msg)
+
     trs = _RE_TRS_CLEANUP.sub("", trs_match.group(1).strip()) if trs_match else ""
     return user_msg, trs
 
@@ -1874,12 +1894,18 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
 
 
 def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
-    """Build a boolean mask over the vocabulary that blocks non-Latin tokens.
-    Blocked: non-ASCII characters, and the chars in blocked_chars.
-    Also blocks any explicitly listed multi-token strings by token ID.
+    """Build a boolean mask over the vocabulary that blocks any token whose decoded
+    text contains a character outside the allowlist: ASCII letters, space, and a
+    minimal punctuation set (.,!?-). Blocks digits, quotes, brackets, slashes,
+    newlines, and every non-ASCII character. Also blocks explicitly listed tokens.
     Returns a bool tensor of shape [vocab_size] on CPU (move to device before use)."""
     vocab_size = model_vocab_size or len(tokenizer)
-    blocked_chars = set('\'"<|\\/\n*1234567890')
+    # Allowlist: letters a–z/A–Z, space, and a tiny set of punctuation
+    allowed_chars = set(
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        " .,!?-"
+    )
     mask = torch_module.ones(vocab_size, dtype=torch_module.bool)
 
     extra_blocked_tokens = ["..."]
@@ -1894,7 +1920,7 @@ def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
             continue
         text = tokenizer.decode([token_id])
         for ch in text:
-            if ch in blocked_chars or ord(ch) >= 128:
+            if ch not in allowed_chars:
                 mask[token_id] = False
                 break
     return mask
@@ -3894,7 +3920,7 @@ cfg = DotDict({
 
 
 if __name__ == "__main__":
-    if False:
+    if True:
         # Just run viewer
         viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
         env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
