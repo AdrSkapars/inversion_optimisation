@@ -351,6 +351,9 @@ _LOCAL_INFERENCE_LOCK = threading.Lock()
 # Registry: hf_model_name → LocalModel instance (loaded once, kept in memory)
 _LOCAL_MODEL_REGISTRY: Dict[str, Any] = {}
 
+# Cache: id(lm_eval) → latin token mask tensor (built once per lm_eval model)
+_LATIN_MASK_CACHE: Dict[int, Any] = {}
+
 
 class LocalModel:
     """Wraps a HuggingFace model + tokenizer loaded onto the local device."""
@@ -2136,18 +2139,20 @@ def beast_search_evaluator_message(
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
-    # ── Build latin mask (once, on lm_eval device) ────────────────────────
-    use_latin_mask = beast_cfg.get("latin_mask", False)
+    # ── Build latin mask (cached per lm_eval, on its device) ──────────────
     latin_mask = None
-    if use_latin_mask:
-        torch = lm_eval.torch
-        vocab_size = (
-            getattr(lm_eval.model.config, "vocab_size", None)
-            or getattr(getattr(lm_eval.model.config, "text_config", None), "vocab_size", None)
-            or lm_eval.tokenizer.vocab_size
-        )
-        latin_mask = build_latin_token_mask(torch, lm_eval.tokenizer, vocab_size).to(lm_eval.device)
-        print(f"    Latin mask built ({latin_mask.sum().item()} / {vocab_size} tokens allowed)", flush=True)
+    if beast_cfg.get("latin_mask", False):
+        cache_key = id(lm_eval)
+        latin_mask = _LATIN_MASK_CACHE.get(cache_key)
+        if latin_mask is None:
+            torch = lm_eval.torch
+            vocab_size = (
+                getattr(lm_eval.model.config, "vocab_size", None)
+                or getattr(getattr(lm_eval.model.config, "text_config", None), "vocab_size", None)
+                or lm_eval.tokenizer.vocab_size
+            )
+            latin_mask = build_latin_token_mask(torch, lm_eval.tokenizer, vocab_size).to(lm_eval.device)
+            _LATIN_MASK_CACHE[cache_key] = latin_mask
 
     # ── Run single BEAST trial ────────────────────────────────────────────
     print(f"    BEAST search (k1={k1}, k2={k2}, len={suffix_length}) ...", flush=True)
