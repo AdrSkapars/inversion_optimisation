@@ -2401,9 +2401,27 @@ def run_rollout_batched_local(
     var_descs: List[str] = []
     rollout_prompt_texts: List[str] = []
     setup_msgs_list: List[List[Dict]] = []
-    for variation in variations:
+
+    # Resume: figure out which variations are already complete on disk so we can skip them
+    # entirely (no setup, no BEAST, no rollout). A variation counts as complete if all of
+    # its expected reps (transcript_v{var_idx}r{1..num_per_scenario}.json) exist.
+    # transcripts_dir was already created above.
+    def _variation_done(var_idx_1based: int) -> bool:
+        return all(
+            (transcripts_dir / f"transcript_v{var_idx_1based}r{rep}.json").exists()
+            for rep in range(1, num_per_scenario + 1)
+        )
+
+    for var_idx_0based, variation in enumerate(variations):
+        var_idx = var_idx_0based + 1
         vd = variation.get("description", str(variation)) if isinstance(variation, dict) else str(variation)
         var_descs.append(vd)
+        if _variation_done(var_idx):
+            # Placeholder values so list indices line up with var_idx; the main loop below
+            # checks _variation_done again and skips work for these.
+            rollout_prompt_texts.append("")
+            setup_msgs_list.append(None)  # type: ignore[arg-type]
+            continue
         rp = build_rollout_prompt(
             behavior_name, behavior_understanding, scientific_motivation,
             transcript_analyses, vd, max_turns, prompts_yaml, target_model_name,
@@ -2414,18 +2432,59 @@ def run_rollout_batched_local(
             {"role": "user",   "content": rp},
         ])
 
-    print(f"  Running setup for {len(variations)} variations (batch_size={batch_size}) ...", flush=True)
-    setup_contents: List[str] = []
-    for chunk_start in range(0, len(setup_msgs_list), batch_size):
-        chunk = setup_msgs_list[chunk_start: chunk_start + batch_size]
+    # Only run setup-phase batches for variations that aren't already complete
+    n_to_run = sum(1 for s in setup_msgs_list if s is not None)
+    n_skipped = len(variations) - n_to_run
+    if n_skipped:
+        print(f"  Resume: {n_skipped}/{len(variations)} variations already have transcripts — skipping", flush=True)
+
+    print(f"  Running setup for {n_to_run} variations (batch_size={batch_size}) ...", flush=True)
+    # Build setup_contents aligned 1:1 with variations; placeholder "" for skipped ones.
+    setup_contents: List[str] = [""] * len(setup_msgs_list)
+    pending_indices = [i for i, s in enumerate(setup_msgs_list) if s is not None]
+    pending_msgs    = [setup_msgs_list[i] for i in pending_indices]
+    pending_outputs: List[str] = []
+    for chunk_start in range(0, len(pending_msgs), batch_size):
+        chunk = pending_msgs[chunk_start: chunk_start + batch_size]
         chunk_raws = batch_generate_local(lm_eval, chunk, eval_max_tokens, temperature, no_think=no_think_eval)
         for raw in chunk_raws:
             parsed = parse_message(_make_local_response(raw))
-            setup_contents.append(parsed["content"] or raw)
+            pending_outputs.append(parsed["content"] or raw)
+    for idx, content in zip(pending_indices, pending_outputs):
+        setup_contents[idx] = content
 
     for var_idx, (variation, var_desc, rollout_prompt_text, setup_content) in enumerate(
         zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1
     ):
+        # Resume: variation already has all its transcripts on disk → load and skip BEAST.
+        if _variation_done(var_idx):
+            print(f"\n  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
+            for rep in range(1, num_per_scenario + 1):
+                tf_path = transcripts_dir / f"transcript_v{var_idx}r{rep}.json"
+                try:
+                    with open(tf_path, "r", encoding="utf-8") as f:
+                        td = json.load(f)
+                except Exception as e:
+                    print(f"    Could not read existing {tf_path.name}: {e} — will be missing from rollout summary", flush=True)
+                    continue
+                turn_lps = [
+                    m["targeted_response_start_logprob"]
+                    for m in td.get("messages", [])
+                    if m.get("targeted_response_start_logprob") is not None
+                ]
+                avg_lp = round(sum(turn_lps) / len(turn_lps), 4) if turn_lps else None
+                entry: Dict[str, Any] = {
+                    "variation_number":      var_idx,
+                    "variation_description": var_desc,
+                    "repetition_number":     rep,
+                    "num_turns":             len(td.get("messages", [])),
+                    "transcript_file":       tf_path.name,
+                }
+                if avg_lp is not None:
+                    entry["avg_logprob"] = avg_lp
+                rollouts.append(entry)
+            continue
+
         print(f"\n  Variation {var_idx}/{len(variations)}: BEAST search ...", flush=True)
 
         match = re.search(r"<system_prompt>(.*?)</system_prompt>", setup_content, re.DOTALL)
@@ -3099,9 +3158,14 @@ def run_judgment_batched_local(
     transcript_files = sorted(tf_dir.glob("transcript_v*r*.json"))
     print(f"Found {len(transcript_files)} transcript files", flush=True)
 
-    # Load all transcripts and build per-entry state
+    # Load all transcripts and build per-entry state.
+    # Resume: if a transcript already has a non-null `judgment` field, skip the LLM calls
+    # and reuse the cached judgment. We still emit it in the final judgment.json so the
+    # output is complete even on partial reruns.
     variations = variations_override if variations_override is not None else ideation_results.get("variations", [])
     entries = []
+    cached_results: List[Dict[str, Any]] = []
+    n_cached = 0
     for tf in transcript_files:
         m = re.match(r"transcript_v(\d+)r(\d+)\.json", tf.name)
         if not m:
@@ -3118,6 +3182,29 @@ def run_judgment_batched_local(
         if var_num <= len(variations):
             vd = variations[var_num - 1]
             var_description = vd.get("description", str(vd)) if isinstance(vd, dict) else str(vd)
+
+        # Resume path: cached judgment already in the transcript file
+        cached_j = transcript_data.get("judgment")
+        if isinstance(cached_j, dict) and cached_j.get("scores"):
+            scores = cached_j.get("scores", {})
+            bp = scores.get("behavior_presence", 0)
+            cached_entry: Dict[str, Any] = {
+                "variation_number": var_num,
+                "variation_description": var_description,
+                "repetition_number": rep_num,
+                "behavior_presence": bp,
+                "justification": cached_j.get("justification", ""),
+                "summary": cached_j.get("summary", ""),
+                "full_judgment_response": "",
+                "num_samples": cached_j.get("num_samples", num_samples),
+                "individual_samples": [],
+            }
+            for quality in additional_qualities:
+                key = quality.replace("-", "_")
+                cached_entry[key] = scores.get(key, 0)
+            cached_results.append(cached_entry)
+            n_cached += 1
+            continue
 
         eval_transcript = extract_transcript_text(transcript_data.get("messages", []))
         judge_prompt = build_judge_prompt(
@@ -3136,7 +3223,10 @@ def run_judgment_batched_local(
             "sample_responses": [],     # filled in pass 2
         })
 
-    if not entries:
+    if n_cached:
+        print(f"  Resume: {n_cached}/{len(transcript_files)} transcripts already judged — reusing", flush=True)
+
+    if not entries and not cached_results:
         print("No transcripts found to judge.", flush=True)
         return None
 
@@ -3171,8 +3261,9 @@ def run_judgment_batched_local(
                 e["sample_responses"].append(parsed["content"] or raw)
 
     # ── Collate results ──
-    judgments = []
-    failed_judgments = []
+    # Seed with cached judgments loaded from existing transcript files (resume).
+    judgments: List[Dict[str, Any]] = list(cached_results)
+    failed_judgments: List[Dict[str, Any]] = []
     for e in entries:
         all_samples = []
         all_justifications = []
@@ -3272,7 +3363,7 @@ def run_judgment_batched_local(
     results = {
         "behavior_name": behavior_name,
         "model": model_id,
-        "total_conversations": len(entries),
+        "total_conversations": len(entries) + len(cached_results),
         "summary_statistics": {
             "average_behavior_presence_score": round(avg_bp, 2),
             "min_behavior_presence_score": min(bp_scores) if bp_scores else 0,
