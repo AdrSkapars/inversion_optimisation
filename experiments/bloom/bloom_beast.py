@@ -3964,33 +3964,33 @@ cfg = DotDict({
     },
     "ideation": {
         "model": judge_model,                # model that generates evaluation scenarios
-        "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
         "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
+        "num_scenarios": 25, #50,            # total scenarios to generate; more = broader coverage but slower rollout
     },
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
         "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
-        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "max_tokens": 2000,                  # max output tokens per generation call during rollout
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
+        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
         "max_tokens": 2000,                  # max output tokens per judgment call
+        "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_samples": 1,                    # score samples per transcript to average (higher = less variance)
         "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
         "metajudgment_qualities": ["diversity"],             # qualities assessed across all transcripts in the metajudge step
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
-        "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
     },
     "refinement": {
         "model": judge_model,                # model that refines scenarios between rounds (defaults to judge model)
-        "max_tokens": 4000,                  # max output tokens per refinement call
+        "max_tokens": 2000,                  # max output tokens per refinement call
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 1,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
-        "history_rounds": 1,                 # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+        "num_rounds": 3,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "history_rounds": None,                 # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
     },
     "beast": {
         "use_beast": True,                   # False = skip beam search entirely, use Phase 1 baseline message as-is
@@ -4010,7 +4010,7 @@ cfg = DotDict({
 
 
 if __name__ == "__main__":
-    if True:
+    if False:
         # Just run viewer
         viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
         env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
