@@ -379,16 +379,13 @@ class LocalModel:
 
         # Detect AWQ-quantized models from the repo name. AWQ weights ship with their own
         # quantization config in config.json, so HF transformers picks the right kernels
-        # automatically — but we must NOT force a torch_dtype (let HF/autoawq pick) and
-        # we need autoawq installed.
+        # automatically — but we must NOT force a torch_dtype (let HF/autoawq pick).
+        # We don't gate on `import awq` here because (a) the actual loader may use a
+        # different backend (autoawq_kernels, optimum, etc.) and (b) catching ImportError
+        # masks deeper failures (missing CUDA kernel build, version mismatch, etc.).
+        # HF transformers will surface a precise error from from_pretrained if anything
+        # is wrong with the AWQ backend.
         is_awq = "awq" in hf_name.lower()
-        if is_awq:
-            try:
-                import awq  # noqa: F401  (autoawq package, imports as `awq`)
-            except ImportError:
-                raise ImportError(
-                    f"Loading AWQ model '{hf_name}' requires autoawq: pip install autoawq"
-                )
 
         dtype = torch.bfloat16 if device == "cuda" else torch.float32
         load_dtype = "auto" if is_awq else dtype
@@ -3970,7 +3967,7 @@ judge_model = "local/pytorch/gemma-3-27b-it-AWQ-INT4"  # AWQ 4-bit, ~16GB VRAM (
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small enough that quantization isn't worth the calibration loss
 
 cfg = DotDict({
-    "folder_name": "runs_8_beast_iterate/refine_3_full_history_new",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_9/quantized",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -3978,7 +3975,7 @@ cfg = DotDict({
 
     "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
-    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "batch_size": 25,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
@@ -4013,7 +4010,7 @@ cfg = DotDict({
         "model": judge_model,                # model that refines scenarios between rounds (defaults to judge model)
         "max_tokens": 2000,                  # max output tokens per refinement call
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 3,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "num_rounds": 1,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,                 # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
     },
     "beast": {
@@ -4034,7 +4031,7 @@ cfg = DotDict({
 
 
 if __name__ == "__main__":
-    if True:
+    if False:
         # Just run viewer
         viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
         env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
