@@ -172,7 +172,12 @@
         </div>
       </div>
     {:else}
-      <TranscriptViewer {filePath} />
+      <!-- Keyed on filePath so navigating between rounds (same route, different params) -->
+      <!-- forces a full remount: the transcript loader is recreated with the new path -->
+      <!-- and its cached data (which would otherwise short-circuit refetch) is dropped. -->
+      {#key filePath}
+        <TranscriptViewer {filePath} />
+      {/key}
     {/if}
   </main>
 </div>

@@ -376,9 +376,25 @@ class LocalModel:
             )
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-        print(f"[local] Loading {hf_name} on {device} ({dtype})...", flush=True)
+        # Detect AWQ-quantized models from the repo name. AWQ weights ship with their own
+        # quantization config in config.json, so HF transformers picks the right kernels
+        # automatically — but we must NOT force a torch_dtype (let HF/autoawq pick) and
+        # we need autoawq installed.
+        is_awq = "awq" in hf_name.lower()
+        if is_awq:
+            try:
+                import awq  # noqa: F401  (autoawq package, imports as `awq`)
+            except ImportError:
+                raise ImportError(
+                    f"Loading AWQ model '{hf_name}' requires autoawq: pip install autoawq"
+                )
+
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        load_dtype = "auto" if is_awq else dtype
+
+        print(f"[local] Loading {hf_name} on {device} "
+              f"({'AWQ' if is_awq else dtype})...", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(hf_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -386,12 +402,13 @@ class LocalModel:
         self.model = AutoModelForCausalLM.from_pretrained(
             hf_name,
             device_map=device,
-            torch_dtype=dtype,
+            torch_dtype=load_dtype,
             low_cpu_mem_usage=True,
         )
         self.model.eval()
         self.device = device
         self.torch = torch
+        self.is_awq = is_awq
         print(f"[local] {hf_name} ready.", flush=True)
 
 
@@ -1816,8 +1833,8 @@ async def run_single_rollout(
                 max_turns=rollout_cfg.max_turns,
                 evaluator_reasoning_effort=_effort(cfg.rollout.get("evaluator_thinking", False)),
                 target_reasoning_effort=_effort(cfg.rollout.get("target_thinking", False)),
-                evaluator_max_tokens=rollout_cfg.get("max_tokens", 4000),
-                target_max_tokens=rollout_cfg.get("max_tokens", 4000),
+                evaluator_max_tokens=rollout_cfg.get("evaluator_max_tokens", rollout_cfg.get("max_tokens", 4000)),
+                target_max_tokens=rollout_cfg.get("target_max_tokens", rollout_cfg.get("max_tokens", 4000)),
                 evaluator_temperature=cfg.get("temperature", DEFAULT_TEMPERATURE_DETERMINISTIC),
                 target_temperature=cfg.get("temperature", DEFAULT_TEMPERATURE_DETERMINISTIC),
                 target_kickoff_prefix=target_kickoff_prefix,
@@ -2330,7 +2347,12 @@ def run_rollout_batched_local(
     transcript_analyses = understanding_results.get("transcript_analyses", [])
     variations = variations_override if variations_override is not None else ideation_results["variations"]
     max_turns    = cfg.rollout.get("max_turns", 5)
-    max_tokens   = cfg.rollout.get("max_tokens", 4000)
+    # Split eval vs target token budgets — evaluator only needs to emit a short <message>
+    # + <targeted_response_start> block, while the target produces the actual response.
+    # Falls back to legacy unified `max_tokens` if the split keys aren't set.
+    _legacy_mt   = cfg.rollout.get("max_tokens", 4000)
+    eval_max_tokens   = cfg.rollout.get("evaluator_max_tokens", _legacy_mt)
+    target_max_tokens = cfg.rollout.get("target_max_tokens", _legacy_mt)
     temperature  = cfg.get("temperature", DEFAULT_TEMPERATURE)
     no_think_eval   = not cfg.rollout.get("evaluator_thinking", False)
     no_think_target = not cfg.rollout.get("target_thinking", False)
@@ -2394,7 +2416,7 @@ def run_rollout_batched_local(
     setup_contents: List[str] = []
     for chunk_start in range(0, len(setup_msgs_list), batch_size):
         chunk = setup_msgs_list[chunk_start: chunk_start + batch_size]
-        chunk_raws = batch_generate_local(lm_eval, chunk, max_tokens, temperature, no_think=no_think_eval)
+        chunk_raws = batch_generate_local(lm_eval, chunk, eval_max_tokens, temperature, no_think=no_think_eval)
         for raw in chunk_raws:
             parsed = parse_message(_make_local_response(raw))
             setup_contents.append(parsed["content"] or raw)
@@ -2429,7 +2451,7 @@ def run_rollout_batched_local(
         kickoff_pool, trs_kickoff = beast_search_evaluator_message(
             lm_eval, lm_target,
             eval_msgs_kickoff_ctx, target_msgs_base,
-            beast_cfg, no_think_eval, max_tokens, temperature, batch_size,
+            beast_cfg, no_think_eval, eval_max_tokens, temperature, batch_size,
         )
 
         # Save full pool for this variation
@@ -2481,7 +2503,7 @@ def run_rollout_batched_local(
             for turn in range(max_turns):
                 # Target responds
                 raw_target = batch_generate_local(
-                    lm_target, [target_msgs], max_tokens, temperature, no_think=no_think_target
+                    lm_target, [target_msgs], target_max_tokens, temperature, no_think=no_think_target
                 )[0]
                 parsed_target = parse_message(_make_local_response(raw_target))
                 target_resp   = parsed_target["content"] or raw_target
@@ -2506,7 +2528,7 @@ def run_rollout_batched_local(
                 turn_pool, turn_trs = beast_search_evaluator_message(
                     lm_eval, lm_target,
                     eval_msgs_turn, target_msgs,
-                    beast_cfg, no_think_eval, max_tokens, temperature, batch_size,
+                    beast_cfg, no_think_eval, eval_max_tokens, temperature, batch_size,
                 )
                 next_msg, next_score, next_baseline, next_suffix = turn_pool[0]
 
@@ -3941,10 +3963,11 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 # Section 11: Config & Main
 # =============================================================================
 
-judge_model = "local/google/gemma-3-27b-it"
+judge_model = "local/pytorch/gemma-3-27b-it-AWQ-INT4"  # AWQ 4-bit, ~16GB VRAM (needs `pip install autoawq`)
+# judge_model = "local/google/gemma-3-27b-it"          # full bf16, ~55GB VRAM
 # judge_model = "local/Qwen/Qwen3-4B"
 
-target_model = "local/Qwen/Qwen3-4B"
+target_model = "local/Qwen/Qwen3-4B"  # bf16; small enough that quantization isn't worth the calibration loss
 
 cfg = DotDict({
     "folder_name": "runs_8_beast_iterate/refine_3_full_history_new",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
@@ -3971,7 +3994,8 @@ cfg = DotDict({
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
         "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
-        "max_tokens": 2000,                  # max output tokens per generation call during rollout
+        "evaluator_max_tokens": 2000,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; doesn't need much)
+        "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
@@ -4010,7 +4034,7 @@ cfg = DotDict({
 
 
 if __name__ == "__main__":
-    if False:
+    if True:
         # Just run viewer
         viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
         env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
