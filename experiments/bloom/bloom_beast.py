@@ -377,21 +377,17 @@ class LocalModel:
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Detect AWQ-quantized models from the repo name. AWQ weights ship with their own
-        # quantization config in config.json, so HF transformers picks the right kernels
-        # automatically — but we must NOT force a torch_dtype (let HF/autoawq pick).
-        # We don't gate on `import awq` here because (a) the actual loader may use a
-        # different backend (autoawq_kernels, optimum, etc.) and (b) catching ImportError
-        # masks deeper failures (missing CUDA kernel build, version mismatch, etc.).
-        # HF transformers will surface a precise error from from_pretrained if anything
-        # is wrong with the AWQ backend.
-        is_awq = "awq" in hf_name.lower()
+        # Pre-quantized bitsandbytes models (e.g. unsloth/...-bnb-4bit) ship with their
+        # own quantization_config in config.json — HF picks the right kernels automatically
+        # as long as `bitsandbytes` is installed.
+        is_bnb_pre = ("bnb" in hf_name.lower()) or ("-4bit" in hf_name.lower()) or ("-8bit" in hf_name.lower())
 
         dtype = torch.bfloat16 if device == "cuda" else torch.float32
-        load_dtype = "auto" if is_awq else dtype
+        # bnb-pre-quantized models specify their own compute dtype in config — let HF pick.
+        load_dtype = "auto" if is_bnb_pre else dtype
 
-        print(f"[local] Loading {hf_name} on {device} "
-              f"({'AWQ' if is_awq else dtype})...", flush=True)
+        label = "bnb-pre" if is_bnb_pre else str(dtype)
+        print(f"[local] Loading {hf_name} on {device} ({label})...", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(hf_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -405,7 +401,7 @@ class LocalModel:
         self.model.eval()
         self.device = device
         self.torch = torch
-        self.is_awq = is_awq
+        self.is_bnb_pre = is_bnb_pre
         print(f"[local] {hf_name} ready.", flush=True)
 
 
@@ -461,6 +457,14 @@ def batch_generate_local(
     input_ids = torch.tensor(padded, dtype=torch.long, device=lm.device)
     attention_mask = (input_ids != pad_id).long()
 
+    # Defensive logits sanitizer — quantized kernels occasionally produce NaN/Inf
+    # logits (range overflow) that crash torch.multinomial inside HF's _sample with a
+    # CUDA assert. Cheap no-op for healthy models.
+    from transformers import LogitsProcessorList, LogitsProcessor
+    class _SanitizeLogits(LogitsProcessor):
+        def __call__(self, input_ids_, scores):
+            return torch.nan_to_num(scores, nan=-1e4, posinf=1e4, neginf=-1e4)
+
     with torch.no_grad():
         out = lm.model.generate(
             input_ids,
@@ -469,6 +473,7 @@ def batch_generate_local(
             temperature=max(temperature, 1e-6),
             do_sample=temperature > 1e-4,
             pad_token_id=pad_id,
+            logits_processor=LogitsProcessorList([_SanitizeLogits()]),
         )
 
     # Collect all EOS token ids from tokenizer + model config
@@ -3960,8 +3965,8 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 # Section 11: Config & Main
 # =============================================================================
 
-judge_model = "local/pytorch/gemma-3-27b-it-AWQ-INT4"  # AWQ 4-bit, ~16GB VRAM (needs `pip install autoawq`)
-# judge_model = "local/google/gemma-3-27b-it"          # full bf16, ~55GB VRAM
+judge_model = "local/unsloth/gemma-3-27b-it-bnb-4bit"   # bnb 4-bit, ~16GB VRAM (needs `uv add bitsandbytes`)
+# judge_model = "local/google/gemma-3-27b-it"           # full bf16, ~55GB VRAM
 # judge_model = "local/Qwen/Qwen3-4B"
 
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small enough that quantization isn't worth the calibration loss
