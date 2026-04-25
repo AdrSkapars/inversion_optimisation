@@ -4071,7 +4071,7 @@ cfg = DotDict({
 
     "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
-    "batch_size": 15,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
+    "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
