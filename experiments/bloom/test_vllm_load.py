@@ -63,10 +63,40 @@ gguf_path = hf_hub_download(repo_id=REPO, filename=llm_filename)
 hf_hub_download(repo_id=REPO, filename=mmproj_filename)
 print(f"  GGUF at: {gguf_path}", flush=True)
 
+# Inspect the GGUF's actual vocab size — Gemma-3 quants are commonly text-only with
+# a vocab smaller than the full multimodal HF config (which adds vision tokens).
+try:
+    import gguf
+    reader = gguf.GGUFReader(gguf_path)
+    embed_tensor = next(
+        (t for t in reader.tensors if "embed" in t.name.lower() or "token_embd" in t.name.lower()),
+        None,
+    )
+    if embed_tensor is not None:
+        actual_vocab = embed_tensor.shape[1] if len(embed_tensor.shape) >= 2 else embed_tensor.shape[0]
+        print(f"  GGUF embedding shape: {tuple(embed_tensor.shape)}  →  vocab={actual_vocab}", flush=True)
+    else:
+        print("  Could not find embedding tensor in GGUF for vocab inspection", flush=True)
+        actual_vocab = None
+except Exception as e:
+    print(f"  GGUF inspection failed (non-fatal): {e}", flush=True)
+    actual_vocab = None
+
+# Patch vocab_size in the HF config if it differs from the GGUF (text-only quants are
+# usually smaller than multimodal HF config). Gemma-3 nests text settings under text_config.
+hf_overrides = {}
+if actual_vocab is not None:
+    hf_overrides = {
+        "vocab_size": actual_vocab,
+        "text_config": {"vocab_size": actual_vocab},
+    }
+    print(f"  Forcing vocab_size={actual_vocab} via hf_overrides", flush=True)
+
 llm_eval = LLM(
     model=gguf_path,                         # local file, sidesteps repo validation
     tokenizer="google/gemma-3-27b-it",       # multimodal model: needs original tokenizer
     hf_config_path="google/gemma-3-27b-it",  # and original config (for architecture info)
+    hf_overrides=hf_overrides,
     quantization="gguf",
     dtype="bfloat16",
     gpu_memory_utilization=0.85,
