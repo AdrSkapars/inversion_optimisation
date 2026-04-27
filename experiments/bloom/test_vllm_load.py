@@ -32,8 +32,10 @@ import torch
 # Try the colon-suffix syntax first (vLLM ≥ ~0.6 supports this for HF GGUF repos).
 # If it fails, fall back to manually downloading the .gguf file and pointing at the path.
 try:
+    # NOTE: MaziyarPanahi's GGUF uses dot-separated filenames (gemma-3-27b-it.Q6_K.gguf)
+    # rather than unsloth's dash convention. vLLM's colon syntax resolves either.
     llm_eval = LLM(
-        model="unsloth/gemma-3-27b-it-GGUF:Q6_K",
+        model="MaziyarPanahi/gemma-3-27b-it-GGUF:Q6_K",
         tokenizer="google/gemma-3-27b-it",  # multimodal models need the original tokenizer
         quantization="gguf",
         dtype="bfloat16",
