@@ -27,29 +27,31 @@ print("\n[Test A] Loading Gemma-3-27B-IT GGUF Q6_K on GPU 0...", flush=True)
 
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import LogitsProcessor
+from huggingface_hub import hf_hub_download
 import torch
 
-# Try the colon-suffix syntax first (vLLM ≥ ~0.6 supports this for HF GGUF repos).
-# If it fails, fall back to manually downloading the .gguf file and pointing at the path.
-try:
-    # NOTE: MaziyarPanahi's GGUF uses dot-separated filenames (gemma-3-27b-it.Q6_K.gguf)
-    # rather than unsloth's dash convention. vLLM's colon syntax resolves either.
-    llm_eval = LLM(
-        model="MaziyarPanahi/gemma-3-27b-it-GGUF:Q6_K",
-        tokenizer="google/gemma-3-27b-it",  # multimodal models need the original tokenizer
-        quantization="gguf",
-        dtype="bfloat16",
-        gpu_memory_utilization=0.85,
-        max_model_len=8192,         # cap context to fit comfortably
-        enforce_eager=False,        # let vLLM compile graphs
-    )
-    print("[Test A] Loaded via repo:quant syntax. ✓", flush=True)
-except Exception as e:
-    print(f"[Test A] repo:quant syntax failed: {e}", flush=True)
-    print("[Test A] Try: huggingface-cli download unsloth/gemma-3-27b-it-GGUF "
-          "gemma-3-27b-it-Q6_K.gguf --local-dir ./models", flush=True)
-    print("[Test A] Then re-run with model='./models/gemma-3-27b-it-Q6_K.gguf'", flush=True)
-    raise
+# vLLM's colon syntax (repo:Q6_K) requires the GGUF repo to ALSO have a config.json.
+# Many community GGUF repos (MaziyarPanahi, TheBloke, etc.) are weights-only.
+# Workaround: use hf_hub_download to fetch the .gguf file, get the local cache path,
+# and pass that directly to vLLM. Tokenizer + config come from the original Google repo.
+print("  Resolving GGUF file location (downloads if not cached)...", flush=True)
+gguf_path = hf_hub_download(
+    repo_id="MaziyarPanahi/gemma-3-27b-it-GGUF",
+    filename="gemma-3-27b-it.Q6_K.gguf",
+)
+print(f"  GGUF at: {gguf_path}", flush=True)
+
+llm_eval = LLM(
+    model=gguf_path,                         # local file, sidesteps repo validation
+    tokenizer="google/gemma-3-27b-it",       # multimodal model: needs original tokenizer
+    hf_config_path="google/gemma-3-27b-it",  # and original config (for architecture info)
+    quantization="gguf",
+    dtype="bfloat16",
+    gpu_memory_utilization=0.85,
+    max_model_len=8192,
+    enforce_eager=False,
+)
+print("[Test A] Loaded via local GGUF file. ✓", flush=True)
 
 # --- Test B: basic generation ---
 print("\n[Test B] Basic generation...", flush=True)
