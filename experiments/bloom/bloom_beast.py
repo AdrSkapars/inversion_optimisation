@@ -352,76 +352,152 @@ def calculate_batch_size(
 # Section 4.5: Local Model Support
 # =============================================================================
 
-# Threading lock — serialises all GPU inference calls since CUDA is not
-# thread-safe. bloom uses a thread-pool executor for parallel API calls;
-# local models must go one at a time through this lock.
-_LOCAL_INFERENCE_LOCK = threading.Lock()
+# Registry: spec_string → LocalModel instance (loaded once, kept in memory)
+_LOCAL_MODEL_REGISTRY: Dict[str, "LocalModel"] = {}
 
-# Registry: hf_model_name → LocalModel instance (loaded once, kept in memory)
-_LOCAL_MODEL_REGISTRY: Dict[str, Any] = {}
+# Cache: id(lm) → list of allowed Latin token IDs (built once per LLM)
+_LATIN_MASK_CACHE: Dict[int, List[int]] = {}
 
-# Cache: id(lm_eval) → latin token mask tensor (built once per lm_eval model)
-_LATIN_MASK_CACHE: Dict[int, Any] = {}
+# Default per-LLM GPU memory share. With 2 LLMs on the same A6000 (eval + target),
+# each gets 0.45 of total memory ≈ 21 GB; leaves ~6 GB headroom.
+DEFAULT_GPU_MEMORY_UTIL = 0.45
+
+
+def _parse_local_spec(hf_name: str) -> Dict[str, Any]:
+    """Parse a model spec string into vLLM loading kwargs.
+
+    Spec formats:
+      - "Qwen/Qwen3-4B"                                    → plain HF model, bf16
+      - "lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-27b-it"
+                                                            → GGUF quant from first repo,
+                                                              tokenizer/config from third
+      - "<repo>:<quant>"                                   → GGUF without explicit base repo
+                                                              (only works for non-multimodal models)
+
+    Returns a dict with keys:
+      kind:   "hf" or "gguf"
+      repo:   the model/repo identifier
+      quant:  quant tag (only for gguf), e.g. "Q6_K"
+      base:   tokenizer/config repo (only for gguf when explicit)
+    """
+    # Reject any "local/" prefix here — caller should strip it
+    parts = hf_name.split(":")
+    if len(parts) == 1:
+        return {"kind": "hf", "repo": parts[0]}
+    if len(parts) == 2:
+        return {"kind": "gguf", "repo": parts[0], "quant": parts[1], "base": None}
+    if len(parts) >= 3:
+        # Third+ parts joined back as base repo (in case base contains colons, which it shouldn't)
+        return {"kind": "gguf", "repo": parts[0], "quant": parts[1], "base": ":".join(parts[2:])}
+    raise ValueError(f"Could not parse local model spec: {hf_name!r}")
 
 
 class LocalModel:
-    """Wraps a HuggingFace model + tokenizer loaded onto the local device."""
+    """Wraps a vLLM `LLM` engine + its tokenizer.
 
-    def __init__(self, hf_name: str, device: Optional[str] = None):
+    Use the spec format documented in `_parse_local_spec`. For GGUF models the file is
+    auto-downloaded via huggingface_hub and the tokenizer/config come from the base repo.
+    """
+
+    def __init__(self, hf_name: str, gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTIL,
+                 max_model_len: int = 8192):
         try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from vllm import LLM
+            from huggingface_hub import hf_hub_download, list_repo_files
         except ImportError:
             raise ImportError(
-                "Local model support requires: pip install torch transformers accelerate"
+                "vLLM backend requires: uv add vllm huggingface_hub"
             )
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # Pre-quantized bitsandbytes models (e.g. unsloth/...-bnb-4bit) ship with their
-        # own quantization_config in config.json — HF picks the right kernels automatically
-        # as long as `bitsandbytes` is installed.
-        is_bnb_pre = ("bnb" in hf_name.lower()) or ("-4bit" in hf_name.lower()) or ("-8bit" in hf_name.lower())
-
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
-        # bnb-pre-quantized models specify their own compute dtype in config — let HF pick.
-        load_dtype = "auto" if is_bnb_pre else dtype
-
-        label = "bnb-pre" if is_bnb_pre else str(dtype)
-        print(f"[local] Loading {hf_name} on {device} ({label})...", flush=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(hf_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            hf_name,
-            device_map=device,
-            torch_dtype=load_dtype,
-            low_cpu_mem_usage=True,
+        self.spec_str = hf_name
+        spec = _parse_local_spec(hf_name)
+        kwargs: Dict[str, Any] = dict(
+            dtype="bfloat16",
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            enforce_eager=False,
         )
-        self.model.eval()
-        self.device = device
-        self.torch = torch
-        self.is_bnb_pre = is_bnb_pre
+
+        if spec["kind"] == "hf":
+            label = f"HF bf16: {spec['repo']}"
+            kwargs["model"] = spec["repo"]
+        else:
+            # GGUF
+            repo = spec["repo"]
+            quant = spec["quant"]
+            base = spec["base"] or repo  # fallback: use the same repo for tokenizer (non-multimodal)
+            label = f"GGUF {quant}: {repo}  (tokenizer/config: {base})"
+            print(f"[local] Discovering GGUF files in {repo}...", flush=True)
+            files = list_repo_files(repo)
+            quant_lower = quant.lower()
+            llm_files = [f for f in files if f.endswith(".gguf")
+                         and quant_lower in f.lower()
+                         and "mmproj" not in f.lower() and "mm-proj" not in f.lower()]
+            mmproj_files = [f for f in files if f.endswith(".gguf")
+                            and ("mmproj" in f.lower() or "mm-proj" in f.lower())]
+            if not llm_files:
+                raise RuntimeError(f"No {quant} GGUF file in {repo}")
+            llm_file = llm_files[0]
+            print(f"[local]   LLM file: {llm_file}", flush=True)
+            gguf_path = hf_hub_download(repo_id=repo, filename=llm_file)
+            if mmproj_files:
+                mmproj_file = mmproj_files[0]
+                print(f"[local]   mmproj file: {mmproj_file}", flush=True)
+                hf_hub_download(repo_id=repo, filename=mmproj_file)
+            kwargs["model"] = gguf_path
+            kwargs["tokenizer"] = base
+            kwargs["hf_config_path"] = base
+            kwargs["quantization"] = "gguf"
+            # Override vocab_size from the GGUF embedding tensor — text-only quants are
+            # commonly smaller than the full multimodal HF config (which includes vision tokens).
+            actual_vocab = self._inspect_gguf_vocab(gguf_path)
+            if actual_vocab is not None:
+                kwargs["hf_overrides"] = {
+                    "vocab_size": actual_vocab,
+                    "text_config": {"vocab_size": actual_vocab},
+                }
+                print(f"[local]   forcing vocab_size={actual_vocab}", flush=True)
+
+        print(f"[local] Loading {label}  (gpu_mem={gpu_memory_utilization})", flush=True)
+        self.llm = LLM(**kwargs)
+        self.tokenizer = self.llm.get_tokenizer()
+        if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         print(f"[local] {hf_name} ready.", flush=True)
 
+    @staticmethod
+    def _inspect_gguf_vocab(gguf_path: str) -> Optional[int]:
+        """Read the GGUF embedding tensor's shape and return the vocab dim (the larger of
+        the two). Returns None on failure."""
+        try:
+            import gguf
+        except ImportError:
+            return None
+        try:
+            reader = gguf.GGUFReader(gguf_path)
+            embed = next(
+                (t for t in reader.tensors if "embed" in t.name.lower() or "token_embd" in t.name.lower()),
+                None,
+            )
+            if embed is None:
+                return None
+            shape = tuple(int(x) for x in embed.shape)
+            return max(shape) if shape else None
+        except Exception:
+            return None
 
-def _get_local_model(hf_name: str, device: Optional[str] = None) -> "LocalModel":
-    """Return the cached LocalModel, loading it on first call.
-    Cache key includes the resolved device so the same model can be loaded on different
-    GPUs while legacy callers (device=None) reuse whatever was loaded first."""
-    import torch
-    if device is None:
-        # Reuse any already-cached instance regardless of device (legacy behavior).
-        for (cached_name, _), lm in _LOCAL_MODEL_REGISTRY.items():
-            if cached_name == hf_name:
-                return lm
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    cache_key = (hf_name, device)
-    if cache_key not in _LOCAL_MODEL_REGISTRY:
-        _LOCAL_MODEL_REGISTRY[cache_key] = LocalModel(hf_name, device=device)
-    return _LOCAL_MODEL_REGISTRY[cache_key]
+
+def _get_local_model(hf_name: str, gpu_memory_utilization: Optional[float] = None,
+                     max_model_len: int = 8192) -> "LocalModel":
+    """Return the cached LocalModel, loading it on first call. Spec format documented in
+    `_parse_local_spec`."""
+    if hf_name in _LOCAL_MODEL_REGISTRY:
+        return _LOCAL_MODEL_REGISTRY[hf_name]
+    util = DEFAULT_GPU_MEMORY_UTIL if gpu_memory_utilization is None else gpu_memory_utilization
+    _LOCAL_MODEL_REGISTRY[hf_name] = LocalModel(
+        hf_name, gpu_memory_utilization=util, max_model_len=max_model_len,
+    )
+    return _LOCAL_MODEL_REGISTRY[hf_name]
 
 
 def batch_generate_local(
@@ -432,87 +508,33 @@ def batch_generate_local(
     no_think: bool = False,
 ) -> List[str]:
     """
-    Run a batched generation pass for a list of conversations.
-    Uses left-padding so all sequences end flush before generation begins.
-    Returns one decoded string per conversation (may contain <think> tags).
+    Batched generation via vLLM. Returns one string per input conversation, decoded
+    with special tokens preserved so <think> tags survive.
 
     no_think: if True, pre-fills <think>\\n\\n</think> after the generation prompt
-    so that thinking models (e.g. Qwen3) skip their reasoning phase entirely.
+    so that thinking models skip their reasoning phase entirely.
     """
     if not messages_list:
         return []
 
-    torch = lm.torch
+    from vllm import SamplingParams
 
-    # Tokenize via the model's own chat template.
-    # When no_think=True, append an empty thinking block to the prompt string so
-    # the model treats the thinking phase as already complete.
-    if no_think:
-        tokenized = []
-        for msgs in messages_list:
-            prompt = lm.tokenizer.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
-            )
-            prompt += "<think>\n\n</think>\n"
-            tokenized.append(lm.tokenizer.encode(prompt, add_special_tokens=False))
-    else:
-        tokenized = [
-            lm.tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True)
-            for msgs in messages_list
-        ]
-
-    max_len = max(len(t) for t in tokenized)
-    pad_id = lm.tokenizer.pad_token_id
-
-    # Left-pad so all sequences end at the same position
-    padded = [[pad_id] * (max_len - len(t)) + t for t in tokenized]
-    input_ids = torch.tensor(padded, dtype=torch.long, device=lm.device)
-    attention_mask = (input_ids != pad_id).long()
-
-    # Defensive logits sanitizer — quantized kernels occasionally produce NaN/Inf
-    # logits (range overflow) that crash torch.multinomial inside HF's _sample with a
-    # CUDA assert. Cheap no-op for healthy models.
-    from transformers import LogitsProcessorList, LogitsProcessor
-    class _SanitizeLogits(LogitsProcessor):
-        def __call__(self, input_ids_, scores):
-            return torch.nan_to_num(scores, nan=-1e4, posinf=1e4, neginf=-1e4)
-
-    with torch.no_grad():
-        out = lm.model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            temperature=max(temperature, 1e-6),
-            do_sample=temperature > 1e-4,
-            pad_token_id=pad_id,
-            logits_processor=LogitsProcessorList([_SanitizeLogits()]),
+    prompts: List[str] = []
+    for msgs in messages_list:
+        prompt = lm.tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
         )
+        if no_think:
+            prompt += "<think>\n\n</think>\n"
+        prompts.append(prompt)
 
-    # Collect all EOS token ids from tokenizer + model config
-    eos_ids: set = set()
-    if lm.tokenizer.eos_token_id is not None:
-        eos_ids.add(lm.tokenizer.eos_token_id)
-    cfg_eos = getattr(lm.model.config, "eos_token_id", None)
-    if isinstance(cfg_eos, list):
-        eos_ids.update(cfg_eos)
-    elif cfg_eos is not None:
-        eos_ids.add(cfg_eos)
-
-    results = []
-    for i in range(len(tokenized)):
-        # Slice off only the generated tokens (everything after the left-padded input)
-        generated = out[i, max_len:]
-
-        # Truncate at first EOS token so it doesn't appear in decoded text.
-        # We still decode with skip_special_tokens=False to preserve <think> tags.
-        if eos_ids:
-            for j, tok_id in enumerate(generated.tolist()):
-                if tok_id in eos_ids:
-                    generated = generated[:j]
-                    break
-
-        results.append(lm.tokenizer.decode(generated, skip_special_tokens=False))
-    return results
+    sp = SamplingParams(
+        max_tokens=max_new_tokens,
+        temperature=max(temperature, 1e-6),
+        skip_special_tokens=False,    # preserve <think> tags etc.
+    )
+    out = lm.llm.generate(prompts, sp, use_tqdm=False)
+    return [r.outputs[0].text for r in out]
 
 
 def _make_local_response(text: str):
@@ -529,37 +551,9 @@ def local_chat(
     max_tokens: int = 4000,
     temperature: float = 1.0,
 ) -> str:
-    """
-    Run a chat completion locally using a HuggingFace model.
-    Returns the raw generated text (may contain <think> tags for reasoning models).
-    Thread-safe via _LOCAL_INFERENCE_LOCK.
-    """
+    """Single-conversation chat completion via vLLM. Preserves <think> tags."""
     lm = _get_local_model(hf_name)
-    torch = lm.torch
-
-    # Apply the model's own chat template — handles Llama, Qwen, Mistral, etc.
-    prompt = lm.tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    with _LOCAL_INFERENCE_LOCK:
-        inputs = lm.tokenizer(prompt, return_tensors="pt").to(lm.device)
-        n_input = inputs["input_ids"].shape[1]
-
-        with torch.no_grad():
-            out = lm.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=max(temperature, 1e-6),
-                do_sample=temperature > 1e-4,
-                pad_token_id=lm.tokenizer.pad_token_id,
-            )
-
-        generated_ids = out[0, n_input:]
-        # skip_special_tokens=False so <think> tags are preserved for parse_message
-        return lm.tokenizer.decode(generated_ids, skip_special_tokens=False)
+    return batch_generate_local(lm, [messages], max_tokens, temperature, no_think=False)[0]
 
 
 def local_logprob(
@@ -567,46 +561,9 @@ def local_logprob(
     context_messages: List[Dict],
     target_text: str,
 ) -> Optional[float]:
-    """
-    Exact teacher-forced average log-prob of target_text given context_messages.
-    Uses a single forward pass — much more reliable than the API echo trick.
-    Thread-safe via _LOCAL_INFERENCE_LOCK.
-    """
+    """Single-item average log-prob of target_text given context_messages, via vLLM."""
     lm = _get_local_model(hf_name)
-    torch = lm.torch
-
-    # Format context with the model's chat template, including the generation
-    # prompt so the model is in the right state to predict the assistant response.
-    context_str = lm.tokenizer.apply_chat_template(
-        context_messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
-    target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
-
-    if not target_ids:
-        return None
-
-    full_ids = context_ids + target_ids
-
-    with _LOCAL_INFERENCE_LOCK:
-        input_tensor = torch.tensor([full_ids], dtype=torch.long, device=lm.device)
-        with torch.no_grad():
-            logits = lm.model(input_tensor).logits  # [1, seq_len, vocab]
-        log_probs = torch.log_softmax(logits[0], dim=-1)  # [seq_len, vocab]
-
-    # Position i in logits predicts token i+1.
-    # Target tokens start at index n_ctx in full_ids, so they are predicted
-    # by positions n_ctx-1 .. n_ctx+n_target-2 in logits.
-    n_ctx = len(context_ids)
-    target_lps = []
-    for i, tok_id in enumerate(target_ids):
-        pred_pos = n_ctx - 1 + i  # logit position that predicts this target token
-        target_lps.append(log_probs[pred_pos, tok_id].item())
-
-    return sum(target_lps) / len(target_lps)
+    return batch_logprob_local(lm, [(context_messages, target_text)])[0]
 
 
 def batch_logprob_local(
@@ -614,21 +571,17 @@ def batch_logprob_local(
     items: List[Tuple[List[Dict], str]],
 ) -> List[Optional[float]]:
     """
-    Batched teacher-forced average log-prob.
-    Each item is (context_messages, target_text).
-    Returns one average log-prob per item (None if target has no tokens).
-    Uses a single padded forward pass for the whole batch.
+    Batched teacher-forced average log-prob via vLLM's prompt_logprobs.
+    Each item is (context_messages, target_text). Returns one average log-prob per
+    item (None if the target has no tokens).
     """
     if not items:
         return []
 
-    torch = lm.torch
-    pad_id = lm.tokenizer.pad_token_id
+    from vllm import SamplingParams, TokensPrompt
 
-    # Build full token sequences: context + target for each item
-    all_full_ids: List[List[int]] = []
-    all_n_ctx: List[int] = []
-    all_n_target: List[int] = []
+    prompts: List[Any] = []
+    spans: List[Tuple[List[int], int, int]] = []  # (full_ids, n_ctx, n_target)
 
     for context_messages, target_text in items:
         context_str = lm.tokenizer.apply_chat_template(
@@ -636,42 +589,47 @@ def batch_logprob_local(
         )
         context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
         target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
-        all_full_ids.append(context_ids + target_ids)
-        all_n_ctx.append(len(context_ids))
-        all_n_target.append(len(target_ids))
-
-    max_len = max(len(ids) for ids in all_full_ids)
-
-    # Left-pad so all sequences end flush
-    padded = [[pad_id] * (max_len - len(ids)) + ids for ids in all_full_ids]
-    input_ids = torch.tensor(padded, dtype=torch.long, device=lm.device)
-    attention_mask = (input_ids != pad_id).long()
-
-    with torch.no_grad():
-        logits = lm.model(input_ids, attention_mask=attention_mask).logits  # [B, seq_len, vocab]
-
-    log_probs = torch.log_softmax(logits, dim=-1)  # [B, seq_len, vocab]
-
-    results: List[Optional[float]] = []
-    for i, (full_ids, n_ctx, n_target) in enumerate(zip(all_full_ids, all_n_ctx, all_n_target)):
-        if n_target == 0:
-            results.append(None)
+        if not target_ids:
+            spans.append(([], 0, 0))
+            prompts.append(None)
             continue
+        full_ids = context_ids + target_ids
+        prompts.append(TokensPrompt(prompt_token_ids=full_ids))
+        spans.append((full_ids, len(context_ids), len(target_ids)))
 
-        # How many pad tokens were prepended for this sequence
-        pad_offset = max_len - len(full_ids)
+    # Filter out None (empty-target) items but remember their positions
+    real_indices = [i for i, p in enumerate(prompts) if p is not None]
+    real_prompts = [prompts[i] for i in real_indices]
 
-        # Logit at position p predicts the token at position p+1 in the padded sequence.
-        # Target token t_idx (0-based) sits at padded position pad_offset + n_ctx + t_idx.
-        # It is predicted by logit position pad_offset + n_ctx + t_idx - 1.
-        target_lps = []
-        for t_idx in range(n_target):
-            logit_pos = pad_offset + n_ctx - 1 + t_idx
-            tok_id = full_ids[n_ctx + t_idx]
-            target_lps.append(log_probs[i, logit_pos, tok_id].item())
+    results: List[Optional[float]] = [None] * len(items)
+    if not real_prompts:
+        return results
 
-        results.append(sum(target_lps) / len(target_lps))
+    sp = SamplingParams(
+        max_tokens=1,             # we only care about prompt logprobs; need >=1
+        temperature=1.0,
+        prompt_logprobs=1,        # request top-1 logprob per prompt position
+    )
+    out = lm.llm.generate(real_prompts, sp, use_tqdm=False)
 
+    for orig_i, result in zip(real_indices, out):
+        full_ids, n_ctx, n_target = spans[orig_i]
+        plp = result.prompt_logprobs  # List[Optional[Dict[int, Logprob]]] of length len(prompt)
+        if plp is None or n_target == 0:
+            continue
+        target_lps: List[float] = []
+        # The dict at position p contains logprobs for the prompt token at position p,
+        # given the prefix (positions 0..p-1). For the first position there's no prefix,
+        # so plp[0] is None. Target tokens occupy positions n_ctx..n_ctx+n_target-1.
+        for pos in range(n_ctx, n_ctx + n_target):
+            d = plp[pos] if pos < len(plp) else None
+            if d is None:
+                continue
+            actual_tok = full_ids[pos]
+            if actual_tok in d:
+                target_lps.append(d[actual_tok].logprob)
+        if target_lps:
+            results[orig_i] = sum(target_lps) / len(target_lps)
     return results
 
 
@@ -2021,64 +1979,31 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     return rollout_results
 
 
-def build_latin_token_mask(torch_module, tokenizer, model_vocab_size=None):
-    """Build a boolean mask over the vocabulary that blocks any token whose decoded
-    text contains a character outside the allowlist: ASCII letters, space, and a
-    minimal punctuation set (.,!?-). Blocks digits, quotes, brackets, slashes,
-    newlines, and every non-ASCII character. Also blocks explicitly listed tokens.
-    Returns a bool tensor of shape [vocab_size] on CPU (move to device before use)."""
-    vocab_size = model_vocab_size or len(tokenizer)
-    # Allowlist: letters a–z/A–Z, space, and a tiny set of punctuation
+def build_latin_token_ids(tokenizer, vocab_size: int) -> List[int]:
+    """Return the list of token IDs whose decoded text contains ONLY characters from
+    the Latin allowlist (ASCII letters, space, basic punctuation .,!?-). vLLM's
+    SamplingParams.allowed_token_ids takes this list and constrains sampling to it."""
     allowed_chars = set(
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         " .,!?-"
     )
-    mask = torch_module.ones(vocab_size, dtype=torch_module.bool)
-
     extra_blocked_tokens = ["..."]
     blocked_ids: set = set()
     for tok_str in extra_blocked_tokens:
         ids = tokenizer.encode(tok_str, add_special_tokens=False)
         blocked_ids.update(ids)
 
+    allowed: List[int] = []
     for token_id in range(vocab_size):
         if token_id in blocked_ids:
-            mask[token_id] = False
             continue
         text = tokenizer.decode([token_id])
-        for ch in text:
-            if ch not in allowed_chars:
-                mask[token_id] = False
-                break
-    return mask
-
-
-def _sample_top_p(torch_module, probs, p: float, num_samples: int):
-    """Nucleus (top-p) sampling. probs: [batch, vocab]. Returns [batch, num_samples]."""
-    # Sanitize before anything touches multinomial: nan/inf → 0, all-zero rows → uniform.
-    probs = torch_module.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
-    row_sums = probs.sum(dim=-1, keepdim=True)
-    zero_rows = row_sums <= 0
-    if zero_rows.any():
-        uniform = torch_module.ones_like(probs) / probs.shape[-1]
-        probs = torch_module.where(zero_rows.expand_as(probs), uniform,
-                                   probs / row_sums.clamp(min=1e-12))
-
-    probs_sort, probs_idx = torch_module.sort(probs, dim=-1, descending=True)
-    probs_cumsum = torch_module.cumsum(probs_sort, dim=-1)
-    mask = probs_cumsum - probs_sort > p
-    probs_sort[mask] = 0.0
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True).clamp(min=1e-12))
-    # Guard again: top-p masking can zero every token in edge cases
-    row_sums2 = probs_sort.sum(dim=-1, keepdim=True)
-    zero_rows2 = row_sums2 <= 0
-    if zero_rows2.any():
-        uniform2 = torch_module.ones_like(probs_sort) / probs_sort.shape[-1]
-        probs_sort = torch_module.where(zero_rows2.expand_as(probs_sort), uniform2, probs_sort)
-
-    sampled = torch_module.multinomial(probs_sort, num_samples=num_samples)
-    return torch_module.gather(probs_idx, -1, sampled)
+        if not text:
+            continue
+        if all(ch in allowed_chars for ch in text):
+            allowed.append(token_id)
+    return allowed
 
 
 def _score_beast_candidates(
@@ -2108,6 +2033,38 @@ def _score_beast_candidates(
     return all_scores
 
 
+def _vllm_sample_next_tokens(
+    lm: "LocalModel",
+    prompts_token_ids: List[List[int]],
+    n: int,
+    temperature: float,
+    top_p: float,
+    allowed_token_ids: Optional[List[int]] = None,
+) -> List[List[int]]:
+    """Sample `n` next tokens for each prompt using vLLM. Returns a list of length
+    len(prompts_token_ids); each element is a list of `n` sampled token IDs.
+    The latin mask (allowed_token_ids) is applied as a built-in vLLM constraint."""
+    from vllm import SamplingParams, TokensPrompt
+    sp = SamplingParams(
+        n=n,
+        max_tokens=1,
+        temperature=max(temperature, 1e-6),
+        top_p=top_p,
+        allowed_token_ids=allowed_token_ids,
+        skip_special_tokens=False,
+    )
+    prompts = [TokensPrompt(prompt_token_ids=tids) for tids in prompts_token_ids]
+    outs = lm.llm.generate(prompts, sp, use_tqdm=False)
+    result: List[List[int]] = []
+    for r in outs:
+        toks = []
+        for o in r.outputs:
+            tok_ids = list(o.token_ids)
+            toks.append(tok_ids[0] if tok_ids else 0)
+        result.append(toks)
+    return result
+
+
 def _beast_single_trial_local(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
@@ -2123,59 +2080,33 @@ def _beast_single_trial_local(
     temperature: float,
     top_p: float,
     baseline_prefix: str,
-    latin_mask: Optional[Any] = None,   # bool tensor [vocab_size] on lm_eval.device, or None
+    latin_token_ids: Optional[List[int]] = None,   # list of allowed token IDs (Latin mask), or None
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search scored by log P(TRS | target_ctx + msg).
     baseline_prefix is prepended to the decoded suffix when scoring against lm_target.
+    Sampling is via vLLM's SamplingParams (allowed_token_ids enforces the Latin mask).
     Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores."""
-    torch = lm_eval.torch
-    device = lm_eval.device
     prefix_length = len(prefix_tokens)
 
     # ── Init beam: sample k1 first tokens from the prefix ──
-    with torch.no_grad():
-        inp = torch.tensor([prefix_tokens], dtype=torch.long, device=device)
-        logits = lm_eval.model(input_ids=inp, use_cache=False).logits
-        logits_last = logits[0, -1] / max(temperature, 1e-8)
-        if latin_mask is not None:
-            masked = logits_last.masked_fill(~latin_mask, -float("inf"))
-            # Fall back to unmasked if every token is blocked
-            logits_last = masked if torch.isfinite(masked).any() else logits_last
-        if temperature < 1e-4:
-            first_tokens = torch.topk(logits_last, k1).indices
-        else:
-            probs = torch.softmax(logits_last, dim=-1).unsqueeze(0)
-            first_tokens = _sample_top_p(torch, probs, top_p, k1)[0]
-
-    beam: List[List[int]] = [prefix_tokens + [t.item()] for t in first_tokens]
+    first_tokens = _vllm_sample_next_tokens(
+        lm_eval, [prefix_tokens], n=k1,
+        temperature=temperature, top_p=top_p,
+        allowed_token_ids=latin_token_ids,
+    )[0]
+    beam: List[List[int]] = [prefix_tokens + [t] for t in first_tokens]
     pool_seqs: List[List[int]] = list(beam)
     pool_scores: List[float] = [-float("inf")] * k1
 
     total_iters = (suffix_length - 1) * ngram
 
     for iteration in range(total_iters):
-        # ── Expand: sample k2 next tokens per beam element ──
-        # All beams are always equal length within a trial (each iter adds exactly 1 token),
-        # so no padding is needed — just stack directly.
-        next_tokens_per_beam: List[List[int]] = []
-        with torch.no_grad():
-            for b in range(0, len(beam), max_batch_size):
-                batch = beam[b: b + max_batch_size]
-                inp = torch.tensor(batch, dtype=torch.long, device=device)
-                logits = lm_eval.model(input_ids=inp, use_cache=False).logits
-                logits_last = logits[:, -1] / max(temperature, 1e-8)
-                if latin_mask is not None:
-                    masked = logits_last.masked_fill(~latin_mask, -float("inf"))
-                    # Fall back row-by-row where every token is blocked
-                    fully_blocked = ~torch.isfinite(masked).any(dim=-1, keepdim=True)
-                    logits_last = torch.where(fully_blocked, logits_last, masked)
-                if temperature < 1e-4:
-                    sampled = torch.topk(logits_last, k2).indices    # [batch, k2]
-                else:
-                    probs = torch.softmax(logits_last, dim=-1)
-                    sampled = _sample_top_p(torch, probs, top_p, k2) # [batch, k2]
-                for i in range(len(batch)):
-                    next_tokens_per_beam.append([sampled[i, j].item() for j in range(k2)])
+        # ── Expand: sample k2 next tokens per beam element via vLLM ──
+        next_tokens_per_beam = _vllm_sample_next_tokens(
+            lm_eval, beam, n=k2,
+            temperature=temperature, top_p=top_p,
+            allowed_token_ids=latin_token_ids,
+        )
 
         # ── Build k1*k2 expanded candidates ──
         expanded: List[List[int]] = []
@@ -2293,27 +2224,24 @@ def beast_search_evaluator_message(
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
-    # ── Build latin mask (cached per lm_eval, on its device) ──────────────
-    latin_mask = None
+    # ── Build latin token-id list (cached per lm_eval) ───────────────────
+    # vLLM's SamplingParams.allowed_token_ids takes a list of allowed token IDs.
+    latin_token_ids: Optional[List[int]] = None
     if beast_cfg.get("latin_mask", False):
         cache_key = id(lm_eval)
-        latin_mask = _LATIN_MASK_CACHE.get(cache_key)
-        if latin_mask is None:
-            torch = lm_eval.torch
-            vocab_size = (
-                getattr(lm_eval.model.config, "vocab_size", None)
-                or getattr(getattr(lm_eval.model.config, "text_config", None), "vocab_size", None)
-                or lm_eval.tokenizer.vocab_size
-            )
-            latin_mask = build_latin_token_mask(torch, lm_eval.tokenizer, vocab_size).to(lm_eval.device)
-            _LATIN_MASK_CACHE[cache_key] = latin_mask
+        latin_token_ids = _LATIN_MASK_CACHE.get(cache_key)
+        if latin_token_ids is None:
+            vocab_size = lm_eval.tokenizer.vocab_size
+            latin_token_ids = build_latin_token_ids(lm_eval.tokenizer, vocab_size)
+            _LATIN_MASK_CACHE[cache_key] = latin_token_ids
+            print(f"    Latin mask: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
 
     # ── Run single BEAST trial ────────────────────────────────────────────
     print(f"    BEAST search (k1={k1}, k2={k2}, len={suffix_length}) ...", flush=True)
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_eval, lm_target, prefix_tokens, target_msgs, trs,
         k1, k2, suffix_length, ngram, pool_size, max_batch_sz,
-        temperature, top_p, baseline_prefix, latin_mask,
+        temperature, top_p, baseline_prefix, latin_token_ids,
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -2399,17 +2327,12 @@ def run_rollout_batched_local(
     target_model_id    = cfg.rollout.target
     target_model_name  = target_model_id  # always show model name in BEAST mode
 
-    # Place evaluator and target on separate GPUs to avoid OOM. Falls back to a single
-    # GPU when only one is visible or cfg.rollout.same_gpu=True.
-    # CUDA_VISIBLE_DEVICES remaps physical GPUs (e.g. 2,3) to logical cuda:0,cuda:1.
-    import torch as _torch
-    _num_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
-    _same_gpu = cfg.rollout.get("same_gpu", False) or _num_gpus < 2
-    _eval_device   = "cuda:0" if _num_gpus >= 1 else "cpu"
-    _target_device = "cuda:0" if _same_gpu else "cuda:1"
-    print(f"[rollout] evaluator on {_eval_device}, target on {_target_device} (visible GPUs: {_num_gpus}, same_gpu={_same_gpu})", flush=True)
-    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], device=_eval_device)
-    lm_target = _get_local_model(target_model_id[len("local/"):], device=_target_device)
+    # vLLM manages its own GPU placement. Both LLMs load on the same GPU here, sharing
+    # VRAM via gpu_memory_utilization. The fraction is set per-model and configurable in cfg.
+    eval_gpu_util   = cfg.rollout.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
+    target_gpu_util = cfg.rollout.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
+    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], gpu_memory_utilization=eval_gpu_util)
+    lm_target = _get_local_model(target_model_id[len("local/"):],    gpu_memory_utilization=target_gpu_util)
 
     beast_cfg        = cfg.get("beast", {})
     num_per_scenario = beast_cfg.get("num_per_scenario", 1)
@@ -4256,11 +4179,15 @@ def launch_viewer(viewer_dir: str, results_dir: Path, port: int = 5173):
 # Section 11: Config & Main
 # =============================================================================
 
-judge_model = "local/unsloth/gemma-3-27b-it-bnb-4bit"   # bnb 4-bit, ~16GB VRAM (needs `uv add bitsandbytes`)
-# judge_model = "local/google/gemma-3-27b-it"           # full bf16, ~55GB VRAM
+# Model spec format (parsed by _parse_local_spec):
+#   "<repo>"                        → plain HF model, loaded bf16
+#   "<repo>:<quant>"                → GGUF (non-multimodal models)
+#   "<repo>:<quant>:<base_repo>"    → GGUF; tokenizer/config from base_repo (multimodal)
+judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-27b-it"
+# judge_model = "local/google/gemma-3-27b-it"     # full bf16, ~55GB VRAM
 # judge_model = "local/Qwen/Qwen3-4B"
 
-target_model = "local/Qwen/Qwen3-4B"  # bf16; small enough that quantization isn't worth the calibration loss
+target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
     "folder_name": "runs_9/quantized_3turns",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
@@ -4286,13 +4213,15 @@ cfg = DotDict({
     },
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
-        "target": target_model,              # model under evaluation; use "local/<hf_repo>" for local models
+        "target": target_model,              # model under evaluation
         "evaluator_max_tokens": 2000,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; doesn't need much)
         "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": True,    # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
+        "evaluator_gpu_memory_utilization": 0.55,  # vLLM: fraction of GPU mem reserved for evaluator LLM (loaded first)
+        "target_gpu_memory_utilization":    0.30,  # vLLM: fraction of REMAINING GPU mem for target LLM
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
