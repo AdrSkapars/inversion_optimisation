@@ -73,8 +73,10 @@ try:
         None,
     )
     if embed_tensor is not None:
-        actual_vocab = embed_tensor.shape[1] if len(embed_tensor.shape) >= 2 else embed_tensor.shape[0]
-        print(f"  GGUF embedding shape: {tuple(embed_tensor.shape)}  →  vocab={actual_vocab}", flush=True)
+        shape_tuple = tuple(int(x) for x in embed_tensor.shape)
+        # embedding shape is (vocab_size, hidden_size) — vocab is the LARGER dim (~256K vs ~5K)
+        actual_vocab = max(shape_tuple) if shape_tuple else None
+        print(f"  GGUF embedding shape: {shape_tuple}  →  vocab={actual_vocab}", flush=True)
     else:
         print("  Could not find embedding tensor in GGUF for vocab inspection", flush=True)
         actual_vocab = None
