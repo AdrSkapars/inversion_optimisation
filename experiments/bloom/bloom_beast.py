@@ -2374,10 +2374,17 @@ def run_rollout_batched_local(
     target_model_id    = cfg.rollout.target
     target_model_name  = target_model_id  # always show model name in BEAST mode
 
-    # Place evaluator and target on separate GPUs to avoid OOM and allow parallel headroom.
+    # Place evaluator and target on separate GPUs to avoid OOM. Falls back to a single
+    # GPU when only one is visible or cfg.rollout.same_gpu=True.
     # CUDA_VISIBLE_DEVICES remaps physical GPUs (e.g. 2,3) to logical cuda:0,cuda:1.
-    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], device="cuda:0")
-    lm_target = _get_local_model(target_model_id[len("local/"):], device="cuda:1")
+    import torch as _torch
+    _num_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
+    _same_gpu = cfg.rollout.get("same_gpu", False) or _num_gpus < 2
+    _eval_device   = "cuda:0" if _num_gpus >= 1 else "cpu"
+    _target_device = "cuda:0" if _same_gpu else "cuda:1"
+    print(f"[rollout] evaluator on {_eval_device}, target on {_target_device} (visible GPUs: {_num_gpus}, same_gpu={_same_gpu})", flush=True)
+    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], device=_eval_device)
+    lm_target = _get_local_model(target_model_id[len("local/"):], device=_target_device)
 
     beast_cfg        = cfg.get("beast", {})
     num_per_scenario = beast_cfg.get("num_per_scenario", 1)
