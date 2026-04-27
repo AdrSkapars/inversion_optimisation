@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import traceback
 import webbrowser
 from datetime import datetime
@@ -4403,7 +4404,15 @@ if __name__ == "__main__":
                     print(f"\n  Round {round_num} FAILED", flush=True)
                     return True
             return False
+        # Track total experiment runtime
+        _experiment_start = time.monotonic()
         had_error = asyncio.run(run_parallel())
+        _elapsed = time.monotonic() - _experiment_start
+        _h, _rem = divmod(int(_elapsed), 3600)
+        _m, _s = divmod(_rem, 60)
+        print("\n" + "=" * 60, flush=True)
+        print(f"TOTAL EXPERIMENT TIME: {_h}h {_m}m {_s}s ({_elapsed:.1f}s)", flush=True)
+        print("=" * 60, flush=True)
 
         # # Launch viewer unless there was an error
         # if not had_error:
