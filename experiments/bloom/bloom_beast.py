@@ -16,7 +16,6 @@ import json
 import os
 import re
 import subprocess
-import threading
 import time
 import traceback
 import webbrowser
