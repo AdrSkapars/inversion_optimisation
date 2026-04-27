@@ -27,23 +27,40 @@ print("\n[Test A] Loading Gemma-3-27B-IT GGUF Q6_K on GPU 0...", flush=True)
 
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import LogitsProcessor
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, list_repo_files
 import torch
 
-# vLLM's colon syntax (repo:Q6_K) requires the GGUF repo to ALSO have a config.json.
-# Many community GGUF repos (MaziyarPanahi, TheBloke, etc.) are weights-only.
-# Workaround: use hf_hub_download to fetch the .gguf file, get the local cache path,
-# and pass that directly to vLLM. Tokenizer + config come from the original Google repo.
-print("  Downloading GGUF + mmproj from ggml-org (Gemma-3 is multimodal, needs both)...", flush=True)
-gguf_path = hf_hub_download(
-    repo_id="ggml-org/gemma-3-27b-it-GGUF",
-    filename="gemma-3-27b-it-Q6_K.gguf",
-)
-# vLLM auto-discovers mmproj-*.gguf in the same dir as the LLM gguf, so just download it
-hf_hub_download(
-    repo_id="ggml-org/gemma-3-27b-it-GGUF",
-    filename="mmproj-model-f16.gguf",  # vision projector — usually fp16 or bf16, small
-)
+# Filenames vary across GGUF repos (dot vs dash, "Q6_K" vs "q6_k", etc.).
+# Auto-discover the right LLM and mmproj filenames so we don't have to guess.
+def _resolve_gguf(repo_id: str, quant: str = "Q6_K"):
+    files = list_repo_files(repo_id)
+    quant_lower = quant.lower()
+    # LLM file: ends in .gguf, contains the quant tag, NOT an mmproj
+    llm_files = [f for f in files if f.endswith(".gguf") and quant_lower in f.lower()
+                 and "mmproj" not in f.lower() and "mm-proj" not in f.lower()]
+    # mmproj file: any gguf containing "mmproj" or "mm-proj"
+    mmproj_files = [f for f in files if f.endswith(".gguf")
+                    and ("mmproj" in f.lower() or "mm-proj" in f.lower())]
+    return llm_files, mmproj_files
+
+REPO = "ggml-org/gemma-3-27b-it-GGUF"
+print(f"  Discovering files in {REPO}...", flush=True)
+llm_files, mmproj_files = _resolve_gguf(REPO, "Q6_K")
+print(f"  LLM candidates:    {llm_files}", flush=True)
+print(f"  mmproj candidates: {mmproj_files}", flush=True)
+if not llm_files:
+    raise RuntimeError(f"No Q6_K LLM file found in {REPO}. Check the repo's file list manually.")
+if not mmproj_files:
+    raise RuntimeError(f"No mmproj file found in {REPO}. Try a different repo or fetch mmproj from elsewhere.")
+
+llm_filename = llm_files[0]
+mmproj_filename = mmproj_files[0]
+print(f"  Picked LLM:    {llm_filename}", flush=True)
+print(f"  Picked mmproj: {mmproj_filename}", flush=True)
+
+print("  Downloading (or resolving from cache)...", flush=True)
+gguf_path = hf_hub_download(repo_id=REPO, filename=llm_filename)
+hf_hub_download(repo_id=REPO, filename=mmproj_filename)
 print(f"  GGUF at: {gguf_path}", flush=True)
 
 llm_eval = LLM(
