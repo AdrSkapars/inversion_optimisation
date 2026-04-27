@@ -43,7 +43,7 @@ def _resolve_gguf(repo_id: str, quant: str = "Q6_K"):
                     and ("mmproj" in f.lower() or "mm-proj" in f.lower())]
     return llm_files, mmproj_files
 
-REPO = "ggml-org/gemma-3-27b-it-GGUF"
+REPO = "lmstudio-community/gemma-3-27b-it-GGUF"
 print(f"  Discovering files in {REPO}...", flush=True)
 llm_files, mmproj_files = _resolve_gguf(REPO, "Q6_K")
 print(f"  LLM candidates:    {llm_files}", flush=True)
