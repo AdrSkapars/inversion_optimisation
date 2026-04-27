@@ -34,10 +34,15 @@ import torch
 # Many community GGUF repos (MaziyarPanahi, TheBloke, etc.) are weights-only.
 # Workaround: use hf_hub_download to fetch the .gguf file, get the local cache path,
 # and pass that directly to vLLM. Tokenizer + config come from the original Google repo.
-print("  Resolving GGUF file location (downloads if not cached)...", flush=True)
+print("  Downloading GGUF + mmproj from ggml-org (Gemma-3 is multimodal, needs both)...", flush=True)
 gguf_path = hf_hub_download(
-    repo_id="MaziyarPanahi/gemma-3-27b-it-GGUF",
-    filename="gemma-3-27b-it.Q6_K.gguf",
+    repo_id="ggml-org/gemma-3-27b-it-GGUF",
+    filename="gemma-3-27b-it-Q6_K.gguf",
+)
+# vLLM auto-discovers mmproj-*.gguf in the same dir as the LLM gguf, so just download it
+hf_hub_download(
+    repo_id="ggml-org/gemma-3-27b-it-GGUF",
+    filename="mmproj-model-f16.gguf",  # vision projector — usually fp16 or bf16, small
 )
 print(f"  GGUF at: {gguf_path}", flush=True)
 
