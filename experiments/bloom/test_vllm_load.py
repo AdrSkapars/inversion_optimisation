@@ -34,6 +34,7 @@ import torch
 try:
     llm_eval = LLM(
         model="unsloth/gemma-3-27b-it-GGUF:Q6_K",
+        tokenizer="google/gemma-3-27b-it",  # multimodal models need the original tokenizer
         quantization="gguf",
         dtype="bfloat16",
         gpu_memory_utilization=0.85,
