@@ -366,7 +366,7 @@ _LATIN_MASK_CACHE: Dict[int, Any] = {}
 class LocalModel:
     """Wraps a HuggingFace model + tokenizer loaded onto the local device."""
 
-    def __init__(self, hf_name: str):
+    def __init__(self, hf_name: str, device: Optional[str] = None):
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -375,7 +375,8 @@ class LocalModel:
                 "Local model support requires: pip install torch transformers accelerate"
             )
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Pre-quantized bitsandbytes models (e.g. unsloth/...-bnb-4bit) ship with their
         # own quantization_config in config.json — HF picks the right kernels automatically
@@ -405,11 +406,21 @@ class LocalModel:
         print(f"[local] {hf_name} ready.", flush=True)
 
 
-def _get_local_model(hf_name: str) -> "LocalModel":
-    """Return the cached LocalModel, loading it on first call."""
-    if hf_name not in _LOCAL_MODEL_REGISTRY:
-        _LOCAL_MODEL_REGISTRY[hf_name] = LocalModel(hf_name)
-    return _LOCAL_MODEL_REGISTRY[hf_name]
+def _get_local_model(hf_name: str, device: Optional[str] = None) -> "LocalModel":
+    """Return the cached LocalModel, loading it on first call.
+    Cache key includes the resolved device so the same model can be loaded on different
+    GPUs while legacy callers (device=None) reuse whatever was loaded first."""
+    import torch
+    if device is None:
+        # Reuse any already-cached instance regardless of device (legacy behavior).
+        for (cached_name, _), lm in _LOCAL_MODEL_REGISTRY.items():
+            if cached_name == hf_name:
+                return lm
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    cache_key = (hf_name, device)
+    if cache_key not in _LOCAL_MODEL_REGISTRY:
+        _LOCAL_MODEL_REGISTRY[cache_key] = LocalModel(hf_name, device=device)
+    return _LOCAL_MODEL_REGISTRY[cache_key]
 
 
 def batch_generate_local(
@@ -2363,8 +2374,10 @@ def run_rollout_batched_local(
     target_model_id    = cfg.rollout.target
     target_model_name  = target_model_id  # always show model name in BEAST mode
 
-    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):])
-    lm_target = _get_local_model(target_model_id[len("local/"):])
+    # Place evaluator and target on separate GPUs to avoid OOM and allow parallel headroom.
+    # CUDA_VISIBLE_DEVICES remaps physical GPUs (e.g. 2,3) to logical cuda:0,cuda:1.
+    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], device="cuda:0")
+    lm_target = _get_local_model(target_model_id[len("local/"):], device="cuda:1")
 
     beast_cfg        = cfg.get("beast", {})
     num_per_scenario = beast_cfg.get("num_per_scenario", 1)
@@ -4063,7 +4076,7 @@ judge_model = "local/unsloth/gemma-3-27b-it-bnb-4bit"   # bnb 4-bit, ~16GB VRAM 
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small enough that quantization isn't worth the calibration loss
 
 cfg = DotDict({
-    "folder_name": "runs_9/quantized",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_9/quantized_3turns",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4091,7 +4104,7 @@ cfg = DotDict({
         "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
+        "max_turns": 3, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
