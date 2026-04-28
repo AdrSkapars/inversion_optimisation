@@ -370,6 +370,11 @@ import multiprocessing as _mp
 # Registry: spec_string → LocalModel instance (loaded once, kept in memory)
 _LOCAL_MODEL_REGISTRY: Dict[str, "LocalModel"] = {}
 
+# Default GPU for all local model calls that don't specify gpu_id explicitly
+# (understanding, ideation, judgment). Set to cfg.rollout.evaluator_gpu_id at
+# pipeline start so every stage uses the same physical GPU.
+_DEFAULT_LOCAL_GPU_ID: int = 0
+
 # Cache: id(lm) → list of allowed Latin token IDs (built once per LLM)
 _LATIN_MASK_CACHE: Dict[int, List[int]] = {}
 
@@ -389,6 +394,7 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     # Quiet the worker — vLLM is chatty and we already log from the parent.
     os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+
 
     try:
         from vllm import LLM, SamplingParams, TokensPrompt
@@ -511,11 +517,43 @@ def _shutdown_all_workers() -> None:
 atexit.register(_shutdown_all_workers)
 
 
+def _kill_gpu_processes(gpu_id: int) -> None:
+    """Kill any of our own processes still holding memory on gpu_id before spawning a new worker."""
+    try:
+        import pwd
+        our_user = pwd.getpwuid(os.getuid()).pw_name
+        result = subprocess.run(
+            ["nvidia-smi", f"--id={gpu_id}", "--query-compute-apps=pid,process_name",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if not parts[0].isdigit():
+                continue
+            pid = int(parts[0])
+            # Only kill our own processes
+            try:
+                proc_user = pwd.getpwuid(os.stat(f"/proc/{pid}").st_uid).pw_name
+            except Exception:
+                continue
+            if proc_user == our_user:
+                print(f"  [cleanup] Killing stale GPU-{gpu_id} process PID {pid}", flush=True)
+                try:
+                    os.kill(pid, 9)
+                except Exception:
+                    pass
+        import time as _time; _time.sleep(1)
+    except Exception:
+        pass
+
+
 class VLLMWorker:
     """Handle to a subprocess running one vLLM LLM pinned to a single GPU."""
 
     def __init__(self, hf_name: str, gpu_id: int,
                  gpu_memory_utilization: float, max_model_len: int):
+        _kill_gpu_processes(gpu_id)
         ctx = _mp.get_context("spawn")
         self.req_q = ctx.Queue()
         self.res_q = ctx.Queue()
@@ -657,7 +695,7 @@ class LocalModel:
             return None
 
 
-def _get_local_model(hf_name: str, gpu_id: int = 0,
+def _get_local_model(hf_name: str, gpu_id: Optional[int] = None,
                      gpu_memory_utilization: Optional[float] = None,
                      max_model_len: int = 8192) -> "LocalModel":
     """Return the cached LocalModel, spawning its worker on first call.
@@ -665,7 +703,10 @@ def _get_local_model(hf_name: str, gpu_id: int = 0,
     Each (spec, gpu_id) pair gets its own LocalModel — the cache key is
     "{hf_name}@gpu{gpu_id}" so the same model on a different GPU spawns a new
     worker. Spec format documented in `_parse_local_spec`.
+    gpu_id defaults to _DEFAULT_LOCAL_GPU_ID (set from cfg.rollout.evaluator_gpu_id at startup).
     """
+    if gpu_id is None:
+        gpu_id = _DEFAULT_LOCAL_GPU_ID
     key = f"{hf_name}@gpu{gpu_id}"
     if key in _LOCAL_MODEL_REGISTRY:
         return _LOCAL_MODEL_REGISTRY[key]
@@ -4210,8 +4251,9 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
 
 async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
-    global DEBUG_MODE
+    global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID
     DEBUG_MODE = cfg.get("debug", True)
+    _DEFAULT_LOCAL_GPU_ID = cfg.rollout.get("evaluator_gpu_id", 0)
 
     # Resolve output directory
     folder_name = cfg.get("folder_name", "runs/default")
@@ -4327,7 +4369,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_9/requantized",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_9/requantized_3turns",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4355,7 +4397,7 @@ cfg = DotDict({
         "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
+        "max_turns": 3, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": True,    # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
         # worker can grab most of the memory; the small reserve covers framework overhead.
