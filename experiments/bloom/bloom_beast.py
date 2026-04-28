@@ -523,7 +523,7 @@ class VLLMWorker:
             target=_vllm_worker_main,
             args=(self.req_q, self.res_q, hf_name, gpu_id,
                   gpu_memory_utilization, max_model_len),
-            daemon=True,
+            daemon=False,
         )
         self.proc.start()
         # Block until the worker says it has loaded the model (or errored).
@@ -4327,7 +4327,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_9/quantized_3turns",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_9/requantized",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4355,7 +4355,7 @@ cfg = DotDict({
         "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 3, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
+        "max_turns": 1, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": True,    # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
         # worker can grab most of the memory; the small reserve covers framework overhead.
