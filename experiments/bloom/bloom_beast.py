@@ -348,8 +348,24 @@ def calculate_batch_size(
 
 
 # =============================================================================
-# Section 4.5: Local Model Support
+# Section 4.5: Local Model Support (vLLM via per-model subprocess)
 # =============================================================================
+# Each LocalModel runs vLLM in its own subprocess so we can pin it to a specific
+# GPU via CUDA_VISIBLE_DEVICES. vLLM V1 has no per-LLM device pinning inside a
+# single process — once CUDA initializes the device list is frozen — so a
+# subprocess-per-LLM is the only way to get eval and target on different GPUs.
+#
+# Tokenizer stays in the PARENT (loaded via AutoTokenizer from the base/HF repo)
+# so that chat-template rendering, latin-mask construction, encode/decode etc.
+# don't need to round-trip to the worker. The worker only owns the vLLM `LLM`
+# engine and exposes 3 RPC primitives:
+#   - generate_text(prompts: List[str], sampling_kwargs) -> List[str]
+#   - generate_n_tokens(prompts_token_ids, sampling_kwargs) -> List[List[int]]
+#   - compute_target_logprobs(items) -> List[Optional[float]]
+# RPC is over multiprocessing.Queue with a "spawn" context (forking + CUDA = death).
+
+import atexit
+import multiprocessing as _mp
 
 # Registry: spec_string → LocalModel instance (loaded once, kept in memory)
 _LOCAL_MODEL_REGISTRY: Dict[str, "LocalModel"] = {}
@@ -357,9 +373,198 @@ _LOCAL_MODEL_REGISTRY: Dict[str, "LocalModel"] = {}
 # Cache: id(lm) → list of allowed Latin token IDs (built once per LLM)
 _LATIN_MASK_CACHE: Dict[int, List[int]] = {}
 
-# Default per-LLM GPU memory share. With 2 LLMs on the same A6000 (eval + target),
-# each gets 0.45 of total memory ≈ 21 GB; leaves ~6 GB headroom.
-DEFAULT_GPU_MEMORY_UTIL = 0.45
+# Per-LLM GPU memory share when each worker owns its own GPU. With one LLM per
+# device the worker can grab most of the memory; leave a small margin.
+DEFAULT_GPU_MEMORY_UTIL = 0.85
+
+
+def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
+                      gpu_memory_utilization: float, max_model_len: int) -> None:
+    """Subprocess entry point: build a vLLM LLM pinned to one GPU, then service
+    RPC requests from req_q until a 'shutdown' op arrives. Sends a single
+    ('ready', {...}) message after init succeeds (or ('error', traceback) on failure)."""
+    import os
+    import traceback as _tb
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # Quiet the worker — vLLM is chatty and we already log from the parent.
+    os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+
+    try:
+        from vllm import LLM, SamplingParams, TokensPrompt
+        from huggingface_hub import hf_hub_download, list_repo_files
+
+        spec = _parse_local_spec(hf_name)
+        kwargs: Dict[str, Any] = dict(
+            dtype="bfloat16",
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            enforce_eager=False,
+        )
+
+        if spec["kind"] == "hf":
+            kwargs["model"] = spec["repo"]
+        else:
+            repo, quant = spec["repo"], spec["quant"]
+            base = spec["base"] or repo
+            files = list_repo_files(repo)
+            quant_lower = quant.lower()
+            llm_files = [f for f in files if f.endswith(".gguf")
+                         and quant_lower in f.lower()
+                         and "mmproj" not in f.lower() and "mm-proj" not in f.lower()]
+            mmproj_files = [f for f in files if f.endswith(".gguf")
+                            and ("mmproj" in f.lower() or "mm-proj" in f.lower())]
+            if not llm_files:
+                raise RuntimeError(f"No {quant} GGUF file in {repo}")
+            gguf_path = hf_hub_download(repo_id=repo, filename=llm_files[0])
+            if mmproj_files:
+                hf_hub_download(repo_id=repo, filename=mmproj_files[0])
+            kwargs["model"] = gguf_path
+            kwargs["tokenizer"] = base
+            kwargs["hf_config_path"] = base
+            kwargs["quantization"] = "gguf"
+            actual_vocab = LocalModel._inspect_gguf_vocab(gguf_path)
+            if actual_vocab is not None:
+                kwargs["hf_overrides"] = {
+                    "vocab_size": actual_vocab,
+                    "text_config": {"vocab_size": actual_vocab},
+                }
+
+        llm = LLM(**kwargs)
+        res_q.put(("ready", {"gpu_id": gpu_id}))
+    except Exception:
+        res_q.put(("error", _tb.format_exc()))
+        return
+
+    while True:
+        try:
+            msg = req_q.get()
+        except (EOFError, KeyboardInterrupt):
+            return
+        op = msg[0]
+        if op == "shutdown":
+            return
+        try:
+            if op == "generate_text":
+                prompts, sampling_kwargs = msg[1], msg[2]
+                sp = SamplingParams(**sampling_kwargs)
+                out = llm.generate(prompts, sp, use_tqdm=False)
+                res_q.put(("ok", [r.outputs[0].text for r in out]))
+
+            elif op == "generate_n_tokens":
+                prompts_tids, sampling_kwargs = msg[1], msg[2]
+                sp = SamplingParams(**sampling_kwargs)
+                prompts = [TokensPrompt(prompt_token_ids=tids) for tids in prompts_tids]
+                outs = llm.generate(prompts, sp, use_tqdm=False)
+                result: List[List[int]] = []
+                for r in outs:
+                    toks = []
+                    for o in r.outputs:
+                        tok_ids = list(o.token_ids)
+                        toks.append(tok_ids[0] if tok_ids else 0)
+                    result.append(toks)
+                res_q.put(("ok", result))
+
+            elif op == "compute_target_logprobs":
+                # items: List[Tuple[full_token_ids, n_ctx, n_target]]
+                items = msg[1]
+                real = [(i, t) for i, t in enumerate(items) if t[2] > 0]
+                results: List[Optional[float]] = [None] * len(items)
+                if real:
+                    prompts = [TokensPrompt(prompt_token_ids=t[0]) for _, t in real]
+                    sp = SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=1)
+                    outs = llm.generate(prompts, sp, use_tqdm=False)
+                    for (orig_i, (full_ids, n_ctx, n_target)), out in zip(real, outs):
+                        plp = out.prompt_logprobs
+                        if plp is None:
+                            continue
+                        target_lps: List[float] = []
+                        for pos in range(n_ctx, n_ctx + n_target):
+                            d = plp[pos] if pos < len(plp) else None
+                            if d is None:
+                                continue
+                            actual_tok = full_ids[pos]
+                            if actual_tok in d:
+                                target_lps.append(d[actual_tok].logprob)
+                        if target_lps:
+                            results[orig_i] = sum(target_lps) / len(target_lps)
+                res_q.put(("ok", results))
+
+            else:
+                res_q.put(("error", f"unknown op: {op}"))
+        except Exception:
+            res_q.put(("error", _tb.format_exc()))
+
+
+# Track every spawned worker so we can join them at process exit.
+_ALL_WORKERS: List["VLLMWorker"] = []
+
+
+def _shutdown_all_workers() -> None:
+    for w in list(_ALL_WORKERS):
+        try:
+            w.shutdown()
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_all_workers)
+
+
+class VLLMWorker:
+    """Handle to a subprocess running one vLLM LLM pinned to a single GPU."""
+
+    def __init__(self, hf_name: str, gpu_id: int,
+                 gpu_memory_utilization: float, max_model_len: int):
+        ctx = _mp.get_context("spawn")
+        self.req_q = ctx.Queue()
+        self.res_q = ctx.Queue()
+        self.proc = ctx.Process(
+            target=_vllm_worker_main,
+            args=(self.req_q, self.res_q, hf_name, gpu_id,
+                  gpu_memory_utilization, max_model_len),
+            daemon=True,
+        )
+        self.proc.start()
+        # Block until the worker says it has loaded the model (or errored).
+        status, payload = self.res_q.get()
+        if status != "ready":
+            raise RuntimeError(f"vLLM worker for {hf_name} on GPU {gpu_id} failed:\n{payload}")
+        self.gpu_id = gpu_id
+        _ALL_WORKERS.append(self)
+
+    def _call(self, *msg) -> Any:
+        self.req_q.put(msg)
+        status, payload = self.res_q.get()
+        if status != "ok":
+            raise RuntimeError(f"vLLM worker error:\n{payload}")
+        return payload
+
+    def generate_text(self, prompts: List[str], sampling_kwargs: Dict) -> List[str]:
+        return self._call("generate_text", prompts, sampling_kwargs)
+
+    def generate_n_tokens(self, prompts_tids: List[List[int]],
+                          sampling_kwargs: Dict) -> List[List[int]]:
+        return self._call("generate_n_tokens", prompts_tids, sampling_kwargs)
+
+    def compute_target_logprobs(
+        self, items: List[Tuple[List[int], int, int]]
+    ) -> List[Optional[float]]:
+        return self._call("compute_target_logprobs", items)
+
+    def shutdown(self) -> None:
+        if not self.proc.is_alive():
+            return
+        try:
+            self.req_q.put(("shutdown",))
+            self.proc.join(timeout=10)
+        except Exception:
+            pass
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(timeout=5)
+        if self in _ALL_WORKERS:
+            _ALL_WORKERS.remove(self)
 
 
 def _parse_local_spec(hf_name: str) -> Dict[str, Any]:
@@ -392,77 +597,43 @@ def _parse_local_spec(hf_name: str) -> Dict[str, Any]:
 
 
 class LocalModel:
-    """Wraps a vLLM `LLM` engine + its tokenizer.
+    """A LocalModel pairs:
+      - a parent-side HuggingFace tokenizer (for chat templating, encode/decode,
+        latin-mask construction — none of which need a GPU), and
+      - a `VLLMWorker` subprocess that owns the vLLM `LLM` engine on one GPU.
 
-    Use the spec format documented in `_parse_local_spec`. For GGUF models the file is
-    auto-downloaded via huggingface_hub and the tokenizer/config come from the base repo.
+    Spec format documented in `_parse_local_spec`. For GGUF models the file is
+    auto-downloaded inside the worker via huggingface_hub; the parent loads only
+    the tokenizer from the base repo.
     """
 
-    def __init__(self, hf_name: str, gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTIL,
+    def __init__(self, hf_name: str, gpu_id: int,
+                 gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTIL,
                  max_model_len: int = 8192):
         try:
-            from vllm import LLM
-            from huggingface_hub import hf_hub_download, list_repo_files
+            from transformers import AutoTokenizer
         except ImportError:
-            raise ImportError(
-                "vLLM backend requires: uv add vllm huggingface_hub"
-            )
+            raise ImportError("LocalModel requires `transformers` for the parent-side tokenizer.")
 
         self.spec_str = hf_name
         spec = _parse_local_spec(hf_name)
-        kwargs: Dict[str, Any] = dict(
-            dtype="bfloat16",
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enforce_eager=False,
-        )
-
-        if spec["kind"] == "hf":
-            label = f"HF bf16: {spec['repo']}"
-            kwargs["model"] = spec["repo"]
-        else:
-            # GGUF
-            repo = spec["repo"]
-            quant = spec["quant"]
-            base = spec["base"] or repo  # fallback: use the same repo for tokenizer (non-multimodal)
-            label = f"GGUF {quant}: {repo}  (tokenizer/config: {base})"
-            print(f"[local] Discovering GGUF files in {repo}...", flush=True)
-            files = list_repo_files(repo)
-            quant_lower = quant.lower()
-            llm_files = [f for f in files if f.endswith(".gguf")
-                         and quant_lower in f.lower()
-                         and "mmproj" not in f.lower() and "mm-proj" not in f.lower()]
-            mmproj_files = [f for f in files if f.endswith(".gguf")
-                            and ("mmproj" in f.lower() or "mm-proj" in f.lower())]
-            if not llm_files:
-                raise RuntimeError(f"No {quant} GGUF file in {repo}")
-            llm_file = llm_files[0]
-            print(f"[local]   LLM file: {llm_file}", flush=True)
-            gguf_path = hf_hub_download(repo_id=repo, filename=llm_file)
-            if mmproj_files:
-                mmproj_file = mmproj_files[0]
-                print(f"[local]   mmproj file: {mmproj_file}", flush=True)
-                hf_hub_download(repo_id=repo, filename=mmproj_file)
-            kwargs["model"] = gguf_path
-            kwargs["tokenizer"] = base
-            kwargs["hf_config_path"] = base
-            kwargs["quantization"] = "gguf"
-            # Override vocab_size from the GGUF embedding tensor — text-only quants are
-            # commonly smaller than the full multimodal HF config (which includes vision tokens).
-            actual_vocab = self._inspect_gguf_vocab(gguf_path)
-            if actual_vocab is not None:
-                kwargs["hf_overrides"] = {
-                    "vocab_size": actual_vocab,
-                    "text_config": {"vocab_size": actual_vocab},
-                }
-                print(f"[local]   forcing vocab_size={actual_vocab}", flush=True)
-
-        print(f"[local] Loading {label}  (gpu_mem={gpu_memory_utilization})", flush=True)
-        self.llm = LLM(**kwargs)
-        self.tokenizer = self.llm.get_tokenizer()
+        # Parent-side tokenizer — load from the base repo (works for both HF and GGUF specs).
+        tok_repo = spec["base"] if spec["kind"] == "gguf" and spec["base"] else spec["repo"]
+        self.tokenizer = AutoTokenizer.from_pretrained(tok_repo, trust_remote_code=True)
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        print(f"[local] {hf_name} ready.", flush=True)
+
+        label = (f"HF bf16: {spec['repo']}" if spec["kind"] == "hf"
+                 else f"GGUF {spec['quant']}: {spec['repo']}  (tokenizer/config: {tok_repo})")
+        print(f"[local] Spawning vLLM worker on GPU {gpu_id} for {label}  "
+              f"(gpu_mem={gpu_memory_utilization}, max_len={max_model_len})", flush=True)
+        self.worker = VLLMWorker(
+            hf_name=hf_name, gpu_id=gpu_id,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+        )
+        self.gpu_id = gpu_id
+        print(f"[local] {hf_name} ready on GPU {gpu_id}.", flush=True)
 
     @staticmethod
     def _inspect_gguf_vocab(gguf_path: str) -> Optional[int]:
@@ -486,17 +657,24 @@ class LocalModel:
             return None
 
 
-def _get_local_model(hf_name: str, gpu_memory_utilization: Optional[float] = None,
+def _get_local_model(hf_name: str, gpu_id: int = 0,
+                     gpu_memory_utilization: Optional[float] = None,
                      max_model_len: int = 8192) -> "LocalModel":
-    """Return the cached LocalModel, loading it on first call. Spec format documented in
-    `_parse_local_spec`."""
-    if hf_name in _LOCAL_MODEL_REGISTRY:
-        return _LOCAL_MODEL_REGISTRY[hf_name]
+    """Return the cached LocalModel, spawning its worker on first call.
+
+    Each (spec, gpu_id) pair gets its own LocalModel — the cache key is
+    "{hf_name}@gpu{gpu_id}" so the same model on a different GPU spawns a new
+    worker. Spec format documented in `_parse_local_spec`.
+    """
+    key = f"{hf_name}@gpu{gpu_id}"
+    if key in _LOCAL_MODEL_REGISTRY:
+        return _LOCAL_MODEL_REGISTRY[key]
     util = DEFAULT_GPU_MEMORY_UTIL if gpu_memory_utilization is None else gpu_memory_utilization
-    _LOCAL_MODEL_REGISTRY[hf_name] = LocalModel(
-        hf_name, gpu_memory_utilization=util, max_model_len=max_model_len,
+    _LOCAL_MODEL_REGISTRY[key] = LocalModel(
+        hf_name, gpu_id=gpu_id,
+        gpu_memory_utilization=util, max_model_len=max_model_len,
     )
-    return _LOCAL_MODEL_REGISTRY[hf_name]
+    return _LOCAL_MODEL_REGISTRY[key]
 
 
 def batch_generate_local(
@@ -516,8 +694,6 @@ def batch_generate_local(
     if not messages_list:
         return []
 
-    from vllm import SamplingParams
-
     prompts: List[str] = []
     for msgs in messages_list:
         prompt = lm.tokenizer.apply_chat_template(
@@ -527,13 +703,12 @@ def batch_generate_local(
             prompt += "<think>\n\n</think>\n"
         prompts.append(prompt)
 
-    sp = SamplingParams(
+    sampling_kwargs = dict(
         max_tokens=max_new_tokens,
         temperature=max(temperature, 1e-6),
         skip_special_tokens=False,    # preserve <think> tags etc.
     )
-    out = lm.llm.generate(prompts, sp, use_tqdm=False)
-    return [r.outputs[0].text for r in out]
+    return lm.worker.generate_text(prompts, sampling_kwargs)
 
 
 def _make_local_response(text: str):
@@ -577,11 +752,8 @@ def batch_logprob_local(
     if not items:
         return []
 
-    from vllm import SamplingParams, TokensPrompt
-
-    prompts: List[Any] = []
-    spans: List[Tuple[List[int], int, int]] = []  # (full_ids, n_ctx, n_target)
-
+    # Tokenize in the parent (no GPU needed); the worker just runs the engine.
+    payload: List[Tuple[List[int], int, int]] = []
     for context_messages, target_text in items:
         context_str = lm.tokenizer.apply_chat_template(
             context_messages, tokenize=False, add_generation_prompt=True,
@@ -589,47 +761,12 @@ def batch_logprob_local(
         context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
         target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
         if not target_ids:
-            spans.append(([], 0, 0))
-            prompts.append(None)
-            continue
-        full_ids = context_ids + target_ids
-        prompts.append(TokensPrompt(prompt_token_ids=full_ids))
-        spans.append((full_ids, len(context_ids), len(target_ids)))
+            # Worker treats n_target == 0 as a skip; result will be None.
+            payload.append(([], 0, 0))
+        else:
+            payload.append((context_ids + target_ids, len(context_ids), len(target_ids)))
 
-    # Filter out None (empty-target) items but remember their positions
-    real_indices = [i for i, p in enumerate(prompts) if p is not None]
-    real_prompts = [prompts[i] for i in real_indices]
-
-    results: List[Optional[float]] = [None] * len(items)
-    if not real_prompts:
-        return results
-
-    sp = SamplingParams(
-        max_tokens=1,             # we only care about prompt logprobs; need >=1
-        temperature=1.0,
-        prompt_logprobs=1,        # request top-1 logprob per prompt position
-    )
-    out = lm.llm.generate(real_prompts, sp, use_tqdm=False)
-
-    for orig_i, result in zip(real_indices, out):
-        full_ids, n_ctx, n_target = spans[orig_i]
-        plp = result.prompt_logprobs  # List[Optional[Dict[int, Logprob]]] of length len(prompt)
-        if plp is None or n_target == 0:
-            continue
-        target_lps: List[float] = []
-        # The dict at position p contains logprobs for the prompt token at position p,
-        # given the prefix (positions 0..p-1). For the first position there's no prefix,
-        # so plp[0] is None. Target tokens occupy positions n_ctx..n_ctx+n_target-1.
-        for pos in range(n_ctx, n_ctx + n_target):
-            d = plp[pos] if pos < len(plp) else None
-            if d is None:
-                continue
-            actual_tok = full_ids[pos]
-            if actual_tok in d:
-                target_lps.append(d[actual_tok].logprob)
-        if target_lps:
-            results[orig_i] = sum(target_lps) / len(target_lps)
-    return results
+    return lm.worker.compute_target_logprobs(payload)
 
 
 # =============================================================================
@@ -2043,8 +2180,7 @@ def _vllm_sample_next_tokens(
     """Sample `n` next tokens for each prompt using vLLM. Returns a list of length
     len(prompts_token_ids); each element is a list of `n` sampled token IDs.
     The latin mask (allowed_token_ids) is applied as a built-in vLLM constraint."""
-    from vllm import SamplingParams, TokensPrompt
-    sp = SamplingParams(
+    sampling_kwargs = dict(
         n=n,
         max_tokens=1,
         temperature=max(temperature, 1e-6),
@@ -2052,16 +2188,7 @@ def _vllm_sample_next_tokens(
         allowed_token_ids=allowed_token_ids,
         skip_special_tokens=False,
     )
-    prompts = [TokensPrompt(prompt_token_ids=tids) for tids in prompts_token_ids]
-    outs = lm.llm.generate(prompts, sp, use_tqdm=False)
-    result: List[List[int]] = []
-    for r in outs:
-        toks = []
-        for o in r.outputs:
-            tok_ids = list(o.token_ids)
-            toks.append(tok_ids[0] if tok_ids else 0)
-        result.append(toks)
-    return result
+    return lm.worker.generate_n_tokens(prompts_token_ids, sampling_kwargs)
 
 
 def _beast_single_trial_local(
@@ -2326,12 +2453,23 @@ def run_rollout_batched_local(
     target_model_id    = cfg.rollout.target
     target_model_name  = target_model_id  # always show model name in BEAST mode
 
-    # vLLM manages its own GPU placement. Both LLMs load on the same GPU here, sharing
-    # VRAM via gpu_memory_utilization. The fraction is set per-model and configurable in cfg.
+    # Each LocalModel gets its own subprocess pinned to a specific GPU (CUDA_VISIBLE_DEVICES
+    # is set per-worker before vLLM init). With one LLM per GPU each worker can use most of
+    # the device's memory. Defaults: eval → GPU 0, target → GPU 1. Override via cfg.rollout.
+    eval_gpu_id     = cfg.rollout.get("evaluator_gpu_id", 0)
+    target_gpu_id   = cfg.rollout.get("target_gpu_id",   1)
     eval_gpu_util   = cfg.rollout.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
     target_gpu_util = cfg.rollout.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
-    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):], gpu_memory_utilization=eval_gpu_util)
-    lm_target = _get_local_model(target_model_id[len("local/"):],    gpu_memory_utilization=target_gpu_util)
+    eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 8192)
+    target_max_len  = cfg.rollout.get("target_max_model_len",    4096)
+    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):],
+                                 gpu_id=eval_gpu_id,
+                                 gpu_memory_utilization=eval_gpu_util,
+                                 max_model_len=eval_max_len)
+    lm_target = _get_local_model(target_model_id[len("local/"):],
+                                 gpu_id=target_gpu_id,
+                                 gpu_memory_utilization=target_gpu_util,
+                                 max_model_len=target_max_len)
 
     beast_cfg        = cfg.get("beast", {})
     num_per_scenario = beast_cfg.get("num_per_scenario", 1)
@@ -4219,8 +4357,12 @@ cfg = DotDict({
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3, #2,                  # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": True,    # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
-        "evaluator_gpu_memory_utilization": 0.55,  # vLLM: fraction of GPU mem reserved for evaluator LLM (loaded first)
-        "target_gpu_memory_utilization":    0.30,  # vLLM: fraction of REMAINING GPU mem for target LLM
+        # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
+        # worker can grab most of the memory; the small reserve covers framework overhead.
+        "evaluator_gpu_id": 0,
+        "target_gpu_id":    1,
+        "evaluator_gpu_memory_utilization": 0.85,
+        "target_gpu_memory_utilization":    0.85,
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
