@@ -415,8 +415,63 @@
           </div>
         </div>
       {/if}
+
+      {@render roundRefinementSection()}
     </div>
   </div>
+{/snippet}
+
+<!-- Round Refinement Section Snippet -->
+{#snippet roundRefinementSection()}
+  {@const rawMeta = (loader.transcript?.transcript?.metadata as any)}
+  {@const refinedStrategy = rawMeta?.refined_strategy ?? null}
+  {@const refinement = rawMeta?.refinement ?? null}
+  {#if refinedStrategy || refinement}
+    <div class="space-y-3 pt-2">
+      <!-- Strategy injected into this round (from prior round's refinement) -->
+      {#if refinedStrategy}
+        <div class="p-3 rounded-lg bg-indigo-50/60 dark:bg-indigo-950/25 border border-dashed border-indigo-300 dark:border-indigo-700/50">
+          <div class="flex items-center gap-1.5 mb-1.5">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 flex-shrink-0">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+            </svg>
+            <span class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-400">Strategy from prior round</span>
+          </div>
+          <div class="text-sm text-indigo-900 dark:text-indigo-100 whitespace-pre-wrap leading-relaxed italic">
+            {refinedStrategy}
+          </div>
+        </div>
+      {/if}
+
+      <!-- Refinement output derived from this round (feeds into the next round) -->
+      {#if refinement}
+        <div class="p-3 rounded-lg bg-teal-50/60 dark:bg-teal-950/25 border border-dashed border-teal-300 dark:border-teal-700/50">
+          <div class="flex items-center gap-1.5 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400 flex-shrink-0">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.904a48.62 48.62 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a50.636 50.636 0 0 0-2.658-.813A59.906 59.906 0 0 1 12 3.493a59.903 59.903 0 0 1 10.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0 1 12 13.489a50.702 50.702 0 0 1 3.741-1.342M6.75 15a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm0 0v-3.675A55.378 55.378 0 0 1 12 8.443m-7.007 11.55A5.981 5.981 0 0 0 6.75 15.75v-1.5" />
+            </svg>
+            <span class="text-xs font-semibold uppercase tracking-wide text-teal-700 dark:text-teal-400">Refinement output <span class="font-normal normal-case">(feeds into next round)</span></span>
+          </div>
+          {#if refinement.observations}
+            <div class="mb-2">
+              <span class="text-xs font-semibold text-teal-700 dark:text-teal-400">Observations</span>
+              <div class="text-sm text-teal-900 dark:text-teal-100 whitespace-pre-wrap leading-relaxed mt-0.5">
+                {refinement.observations}
+              </div>
+            </div>
+          {/if}
+          {#if refinement.updated_strategy}
+            <div>
+              <span class="text-xs font-semibold text-teal-700 dark:text-teal-400">Updated strategy</span>
+              <div class="text-sm text-teal-900 dark:text-teal-100 whitespace-pre-wrap leading-relaxed italic mt-0.5">
+                {refinement.updated_strategy}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 {/snippet}
 
 <!-- View Controls Snippet -->

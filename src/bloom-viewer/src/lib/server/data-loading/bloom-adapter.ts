@@ -28,6 +28,11 @@ interface BloomTranscript {
     created_at?: string;
     variation_number?: number;
     repetition_number?: number;
+    refined_strategy?: string;
+    refinement?: {
+      observations?: string;
+      updated_strategy?: string;
+    };
   };
   messages: BloomMessage[];
   judgment?: {
@@ -146,6 +151,12 @@ export function convertBloomTranscript(data: any): any {
   };
   if (judgeOutput) {
     v3Metadata.judge_output = judgeOutput;
+  }
+  if (meta.refined_strategy) {
+    v3Metadata.refined_strategy = meta.refined_strategy;
+  }
+  if (meta.refinement) {
+    v3Metadata.refinement = meta.refinement;
   }
 
   // Convert messages to events

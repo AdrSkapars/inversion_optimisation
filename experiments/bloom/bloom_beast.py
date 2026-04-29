@@ -4067,6 +4067,29 @@ async def run_parallel_round(
     save_json({"refinements": refinements}, output_dir / "refinements.json")
     print(f"  Refined {len(refinements)} scenarios", flush=True)
 
+    # Write refinement output back into the transcripts of the round that was just analysed.
+    # Each transcript gets a "refinement" block in its metadata: {observations, updated_strategy}.
+    # This makes transcripts self-contained — the viewer can show what was learned from each run.
+    prev_transcripts_dir = all_prev_round_dirs[-1] / "transcripts"
+    if prev_transcripts_dir.is_dir():
+        for r in refinements:
+            var_num = r["variation_number"]
+            refinement_block = {
+                "observations":    r.get("observations", ""),
+                "updated_strategy": r.get("updated_strategy", ""),
+            }
+            for tf in sorted(prev_transcripts_dir.glob(f"transcript_v{var_num}r*.json")):
+                try:
+                    with open(tf, "r", encoding="utf-8") as f:
+                        td = json.load(f)
+                    td.setdefault("metadata", {})["refinement"] = refinement_block
+                    save_json(td, tf)
+                    debug_print(f"Wrote refinement back to {tf.name}")
+                except Exception as e:
+                    debug_print(f"Failed to write refinement back to {tf}: {e}")
+        print(f"  Wrote refinement blocks back to {prev_transcripts_dir.parent.name}/transcripts/",
+              flush=True)
+
     # Build variations_override carrying:
     #   - description:       FROZEN scenario from the original ideation (never refined)
     #   - target_system_prompt + setup_content: FROZEN from round 1's transcripts
