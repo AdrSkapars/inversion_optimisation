@@ -558,9 +558,23 @@
 <!-- User Message Snippet -->
 {#snippet userMessage(message: UserMessage)}
   {@const textContent = extractTextFromContent(message.content)}
+  {@const strategy = (message as any).metadata?.strategy ?? null}
   {@const targetedResponseStart = (message as any).metadata?.targeted_response_start ?? null}
   {@const beastBaseline = (message as any).metadata?.beast_baseline ?? null}
   {@const beastSuffix = (message as any).metadata?.beast_suffix ?? null}
+  {#if strategy}
+    <div class="mb-3 p-3 rounded-lg bg-indigo-50/60 dark:bg-indigo-950/25 border border-dashed border-indigo-300 dark:border-indigo-700/50">
+      <div class="flex items-center gap-1.5 mb-1.5">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 flex-shrink-0">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+        </svg>
+        <span class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-400">Evaluator strategy</span>
+      </div>
+      <div class="text-sm text-indigo-900 dark:text-indigo-100 whitespace-pre-wrap leading-relaxed italic">
+        {@html highlightPlainText(strategy)}
+      </div>
+    </div>
+  {/if}
   {#if textContent !== null}
     <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html beastSuffix ? renderWithBeastSuffix(textContent, beastBaseline ?? '', beastSuffix) : highlightPlainText(textContent)}</span>
   {:else}
