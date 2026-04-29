@@ -2497,10 +2497,10 @@ def run_rollout_batched_local(
     # Each LocalModel gets its own subprocess pinned to a specific GPU (CUDA_VISIBLE_DEVICES
     # is set per-worker before vLLM init). With one LLM per GPU each worker can use most of
     # the device's memory. Defaults: eval → GPU 0, target → GPU 1. Override via cfg.rollout.
-    eval_gpu_id     = cfg.rollout.get("evaluator_gpu_id", 0)
-    target_gpu_id   = cfg.rollout.get("target_gpu_id",   1)
-    eval_gpu_util   = cfg.rollout.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
-    target_gpu_util = cfg.rollout.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
+    eval_gpu_id     = cfg.get("evaluator_gpu_id", 0)
+    target_gpu_id   = cfg.get("target_gpu_id",   1)
+    eval_gpu_util   = cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
+    target_gpu_util = cfg.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
     eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 8192)
     target_max_len  = cfg.rollout.get("target_max_model_len",    4096)
     lm_eval   = _get_local_model(evaluator_model_id[len("local/"):],
@@ -4379,6 +4379,13 @@ cfg = DotDict({
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
 
+    # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
+    # worker can grab most of the memory; the small reserve covers framework overhead.
+    "evaluator_gpu_id": 2,
+    "target_gpu_id":    3,
+    "evaluator_gpu_memory_utilization": 0.85,
+    "target_gpu_memory_utilization":    0.85,
+
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
         "max_tokens": 2000,                  # max output tokens for the understanding call
@@ -4399,12 +4406,6 @@ cfg = DotDict({
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 1,                      # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": True,    # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
-        # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
-        # worker can grab most of the memory; the small reserve covers framework overhead.
-        "evaluator_gpu_id": 0,
-        "target_gpu_id":    1,
-        "evaluator_gpu_memory_utilization": 0.85,
-        "target_gpu_memory_utilization":    0.85,
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
