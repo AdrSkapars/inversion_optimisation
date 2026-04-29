@@ -285,6 +285,20 @@ def parse_message(response) -> Dict[str, Any]:
     return result
 
 
+def _auto_close_tags(content: str, tags: List[str]) -> str:
+    """If `content` has more <tag> openings than </tag> closings for any tag,
+    append the missing closing tags at the end. Robust to model output that was
+    truncated by max_tokens before emitting the closing tag — the regex extractors
+    that follow can then succeed on the patched-up text.
+    """
+    for tag in tags:
+        opens = len(re.findall(rf"<{re.escape(tag)}>", content))
+        closes = len(re.findall(rf"</{re.escape(tag)}>", content))
+        if opens > closes:
+            content += f"</{tag}>" * (opens - closes)
+    return content
+
+
 def extract_transcript_text(messages: List[Dict[str, Any]]) -> str:
     """Format a list of simplified transcript messages into text for the judge."""
     lines = []
@@ -1660,6 +1674,10 @@ def _extract_message_tags(content: str) -> Tuple[str, str]:
     case we take the text before the first structural tag as the user message,
     so the target never receives leaked tag content.
     """
+    # Auto-close any truncated tags (max_tokens cutoff) so the strategy strip and
+    # the regex extractors below can still succeed.
+    content = _auto_close_tags(content, ["strategy", "message", "targeted_response_start"])
+
     # First strip out any <strategy>...</strategy> block — it's evaluator-only thinking
     # introduced for inter-turn deliberation and must never reach the target.
     content = re.sub(r"<strategy>.*?</strategy>\s*", "", content, flags=re.DOTALL)
@@ -1864,6 +1882,7 @@ class ConversationOrchestrator:
 
         parsed_sysprompt = parse_message(sysprompt_response)
         system_prompt_content = parsed_sysprompt["content"] or ""
+        system_prompt_content = _auto_close_tags(system_prompt_content, ["system_prompt"])
 
         # Extract system prompt from tags
         match = re.search(r"<system_prompt>(.*?)</system_prompt>", system_prompt_content, re.DOTALL)
@@ -2066,6 +2085,7 @@ async def run_refinement(
     )
     parsed = parse_message(response)
     content = parsed["content"] or ""
+    content = _auto_close_tags(content, ["observations", "updated_strategy"])
 
     obs_match = re.search(r"<observations>(.*?)</observations>", content, re.DOTALL)
     strat_match = re.search(r"<updated_strategy>(.*?)</updated_strategy>", content, re.DOTALL)
@@ -2766,7 +2786,11 @@ def run_rollout_batched_local(
         if frozen_tsp:
             generated_sysprompt = frozen_tsp
         else:
-            match = re.search(r"<system_prompt>(.*?)</system_prompt>", setup_content, re.DOTALL)
+            match = re.search(
+                r"<system_prompt>(.*?)</system_prompt>",
+                _auto_close_tags(setup_content, ["system_prompt"]),
+                re.DOTALL,
+            )
             generated_sysprompt = match.group(1).strip() if match else ""
         target_sysprompt = generated_sysprompt
         if target_sysprompt_prefix and target_sysprompt_prefix.strip() and not frozen_tsp:
@@ -2983,6 +3007,14 @@ def parse_judgment_response(response_text: str, additional_qualities: Optional[L
     justification = ""
     summary = ""
     additional_scores = {}
+
+    # Auto-close any truncated tags so the extractors below can succeed even if
+    # the judge ran out of tokens mid-output.
+    quality_tags = [q.replace("-", "_") + "_score" for q in (additional_qualities or [])]
+    response_text = _auto_close_tags(
+        response_text,
+        ["summary", "behavior_presence_score", "justification", "highlights"] + quality_tags,
+    )
 
     summary_match = re.search(r"<summary>(.*?)</summary>", response_text, re.DOTALL)
     if summary_match:
@@ -3977,6 +4009,7 @@ async def run_parallel_round(
             for (var_num, history, _, _), raw in zip(chunk, outputs):
                 parsed = parse_message(_make_local_response(raw))
                 content = parsed["content"] or raw
+                content = _auto_close_tags(content, ["observations", "updated_strategy"])
                 obs_match = re.search(r"<observations>(.*?)</observations>", content, re.DOTALL)
                 strat_match = re.search(r"<updated_strategy>(.*?)</updated_strategy>", content, re.DOTALL)
                 latest_score = history[-1].get("score", 0) if history else 0
@@ -4484,7 +4517,7 @@ cfg = DotDict({
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via BEAST
         "target": target_model,              # model under evaluation
-        "evaluator_max_tokens": 2000,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; doesn't need much)
+        "evaluator_max_tokens": 1200,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; tags auto-closed if truncated)
         "target_max_tokens": 500,            # cap on target response length (lower = shorter assistant replies)
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
@@ -4493,7 +4526,7 @@ cfg = DotDict({
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
-        "max_tokens": 2000,                  # max output tokens per judgment call
+        "max_tokens": 1000,                  # max output tokens per judgment call (tags auto-closed if truncated)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_samples": 1,                    # score samples per transcript to average (higher = less variance)
         "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
@@ -4502,7 +4535,7 @@ cfg = DotDict({
     },
     "refinement": {
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
-        "max_tokens": 2000,                  # max output tokens per refinement call
+        "max_tokens": 1200,                  # max output tokens per refinement call (tags auto-closed if truncated)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_rounds": 3,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
