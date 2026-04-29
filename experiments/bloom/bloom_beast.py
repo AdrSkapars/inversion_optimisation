@@ -360,7 +360,8 @@ def calculate_batch_size(
 # don't need to round-trip to the worker. The worker only owns the vLLM `LLM`
 # engine and exposes 3 RPC primitives:
 #   - generate_text(prompts: List[str], sampling_kwargs) -> List[str]
-#   - generate_n_tokens(prompts_token_ids, sampling_kwargs) -> List[List[int]]
+#   - generate_n_tokens(prompts_token_ids, sampling_kwargs) -> List[List[List[int]]]
+#       (per prompt → per candidate → list of token IDs; len of inner = max_tokens)
 #   - compute_target_logprobs(items) -> List[Optional[float]]
 # RPC is over multiprocessing.Queue with a "spawn" context (forking + CUDA = death).
 
@@ -458,17 +459,15 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
                 res_q.put(("ok", [r.outputs[0].text for r in out]))
 
             elif op == "generate_n_tokens":
+                # Per prompt, return n candidates; each candidate is a list of token IDs
+                # (length = sampling_kwargs["max_tokens"]). Caller flattens / truncates.
                 prompts_tids, sampling_kwargs = msg[1], msg[2]
                 sp = SamplingParams(**sampling_kwargs)
                 prompts = [TokensPrompt(prompt_token_ids=tids) for tids in prompts_tids]
                 outs = llm.generate(prompts, sp, use_tqdm=False)
-                result: List[List[int]] = []
-                for r in outs:
-                    toks = []
-                    for o in r.outputs:
-                        tok_ids = list(o.token_ids)
-                        toks.append(tok_ids[0] if tok_ids else 0)
-                    result.append(toks)
+                result: List[List[List[int]]] = [
+                    [list(o.token_ids) for o in r.outputs] for r in outs
+                ]
                 res_q.put(("ok", result))
 
             elif op == "compute_target_logprobs":
@@ -582,7 +581,8 @@ class VLLMWorker:
         return self._call("generate_text", prompts, sampling_kwargs)
 
     def generate_n_tokens(self, prompts_tids: List[List[int]],
-                          sampling_kwargs: Dict) -> List[List[int]]:
+                          sampling_kwargs: Dict) -> List[List[List[int]]]:
+        """Per prompt → list of n candidates → list of sampled token IDs (length = max_tokens)."""
         return self._call("generate_n_tokens", prompts_tids, sampling_kwargs)
 
     def compute_target_logprobs(
@@ -2210,20 +2210,25 @@ def _score_beast_candidates(
     return all_scores
 
 
-def _vllm_sample_next_tokens(
+def _vllm_sample_extensions(
     lm: "LocalModel",
     prompts_token_ids: List[List[int]],
     n: int,
+    max_tokens: int,
     temperature: float,
     top_p: float,
     allowed_token_ids: Optional[List[int]] = None,
-) -> List[List[int]]:
-    """Sample `n` next tokens for each prompt using vLLM. Returns a list of length
-    len(prompts_token_ids); each element is a list of `n` sampled token IDs.
-    The latin mask (allowed_token_ids) is applied as a built-in vLLM constraint."""
+) -> List[List[List[int]]]:
+    """Sample `n` extensions of `max_tokens` tokens each per prompt, via vLLM.
+
+    Returns shape: per prompt → list of n candidates → list of token IDs (length max_tokens).
+    The Latin mask (allowed_token_ids) is enforced at every sampling step via
+    SamplingParams.allowed_token_ids. When max_tokens=1 each inner list is length 1
+    — same single-forward-pass cost as the old single-token sampler.
+    """
     sampling_kwargs = dict(
         n=n,
-        max_tokens=1,
+        max_tokens=max_tokens,
         temperature=max(temperature, 1e-6),
         top_p=top_p,
         allowed_token_ids=allowed_token_ids,
@@ -2238,70 +2243,103 @@ def _beast_single_trial_local(
     prefix_tokens: List[int],
     target_msgs: List[Dict],
     trs: str,
-    k1: int,
-    k2: int,
-    suffix_length: int,
-    ngram: int,
-    pool_size: int,
+    num_beams: int,
+    candidates_per_beam: int,
+    scored_candidate_length: int,
+    kept_candidate_length: int,
+    unscored_filler_length: int,
+    max_num_iterations: int,
+    max_pool_size: int,
     max_batch_size: int,
     temperature: float,
     top_p: float,
     baseline_prefix: str,
-    latin_token_ids: Optional[List[int]] = None,   # list of allowed token IDs (Latin mask), or None
+    latin_token_ids: Optional[List[int]] = None,
 ) -> Tuple[List[List[int]], List[float]]:
-    """One BEAST trial: token-level beam search scored by log P(TRS | target_ctx + msg).
-    baseline_prefix is prepended to the decoded suffix when scoring against lm_target.
-    Sampling is via vLLM's SamplingParams (allowed_token_ids enforces the Latin mask).
-    Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores."""
+    """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
+
+    Per iteration:
+      1. Filler:  each beam grows by `unscored_filler_length` randomly sampled tokens (unscored).
+                  Drawn one token at a time so each draw is independent per beam.
+      2. Branch:  each beam → `candidates_per_beam` continuations of `scored_candidate_length`
+                  tokens (single vLLM call with n=candidates_per_beam, max_tokens=scored_candidate_length).
+      3. Score:   all `num_beams * candidates_per_beam` candidates scored by
+                  log P(TRS | target_ctx + decoded_msg).
+      4. Commit:  keep top `num_beams` by score; truncate each kept candidate's extension
+                  to `kept_candidate_length` tokens. Setting kept < scored gives lookahead
+                  (score with more context, commit fewer tokens).
+
+    Per-iteration token growth = unscored_filler_length + kept_candidate_length.
+    Implicit max suffix length = max_num_iterations * (kept + filler).
+
+    `baseline_prefix` is prepended to the decoded suffix when scoring against lm_target.
+    Sampling is via vLLM SamplingParams (allowed_token_ids enforces the Latin mask).
+    Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores.
+    """
+    if kept_candidate_length > scored_candidate_length:
+        raise ValueError(
+            f"kept_candidate_length ({kept_candidate_length}) must be <= "
+            f"scored_candidate_length ({scored_candidate_length})"
+        )
+    if num_beams < 1 or candidates_per_beam < 1 or scored_candidate_length < 1 or kept_candidate_length < 1:
+        raise ValueError("num_beams, candidates_per_beam, scored/kept_candidate_length must all be >= 1")
+
     prefix_length = len(prefix_tokens)
 
-    # ── Init beam: sample k1 first tokens from the prefix ──
-    first_tokens = _vllm_sample_next_tokens(
-        lm_eval, [prefix_tokens], n=k1,
-        temperature=temperature, top_p=top_p,
-        allowed_token_ids=latin_token_ids,
-    )[0]
-    beam: List[List[int]] = [prefix_tokens + [t] for t in first_tokens]
-    pool_seqs: List[List[int]] = list(beam)
-    pool_scores: List[float] = [-float("inf")] * k1
+    # All beams start as identical copies of the prefix. The first iteration's branch
+    # phase will produce num_beams * candidates_per_beam unique extensions.
+    beam: List[List[int]] = [list(prefix_tokens) for _ in range(num_beams)]
+    pool_seqs: List[List[int]] = []
+    pool_scores: List[float] = []
 
-    total_iters = (suffix_length - 1) * ngram
+    for iteration in range(max_num_iterations):
+        # ── Phase 1: Unscored filler ─────────────────────────────────────────
+        # One random token per beam per filler step (independent draws).
+        for _ in range(unscored_filler_length):
+            filler = _vllm_sample_extensions(
+                lm_eval, beam, n=1, max_tokens=1,
+                temperature=temperature, top_p=top_p,
+                allowed_token_ids=latin_token_ids,
+            )
+            for i, cand_list in enumerate(filler):
+                if cand_list and cand_list[0]:
+                    beam[i] = beam[i] + cand_list[0]
 
-    for iteration in range(total_iters):
-        # ── Expand: sample k2 next tokens per beam element via vLLM ──
-        next_tokens_per_beam = _vllm_sample_next_tokens(
-            lm_eval, beam, n=k2,
+        # ── Phase 2: Branch — sample candidates_per_beam extensions per beam ──
+        # Single vLLM call: n=candidates_per_beam, max_tokens=scored_candidate_length.
+        # When scored_candidate_length=1 this is exactly the original BEAST cost.
+        extensions = _vllm_sample_extensions(
+            lm_eval, beam, n=candidates_per_beam, max_tokens=scored_candidate_length,
             temperature=temperature, top_p=top_p,
             allowed_token_ids=latin_token_ids,
         )
 
-        # ── Build k1*k2 expanded candidates ──
-        expanded: List[List[int]] = []
-        for i, seq in enumerate(beam):
-            for tok in next_tokens_per_beam[i]:
-                expanded.append(seq + [tok])
+        # Flatten to num_beams * candidates_per_beam full candidates.
+        candidates: List[List[int]] = []
+        for i, beam_seq in enumerate(beam):
+            for ext in extensions[i]:
+                candidates.append(beam_seq + ext)
 
-        # On non-scoring iterations just advance beam without scoring
-        if iteration % ngram != 0:
-            beam = [expanded[i * k2] for i in range(k1)]
-            continue
-
-        # ── Score all candidates with lm_target ──
+        # ── Phase 3: Score all candidates with lm_target ─────────────────────
         scores = _score_beast_candidates(
-            lm_eval, lm_target, expanded, prefix_length,
+            lm_eval, lm_target, candidates, prefix_length,
             target_msgs, trs, baseline_prefix, max_batch_size,
         )
 
-        # ── Keep top k1 as new beam ──
-        top_idx = sorted(range(len(scores)), key=lambda i: scores[i])[-k1:]
-        beam = [expanded[i] for i in top_idx]
+        # ── Phase 4: Keep top num_beams; truncate to kept_candidate_length ──
+        # All beams had the same length L at iteration start; all candidates have
+        # length L + scored_candidate_length. Truncate to L + kept_candidate_length.
+        beam_len_at_start = len(beam[0])
+        truncate_to = beam_len_at_start + kept_candidate_length
+        top_idx = sorted(range(len(scores)), key=lambda i: scores[i])[-num_beams:]
+        beam = [candidates[i][:truncate_to] for i in top_idx]
         beam_scores = [scores[i] for i in top_idx]
 
-        # ── Merge into trial pool ──
+        # ── Merge into trial pool ────────────────────────────────────────────
         pool_seqs.extend(beam)
         pool_scores.extend(beam_scores)
-        if len(pool_scores) > pool_size:
-            top_pool_idx = sorted(range(len(pool_scores)), key=lambda i: pool_scores[i])[-pool_size:]
+        if len(pool_scores) > max_pool_size:
+            top_pool_idx = sorted(range(len(pool_scores)), key=lambda i: pool_scores[i])[-max_pool_size:]
             pool_seqs = [pool_seqs[i] for i in top_pool_idx]
             pool_scores = [pool_scores[i] for i in top_pool_idx]
 
@@ -2351,35 +2389,37 @@ def beast_search_evaluator_message(
         return [(baseline_msg, 0.0, baseline_msg, "")], trs
 
     # ── Extract BEAST hyperparams ──────────────────────────────────────────
-    k1            = beast_cfg.get("k1", 15)
-    k2            = beast_cfg.get("k2", 15)
-    suffix_length = beast_cfg.get("suffix_length", 20)
-    ngram         = beast_cfg.get("ngram", 1)
-    pool_size     = beast_cfg.get("pool_size", 20)
-    max_batch_sz  = batch_size
-    temperature   = beast_cfg.get("temperature", 1.0)
-    top_p         = beast_cfg.get("top_p", 1.0)
-    suffix_after_tokens = beast_cfg.get("suffix_after_tokens", None)
-    reward_tokens       = beast_cfg.get("reward_tokens", 0)
+    num_beams                = beast_cfg.get("num_beams", 5)
+    candidates_per_beam      = beast_cfg.get("candidates_per_beam", 5)
+    scored_candidate_length  = beast_cfg.get("scored_candidate_length", 1)
+    kept_candidate_length    = beast_cfg.get("kept_candidate_length", 1)
+    unscored_filler_length   = beast_cfg.get("unscored_filler_length", 0)
+    max_num_iterations       = beast_cfg.get("max_num_iterations", 19)
+    max_pool_size            = beast_cfg.get("max_pool_size", 20)
+    max_batch_sz             = batch_size
+    temperature              = beast_cfg.get("temperature", 1.0)
+    top_p                    = beast_cfg.get("top_p", 1.0)
+    max_prefix_length        = beast_cfg.get("max_prefix_length", None)
+    max_reward_output_length = beast_cfg.get("max_reward_output_length", 0)
 
     # ── Compute baseline_prefix: the part of baseline_msg kept before the suffix ──
     # None  → keep full baseline_msg (append suffix after it)
     # 0     → keep nothing (BEAST generates the whole message from scratch)
     # N > 0 → keep first N lm_eval tokens of baseline_msg
-    if suffix_after_tokens is None:
+    if max_prefix_length is None:
         baseline_prefix = baseline_msg
-    elif suffix_after_tokens == 0:
+    elif max_prefix_length == 0:
         baseline_prefix = ""
     else:
         bm_ids = lm_eval.tokenizer.encode(baseline_msg, add_special_tokens=False)
         baseline_prefix = lm_eval.tokenizer.decode(
-            bm_ids[:suffix_after_tokens], skip_special_tokens=True
+            bm_ids[:max_prefix_length], skip_special_tokens=True
         )
 
-    # ── Truncate TRS to first reward_tokens target-model tokens ──────────
-    if reward_tokens > 0 and trs:
+    # ── Truncate TRS to first max_reward_output_length target-model tokens ──
+    if max_reward_output_length > 0 and trs:
         trs_ids = lm_target.tokenizer.encode(trs, add_special_tokens=False)
-        trs = lm_target.tokenizer.decode(trs_ids[:reward_tokens], skip_special_tokens=False)
+        trs = lm_target.tokenizer.decode(trs_ids[:max_reward_output_length], skip_special_tokens=False)
 
     # ── Build lm_eval prefix tokens ───────────────────────────────────────
     prompt_str = lm_eval.tokenizer.apply_chat_template(
@@ -2387,7 +2427,7 @@ def beast_search_evaluator_message(
     )
     if no_think_eval:
         prompt_str += "<think>\n\n</think>\n"
-    prompt_str += baseline_prefix   # empty string when suffix_after_tokens == 0
+    prompt_str += baseline_prefix   # empty string when max_prefix_length == 0
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
@@ -2404,10 +2444,16 @@ def beast_search_evaluator_message(
             print(f"    Latin mask: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
 
     # ── Run single BEAST trial ────────────────────────────────────────────
-    print(f"    BEAST search (k1={k1}, k2={k2}, len={suffix_length}) ...", flush=True)
+    print(
+        f"    BEAST search (beams={num_beams}, cand/beam={candidates_per_beam}, "
+        f"iters={max_num_iterations}, scored={scored_candidate_length}, "
+        f"kept={kept_candidate_length}, filler={unscored_filler_length}) ...",
+        flush=True,
+    )
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_eval, lm_target, prefix_tokens, target_msgs, trs,
-        k1, k2, suffix_length, ngram, pool_size, max_batch_sz,
+        num_beams, candidates_per_beam, scored_candidate_length, kept_candidate_length,
+        unscored_filler_length, max_num_iterations, max_pool_size, max_batch_sz,
         temperature, top_p, baseline_prefix, latin_token_ids,
     )
 
@@ -2466,7 +2512,7 @@ def run_rollout_batched_local(
 ) -> Dict[str, Any]:
     """
     BEAST rollout — processes one variation at a time (serial).
-    For each variation: setup → BEAST kickoff search → run top num_per_scenario
+    For each variation: setup → BEAST kickoff search → run top suffixes_per_scenario
     candidates as separate transcript reps → (optionally) BEAST for subsequent turns.
     Saves beast_pool.json with the full search pool for every variation.
     """
@@ -2513,7 +2559,7 @@ def run_rollout_batched_local(
                                  max_model_len=target_max_len)
 
     beast_cfg        = cfg.get("beast", {})
-    num_per_scenario = beast_cfg.get("num_per_scenario", 1)
+    suffixes_per_scenario = beast_cfg.get("suffixes_per_scenario", 1)
 
     evaluator_system_prompt  = build_rollout_system(behavior_name, prompts_yaml)
     target_sysprompt_prefix  = _get_override(prompts_yaml, "target_sysprompt_prefix")
@@ -2570,12 +2616,12 @@ def run_rollout_batched_local(
 
     # Resume: figure out which variations are already complete on disk so we can skip them
     # entirely (no setup, no BEAST, no rollout). A variation counts as complete if all of
-    # its expected reps (transcript_v{var_idx}r{1..num_per_scenario}.json) exist.
+    # its expected reps (transcript_v{var_idx}r{1..suffixes_per_scenario}.json) exist.
     # transcripts_dir was already created above.
     def _variation_done(var_idx_1based: int) -> bool:
         return all(
             (transcripts_dir / f"transcript_v{var_idx_1based}r{rep}.json").exists()
-            for rep in range(1, num_per_scenario + 1)
+            for rep in range(1, suffixes_per_scenario + 1)
         )
 
     # Track which variations have a frozen target_system_prompt + setup_content from a
@@ -2646,7 +2692,7 @@ def run_rollout_batched_local(
         # Resume: variation already has all its transcripts on disk → load and skip BEAST.
         if _variation_done(var_idx):
             print(f"\n  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
-            for rep in range(1, num_per_scenario + 1):
+            for rep in range(1, suffixes_per_scenario + 1):
                 tf_path = transcripts_dir / f"transcript_v{var_idx}r{rep}.json"
                 try:
                     with open(tf_path, "r", encoding="utf-8") as f:
@@ -2734,7 +2780,7 @@ def run_rollout_batched_local(
             ],
         })
 
-        top_candidates = kickoff_pool[:num_per_scenario]
+        top_candidates = kickoff_pool[:suffixes_per_scenario]
         print(f"  v{var_idx}: pool_size={len(kickoff_pool)}, running top {len(top_candidates)} as reps", flush=True)
 
         # ── Run each top candidate as a separate transcript rep ──────────
@@ -2876,7 +2922,7 @@ def run_rollout_batched_local(
         "rollouts":        rollouts,
         "successful_count": len(rollouts),
         "failed_count":    0,
-        "total_count":     len(variations) * num_per_scenario,
+        "total_count":     len(variations) * suffixes_per_scenario,
         "logprob_summary": {
             "mean_avg_logprob": mean_avg_logprob,
             "num_scored":       len(all_lps),
@@ -4425,18 +4471,24 @@ cfg = DotDict({
         "between_rounds_strategise": False,  # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "beast": {
-        "use_beast": True,                   # False = skip beam search entirely, use Phase 1 baseline message as-is
-        "k1": 5,                            # beam width: number of beams kept after each scoring step
-        "k2": 5,                            # candidates per beam per step: each beam element expands to k2 next tokens
-        "suffix_length": 20,                 # evaluator message length to search in tokens
-        "ngram": 1,                          # tokens generated between scoring rounds (1 = score every token), affects suffix_length
-        "pool_size": 20,                     # max candidates kept in the pool
-        "num_per_scenario": 1,               # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
-        "temperature": 1.0,                  # sampling temperature for token expansion
-        "top_p": 1.0,                        # nucleus sampling p for token expansion
-        "suffix_after_tokens": None,         # None = append suffix after full baseline; 0 = generate whole message from scratch; N = keep first N tokens of baseline then let BEAST continue
-        "reward_tokens": 50,                  # first N tokens of TRS used as reward signal (0 = full TRS)
-        "latin_mask": True,                 # restrict beam search to Latin/ASCII tokens only (blocks unicode, digits, punctuation)
+        # Per iteration: filler → branch (each beam → candidates_per_beam continuations of
+        # scored_candidate_length tokens) → score all → keep top num_beams, truncate to
+        # kept_candidate_length. Suffix length grows by (kept + filler) tokens per iter.
+        # Implicit max suffix length = max_num_iterations * (kept_candidate_length + unscored_filler_length).
+        "use_beast": True,                       # False = skip beam search entirely, use Phase 1 baseline message as-is
+        "num_beams": 5,                          # number of beams kept after each scoring step
+        "candidates_per_beam": 5,                # branching factor: each beam → this many scored candidates per iter
+        "scored_candidate_length": 1,            # tokens per scored candidate (1 = original BEAST; >1 = lookahead)
+        "kept_candidate_length": 1,              # tokens committed per iter; must be <= scored_candidate_length
+        "unscored_filler_length": 0,             # extra random tokens appended per iter without scoring (0 = pure BEAST)
+        "max_num_iterations": 19,                # cap on scoring iterations
+        "max_pool_size": 20,                     # max candidates accumulated across the search
+        "suffixes_per_scenario": 1,              # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
+        "temperature": 1.0,                      # sampling temperature for token expansion
+        "top_p": 1.0,                            # nucleus sampling p for token expansion
+        "max_prefix_length": None,               # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
+        "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
+        "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
     },
 })
 
