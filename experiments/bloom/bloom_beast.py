@@ -4441,94 +4441,81 @@ cfg = DotDict({
 
 
 if __name__ == "__main__":
-    if False:
-        # Just run viewer
-        viewer_dir = Path(__file__).parent.parent.parent / "src" / "bloom-viewer"
-        env = {**os.environ, "TRANSCRIPT_DIR": str(Path(__file__).parent / "runs_8_beast_iterate")}
-        subprocess.run(["npm.cmd", "run", "dev"], cwd=viewer_dir, env=env)
+    # Load behavior description and prompt preset from prompts.yaml
+    _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
+    _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
+    if not _behavior_desc:
+        raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
+    cfg["behavior_description"] = _behavior_desc.strip()
 
-    else:
-        # Load behavior description and prompt preset from prompts.yaml
-        _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
-        _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
-        if not _behavior_desc:
-            raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
-        cfg["behavior_description"] = _behavior_desc.strip()
+    _preset_name = cfg.get("prompt_preset", "")
+    if _preset_name:
+        _preset = _prompts.get("prompt_presets", {}).get(_preset_name)
+        if not _preset:
+            raise ValueError(f"No prompt preset found for '{_preset_name}' in prompts.yaml")
+        for k, v in _preset.items():
+            if k not in cfg:  # cfg overrides take priority
+                cfg[k] = v.strip() if isinstance(v, str) else v
+        print(f"Loaded prompt preset: {_preset_name}", flush=True)
 
-        _preset_name = cfg.get("prompt_preset", "")
-        if _preset_name:
-            _preset = _prompts.get("prompt_presets", {}).get(_preset_name)
-            if not _preset:
-                raise ValueError(f"No prompt preset found for '{_preset_name}' in prompts.yaml")
-            for k, v in _preset.items():
-                if k not in cfg:  # cfg overrides take priority
-                    cfg[k] = v.strip() if isinstance(v, str) else v
-            print(f"Loaded prompt preset: {_preset_name}", flush=True)
+    base_folder = cfg.get("folder_name", "runs/default")
+    num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
+    async def run_parallel() -> bool:
+        """Returns True if there was an error."""
+        # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
+        print("\n" + "#" * 60, flush=True)
+        print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
+        print("#" * 60, flush=True)
+        round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
+        cfg.folder_name = f"{base_folder}/round_1"
+        round_1_judgment = round_1_dir / "judgment.json"
+        if round_1_judgment.exists():
+            print("ROUND 1 - skipped (round_1/judgment.json already exists)", flush=True)
+            with open(round_1_judgment, "r", encoding="utf-8") as f:
+                result = json.load(f)
+        else:
+            result = await run_pipeline(cfg)
+            if not result:
+                print("\n  Round 1 FAILED", flush=True)
+                return True
+        stats = result.get("summary_statistics", {})
+        print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
+            f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
+        # Logprob scoring is computed inline during rollout — no separate stage needed.
+        # Load understanding from round 1 for reuse in all subsequent rounds
+        with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
+            understanding_results = json.load(f)
+        ideation_results = {"variations": []}  # variations come from refinements in round 2+
+        prompts_yaml = load_prompts(cfg)
 
-        base_folder = cfg.get("folder_name", "runs/default")
-        num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
-        async def run_parallel() -> bool:
-            """Returns True if there was an error."""
-            # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
+        # Rounds 2+: refine each scenario using full accumulated history
+        completed_round_dirs: List[Path] = [round_1_dir]
+        for round_num in range(2, num_rounds + 1):
             print("\n" + "#" * 60, flush=True)
-            print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
+            print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
             print("#" * 60, flush=True)
-            round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
-            cfg.folder_name = f"{base_folder}/round_1"
-            round_1_judgment = round_1_dir / "judgment.json"
-            if round_1_judgment.exists():
-                print("ROUND 1 - skipped (round_1/judgment.json already exists)", flush=True)
-                with open(round_1_judgment, "r", encoding="utf-8") as f:
-                    result = json.load(f)
+            output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
+            result = await run_parallel_round(
+                completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
+            )
+            completed_round_dirs.append(output_dir)
+            if result:
+                stats = result.get("summary_statistics", {})
+                print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
+                    f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
             else:
-                result = await run_pipeline(cfg)
-                if not result:
-                    print("\n  Round 1 FAILED", flush=True)
-                    return True
-            stats = result.get("summary_statistics", {})
-            print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-                f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
-            # Logprob scoring is computed inline during rollout — no separate stage needed.
-            # Load understanding from round 1 for reuse in all subsequent rounds
-            with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
-                understanding_results = json.load(f)
-            ideation_results = {"variations": []}  # variations come from refinements in round 2+
-            prompts_yaml = load_prompts(cfg)
+                print(f"\n  Round {round_num} FAILED", flush=True)
+                return True
+        return False
 
-            # Rounds 2+: refine each scenario using full accumulated history
-            completed_round_dirs: List[Path] = [round_1_dir]
-            for round_num in range(2, num_rounds + 1):
-                print("\n" + "#" * 60, flush=True)
-                print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
-                print("#" * 60, flush=True)
-                output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
-                output_dir.mkdir(parents=True, exist_ok=True)
-                save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
-                result = await run_parallel_round(
-                    completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
-                )
-                completed_round_dirs.append(output_dir)
-                if result:
-                    stats = result.get("summary_statistics", {})
-                    print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-                        f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
-                else:
-                    print(f"\n  Round {round_num} FAILED", flush=True)
-                    return True
-            return False
-        # Track total experiment runtime
-        _experiment_start = time.monotonic()
-        had_error = asyncio.run(run_parallel())
-        _elapsed = time.monotonic() - _experiment_start
-        _h, _rem = divmod(int(_elapsed), 3600)
-        _m, _s = divmod(_rem, 60)
-        print("\n" + "=" * 60, flush=True)
-        print(f"TOTAL EXPERIMENT TIME: {_h}h {_m}m {_s}s ({_elapsed:.1f}s)", flush=True)
-        print("=" * 60, flush=True)
-
-        # # Launch viewer unless there was an error
-        # if not had_error:
-        #     viewer_dir = cfg.get("viewer_dir", "src/bloom-viewer")
-        #     if viewer_dir:
-        #         results_dir = (SCRIPT_DIR / base_folder).resolve()
-        #         launch_viewer(viewer_dir, results_dir)
+    # Track total experiment runtime
+    _experiment_start = time.monotonic()
+    had_error = asyncio.run(run_parallel())
+    _elapsed = time.monotonic() - _experiment_start
+    _h, _rem = divmod(int(_elapsed), 3600)
+    _m, _s = divmod(_rem, 60)
+    print("\n" + "=" * 60, flush=True)
+    print(f"TOTAL EXPERIMENT TIME: {_h}h {_m}m {_s}s ({_elapsed:.1f}s)", flush=True)
+    print("=" * 60, flush=True)
