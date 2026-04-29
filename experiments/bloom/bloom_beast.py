@@ -1665,21 +1665,25 @@ _RE_TRS = re.compile(r"<targeted_response_start>(.*?)</targeted_response_start>"
 _RE_TRS_CLEANUP = re.compile(r"[\s.…]+$")
 
 
-def _extract_message_tags(content: str) -> Tuple[str, str]:
-    """Extract <message> and <targeted_response_start> from evaluator output.
-    Returns (user_message, targeted_response_start).
+def _extract_message_tags(content: str) -> Tuple[str, str, str]:
+    """Extract <strategy>, <message> and <targeted_response_start> from evaluator output.
+    Returns (user_message, targeted_response_start, strategy).
 
-    Robust to the common failure mode where the evaluator forgets the OPENING
-    <message> tag but still emits </message> and the TRS tags afterward. In that
-    case we take the text before the first structural tag as the user message,
-    so the target never receives leaked tag content.
+    The strategy is extracted and returned for transcript storage but must never
+    be forwarded to the target. Robust to the common failure mode where the evaluator
+    forgets the OPENING <message> tag but still emits </message> and the TRS tags
+    afterward — in that case we take the text before the first structural tag as the
+    user message, so the target never receives leaked tag content.
     """
     # Auto-close any truncated tags (max_tokens cutoff) so the strategy strip and
     # the regex extractors below can still succeed.
     content = _auto_close_tags(content, ["strategy", "message", "targeted_response_start"])
 
-    # First strip out any <strategy>...</strategy> block — it's evaluator-only thinking
-    # introduced for inter-turn deliberation and must never reach the target.
+    # Extract strategy BEFORE stripping it so we can save it to the transcript.
+    strategy_match = re.search(r"<strategy>(.*?)</strategy>", content, re.DOTALL)
+    strategy = strategy_match.group(1).strip() if strategy_match else ""
+
+    # Strip the strategy block — it's evaluator-only thinking and must never reach the target.
     content = re.sub(r"<strategy>.*?</strategy>\s*", "", content, flags=re.DOTALL)
 
     msg_match = _RE_MESSAGE.search(content)
@@ -1700,7 +1704,7 @@ def _extract_message_tags(content: str) -> Tuple[str, str]:
         user_msg = re.sub(r"^\s*<message>\s*", "", user_msg)
 
     trs = _RE_TRS_CLEANUP.sub("", trs_match.group(1).strip()) if trs_match else ""
-    return user_msg, trs
+    return user_msg, trs, strategy
 
 
 def _build_evaluator_followup(content: str, reasoning: Optional[str], current_turn: int, max_turns: int,
@@ -1793,8 +1797,8 @@ class ConversationOrchestrator:
         # Add to evaluator history (full response with tags stays in evaluator context)
         self.evaluator_messages.append(parsed["cleaned_message"])
 
-        # Extract message and targeted response start from tagged output
-        user_message, targeted_response_start = _extract_message_tags(content)
+        # Extract message, targeted response start, and strategy from tagged output
+        user_message, targeted_response_start, strategy = _extract_message_tags(content)
 
         # Add user message to target history (without tags)
         target_content = user_message
@@ -1802,10 +1806,12 @@ class ConversationOrchestrator:
             target_content = self.target_kickoff_prefix.strip() + " " + user_message
         self.target_messages.append({"role": "user", "content": target_content})
 
-        # Add to transcript (message only sent to target; targeted_response_start saved for analysis)
+        # Add to transcript (message only sent to target; strategy + TRS saved for analysis)
         transcript_entry: Dict[str, Any] = {
             "role": "user", "content": target_content, "source": "evaluator"
         }
+        if strategy:
+            transcript_entry["strategy"] = strategy
         if targeted_response_start:
             transcript_entry["targeted_response_start"] = targeted_response_start
         self.transcript_messages.append(transcript_entry)
@@ -2411,37 +2417,39 @@ def beast_search_evaluator_message(
     sample_max_tokens: int,
     sample_temperature: float,
     batch_size: int = 4,
-) -> Tuple[List[Tuple[str, float, str, str]], str]:
+) -> Tuple[List[Tuple[str, float, str, str]], str, str]:
     """
     Two-phase adversarial evaluator message search.
 
     Phase 1 — normal sample: generate an evaluator message to obtain:
       • baseline_msg: the suggested user message (from <message> tags)
       • trs:          targeted response start (reward signal for scoring)
+      • strategy:     evaluator's between-turns reasoning (from <strategy> tags)
 
     Phase 2 — BEAST: token-level beam search using lm_eval for token generation
       and lm_target for scoring log P(trs | target_msgs + decoded_msg).
 
     Returns:
-      pool  — List[(msg_text, score, baseline, suffix)] sorted best-first
-              baseline + suffix == msg_text; suffix is the BEAST-generated part
-      trs   — the targeted response start string used as the reward signal
+      pool     — List[(msg_text, score, baseline, suffix)] sorted best-first
+                 baseline + suffix == msg_text; suffix is the BEAST-generated part
+      trs      — the targeted response start string used as the reward signal
+      strategy — the evaluator's <strategy> reasoning block (empty string if absent)
     """
     # ── Phase 1: normal sample ──────────────────────────────────────────────
     raw = batch_generate_local(lm_eval, [eval_msgs], sample_max_tokens, sample_temperature,
                                 no_think=no_think_eval)[0]
     parsed = parse_message(_make_local_response(raw))
     content = parsed["content"] or raw
-    baseline_msg, trs = _extract_message_tags(content)
+    baseline_msg, trs, strategy = _extract_message_tags(content)
 
     if not trs:
         # No TRS generated — return just the normal message as the single pool entry
-        return [(baseline_msg, 0.0, baseline_msg, "")], ""
+        return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
 
     # ── Short-circuit if BEAST is disabled ──────────────────────────────────
     # Skip the entire beam search and return the Phase 1 baseline as-is.
     if not beast_cfg.get("use_beast", True):
-        return [(baseline_msg, 0.0, baseline_msg, "")], trs
+        return [(baseline_msg, 0.0, baseline_msg, "")], trs, strategy
 
     # ── Extract BEAST hyperparams ──────────────────────────────────────────
     num_beams                = beast_cfg.get("num_beams", 5)
@@ -2535,7 +2543,7 @@ def beast_search_evaluator_message(
     if not pool:
         pool = [(baseline_msg, 0.0, baseline_msg, "")]  # fallback to Phase 1 baseline
 
-    return pool, trs
+    return pool, trs, strategy
 
 
 def _score_trs_batch(lm_target: "LocalModel", states: List[Dict]) -> None:
@@ -2820,7 +2828,7 @@ def run_rollout_batched_local(
         ]
 
         # ── BEAST kickoff search ──────────────────────────────────────────
-        kickoff_pool, trs_kickoff = beast_search_evaluator_message(
+        kickoff_pool, trs_kickoff, kickoff_strategy = beast_search_evaluator_message(
             lm_eval, lm_target,
             eval_msgs_kickoff_ctx, target_msgs_base,
             beast_cfg, no_think_eval, eval_max_tokens, temperature, batch_size,
@@ -2865,6 +2873,8 @@ def run_rollout_batched_local(
                 "beast_baseline": kickoff_baseline,
                 "beast_suffix":   kickoff_suffix,
             }
+            if kickoff_strategy:
+                kick_entry["strategy"] = kickoff_strategy
             if kickoff_score not in (None, -float("inf")):
                 kick_entry["targeted_response_start_logprob"] = round(kickoff_score, 4)
             transcript_msgs.append(kick_entry)
@@ -2900,7 +2910,7 @@ def run_rollout_batched_local(
                 eval_msgs_turn  = list(eval_msgs) + [{"role": "user", "content": followup_prompt}]
 
                 # BEAST search for next evaluator message (keep top 1 — conversation committed)
-                turn_pool, turn_trs = beast_search_evaluator_message(
+                turn_pool, turn_trs, turn_strategy = beast_search_evaluator_message(
                     lm_eval, lm_target,
                     eval_msgs_turn, target_msgs,
                     beast_cfg, no_think_eval, eval_max_tokens, temperature, batch_size,
@@ -2920,6 +2930,8 @@ def run_rollout_batched_local(
                     "beast_baseline": next_baseline,
                     "beast_suffix":   next_suffix,
                 }
+                if turn_strategy:
+                    turn_entry["strategy"] = turn_strategy
                 if next_score not in (None, -float("inf")):
                     turn_entry["targeted_response_start_logprob"] = round(next_score, 4)
                 transcript_msgs.append(turn_entry)
