@@ -13,7 +13,9 @@ Original BLOOM: https://github.com/anthropics/bloom
 import asyncio
 import concurrent.futures
 import json
+import math
 import os
+import random
 import re
 import subprocess
 import time
@@ -2237,6 +2239,35 @@ def _vllm_sample_extensions(
     return lm.worker.generate_n_tokens(prompts_token_ids, sampling_kwargs)
 
 
+def _select_beam_indices(scores: List[float], num_to_select: int,
+                         beast_temperature: float) -> List[int]:
+    """Select beam indices from scored candidates.
+
+    beast_temperature == 0  → hard top-K selection (classic BEAST).
+    beast_temperature  > 0  → SMC-style stochastic resampling: indices drawn
+                              with replacement from softmax(scores / T).
+                              T → ∞ approaches uniform (Best-of-N-ish).
+
+    Falls back to top-K if all scores are -inf (numerical breakdown).
+    """
+    n = len(scores)
+    if beast_temperature == 0 or n == 0:
+        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
+
+    # Numerically stable softmax over (scores / T).
+    scaled = [s / beast_temperature for s in scores]
+    finite = [x for x in scaled if math.isfinite(x)]
+    if not finite:
+        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
+    m = max(finite)
+    exps = [math.exp(x - m) if math.isfinite(x) else 0.0 for x in scaled]
+    total = sum(exps)
+    if total <= 0 or not math.isfinite(total):
+        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
+    weights = [e / total for e in exps]
+    return random.choices(range(n), weights=weights, k=num_to_select)
+
+
 def _beast_single_trial_local(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
@@ -2255,6 +2286,7 @@ def _beast_single_trial_local(
     top_p: float,
     baseline_prefix: str,
     latin_token_ids: Optional[List[int]] = None,
+    beast_temperature: float = 0.0,
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
 
@@ -2265,9 +2297,11 @@ def _beast_single_trial_local(
                   tokens (single vLLM call with n=candidates_per_beam, max_tokens=scored_candidate_length).
       3. Score:   all `num_beams * candidates_per_beam` candidates scored by
                   log P(TRS | target_ctx + decoded_msg).
-      4. Commit:  keep top `num_beams` by score; truncate each kept candidate's extension
-                  to `kept_candidate_length` tokens. Setting kept < scored gives lookahead
-                  (score with more context, commit fewer tokens).
+      4. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
+                  tokens. Selection is hard top-K when `beast_temperature == 0` (classic BEAST),
+                  or SMC-style multinomial resampling on softmax(scores / T) with replacement
+                  when `beast_temperature > 0`. Setting kept < scored gives lookahead (score
+                  with more context, commit fewer tokens).
 
     Per-iteration token growth = unscored_filler_length + kept_candidate_length.
     Implicit max suffix length = max_num_iterations * (kept + filler).
@@ -2326,14 +2360,15 @@ def _beast_single_trial_local(
             target_msgs, trs, baseline_prefix, max_batch_size,
         )
 
-        # ── Phase 4: Keep top num_beams; truncate to kept_candidate_length ──
+        # ── Phase 4: Select num_beams; truncate to kept_candidate_length ────
         # All beams had the same length L at iteration start; all candidates have
         # length L + scored_candidate_length. Truncate to L + kept_candidate_length.
+        # beast_temperature=0 → hard top-K (classic BEAST). >0 → SMC resampling.
         beam_len_at_start = len(beam[0])
         truncate_to = beam_len_at_start + kept_candidate_length
-        top_idx = sorted(range(len(scores)), key=lambda i: scores[i])[-num_beams:]
-        beam = [candidates[i][:truncate_to] for i in top_idx]
-        beam_scores = [scores[i] for i in top_idx]
+        sel_idx = _select_beam_indices(scores, num_beams, beast_temperature)
+        beam = [candidates[i][:truncate_to] for i in sel_idx]
+        beam_scores = [scores[i] for i in sel_idx]
 
         # ── Merge into trial pool ────────────────────────────────────────────
         pool_seqs.extend(beam)
@@ -2399,6 +2434,7 @@ def beast_search_evaluator_message(
     max_batch_sz             = batch_size
     temperature              = beast_cfg.get("temperature", 1.0)
     top_p                    = beast_cfg.get("top_p", 1.0)
+    beast_temperature        = beast_cfg.get("beast_temperature", 0.0)
     max_prefix_length        = beast_cfg.get("max_prefix_length", None)
     max_reward_output_length = beast_cfg.get("max_reward_output_length", 0)
 
@@ -2447,7 +2483,8 @@ def beast_search_evaluator_message(
     print(
         f"    BEAST search (beams={num_beams}, cand/beam={candidates_per_beam}, "
         f"iters={max_num_iterations}, scored={scored_candidate_length}, "
-        f"kept={kept_candidate_length}, filler={unscored_filler_length}) ...",
+        f"kept={kept_candidate_length}, filler={unscored_filler_length}, "
+        f"beast_T={beast_temperature}) ...",
         flush=True,
     )
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
@@ -2455,6 +2492,7 @@ def beast_search_evaluator_message(
         num_beams, candidates_per_beam, scored_candidate_length, kept_candidate_length,
         unscored_filler_length, max_num_iterations, max_pool_size, max_batch_sz,
         temperature, top_p, baseline_prefix, latin_token_ids,
+        beast_temperature=beast_temperature,
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -4486,6 +4524,7 @@ cfg = DotDict({
         "suffixes_per_scenario": 1,              # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                      # sampling temperature for token expansion
         "top_p": 1.0,                            # nucleus sampling p for token expansion
+        "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
         "max_prefix_length": None,               # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
