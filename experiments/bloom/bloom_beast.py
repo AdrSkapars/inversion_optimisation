@@ -147,7 +147,8 @@ def litellm_chat(
             all_messages.append({"role": "system", "content": system_prompt})
         all_messages.extend(messages)
         temp = temperature if temperature is not None else DEFAULT_TEMPERATURE
-        text = local_chat(hf_name, all_messages, max_tokens=max_tokens, temperature=temp)
+        text = local_chat(hf_name, all_messages, max_tokens=max_tokens, temperature=temp,
+                          seed=kwargs.get("seed"))
         return _make_local_response(text)
 
     # Temperature validation for extended thinking
@@ -391,6 +392,11 @@ _LOCAL_MODEL_REGISTRY: Dict[str, "LocalModel"] = {}
 # (understanding, ideation, judgment). Set to cfg.rollout.evaluator_gpu_id at
 # pipeline start so every stage uses the same physical GPU.
 _DEFAULT_LOCAL_GPU_ID: int = 0
+
+# Global RNG seed for vLLM SamplingParams. Set from cfg["seed"] at pipeline start.
+# None disables seeding (non-deterministic). When set, every batch_generate_local
+# and _vllm_sample_extensions call gets this seed, making the full run reproducible.
+_DEFAULT_SEED: Optional[int] = None
 
 # Cache: id(lm) → list of allowed Latin token IDs (built once per LLM)
 _LATIN_MASK_CACHE: Dict[int, List[int]] = {}
@@ -740,6 +746,7 @@ def batch_generate_local(
     max_new_tokens: int,
     temperature: float,
     no_think: bool = False,
+    seed: Optional[int] = None,
 ) -> List[str]:
     """
     Batched generation via vLLM. Returns one string per input conversation, decoded
@@ -765,6 +772,9 @@ def batch_generate_local(
         temperature=max(temperature, 1e-6),
         skip_special_tokens=False,    # preserve <think> tags etc.
     )
+    effective_seed = seed if seed is not None else _DEFAULT_SEED
+    if effective_seed is not None:
+        sampling_kwargs["seed"] = effective_seed
     return lm.worker.generate_text(prompts, sampling_kwargs)
 
 
@@ -781,10 +791,11 @@ def local_chat(
     messages: List[Dict],
     max_tokens: int = 4000,
     temperature: float = 1.0,
+    seed: Optional[int] = None,
 ) -> str:
     """Single-conversation chat completion via vLLM. Preserves <think> tags."""
     lm = _get_local_model(hf_name)
-    return batch_generate_local(lm, [messages], max_tokens, temperature, no_think=False)[0]
+    return batch_generate_local(lm, [messages], max_tokens, temperature, no_think=False, seed=seed)[0]
 
 
 def local_logprob(
@@ -1335,6 +1346,7 @@ def run_understanding(cfg: DotDict, prompts_yaml: Dict, output_dir: Path) -> Dic
     max_tokens = cfg.understanding.get("max_tokens", 4000)
     reasoning_effort = _effort(cfg.understanding.get("thinking", False))
     temperature = cfg.get("temperature")
+    seed = cfg.get("seed")
 
     # Build system prompt
     system_prompt = build_understanding_system(prompts_yaml)
@@ -1350,6 +1362,7 @@ def run_understanding(cfg: DotDict, prompts_yaml: Dict, output_dir: Path) -> Dic
     response = litellm_chat(
         model_id=model_id, messages=messages, system_prompt=system_prompt,
         max_tokens=max_tokens, reasoning_effort=reasoning_effort, temperature=temperature,
+        seed=seed,
     )
     parsed = parse_message(response)
     understanding_response = parsed["content"] or ""
@@ -1399,6 +1412,7 @@ def run_understanding(cfg: DotDict, prompts_yaml: Dict, output_dir: Path) -> Dic
             response = litellm_chat(
                 model_id=model_id, messages=messages, system_prompt=system_prompt,
                 max_tokens=max_tokens, reasoning_effort=reasoning_effort, temperature=temperature,
+                seed=seed,
             )
             parsed = parse_message(response)
             analysis_response = parsed["content"] or ""
@@ -1519,6 +1533,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     max_tokens = cfg.ideation.get("max_tokens", 50000)
     reasoning_effort = _effort(cfg.ideation.get("thinking", False))
     temperature = cfg.get("temperature")
+    seed = cfg.get("seed")
     max_turns = cfg.rollout.get("max_turns", 5)
 
     behavior_understanding = understanding_results["understanding"]
@@ -1554,6 +1569,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
             max_new_tokens=max_tokens,
             temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
             no_think=reasoning_effort == "none",
+            seed=seed,
         )[0]
         all_scenarios = parse_scenarios_response(raw)
         print(f"Got {len(all_scenarios)} scenarios (expected {num_scenarios})", flush=True)
@@ -1595,6 +1611,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
             response = litellm_chat(
                 model_id=model_id, messages=messages, system_prompt=system_prompt,
                 max_tokens=max_tokens, reasoning_effort=reasoning_effort, temperature=temperature,
+                seed=seed,
             )
             parsed = parse_message(response)
             ideation_response = parsed["content"] or ""
@@ -2262,6 +2279,8 @@ def _vllm_sample_extensions(
         allowed_token_ids=allowed_token_ids,
         skip_special_tokens=False,
     )
+    if _DEFAULT_SEED is not None:
+        sampling_kwargs["seed"] = _DEFAULT_SEED
     return lm.worker.generate_n_tokens(prompts_token_ids, sampling_kwargs)
 
 
@@ -4403,9 +4422,12 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
 
 async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
-    global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID
+    global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID, _DEFAULT_SEED
     DEBUG_MODE = cfg.get("debug", True)
     _DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
+    _DEFAULT_SEED = cfg.get("seed")
+    if _DEFAULT_SEED is not None:
+        random.seed(_DEFAULT_SEED)
 
     # Resolve output directory
     folder_name = cfg.get("folder_name", "runs/default")
@@ -4528,6 +4550,7 @@ cfg = DotDict({
     "examples": [],                          # seed transcripts: [{conversation: [{role, content}]}]; used to ground understanding/ideation
 
     "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
+    "seed": 42,                              # RNG seed for understanding/ideation stages; None to disable
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
 
