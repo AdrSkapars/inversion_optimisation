@@ -110,7 +110,13 @@ export function convertBloomTranscript(data: any): any {
   const transcriptId = randomUUID();
   const evaluatorModel = meta.evaluator_model || 'unknown';
   const targetModel = meta.target_model || 'unknown';
-  const targetSystemPrompt = meta.target_system_prompt ?? '';
+  // target_system_prompt is often empty; fall back to extracting from setup_content
+  // which stores it as a ```system_prompt\n<content>\n``` markdown block.
+  let targetSystemPrompt = meta.target_system_prompt ?? '';
+  if (!targetSystemPrompt && meta.setup_content) {
+    const m = meta.setup_content.match(/```system_prompt\n([\s\S]*?)(?:\n```|$)/);
+    if (m) targetSystemPrompt = m[1].trim();
+  }
 
   // Build judge_output
   let judgeOutput: any = undefined;
