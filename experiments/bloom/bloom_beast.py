@@ -4556,8 +4556,8 @@ cfg = DotDict({
 
     # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
     # worker can grab most of the memory; the small reserve covers framework overhead.
-    "evaluator_gpu_id": 0,
-    "target_gpu_id":    1,
+    "evaluator_gpu_id": 2,
+    "target_gpu_id":    3,
     "evaluator_gpu_memory_utilization": 0.85,
     "target_gpu_memory_utilization":    0.85,
 
