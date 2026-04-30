@@ -379,12 +379,11 @@
 
 
       <!-- Scenario Description -->
-      {@const scenarioDescription = (loader.transcript?.transcript?.metadata as any)?.scenario_description ?? null}
-      {#if scenarioDescription}
+      {#if (loader.transcript?.transcript?.metadata as any)?.scenario_description}
         <div class="mb-4">
           <h3 class="text-lg font-semibold mb-2">Scenario</h3>
           <div class="bg-base-200 p-3 rounded-lg text-sm leading-relaxed whitespace-pre-wrap">
-            {scenarioDescription}
+            {(loader.transcript?.transcript?.metadata as any).scenario_description}
           </div>
         </div>
       {/if}
