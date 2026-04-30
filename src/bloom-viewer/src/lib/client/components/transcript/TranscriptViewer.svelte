@@ -392,24 +392,28 @@
       <!-- Judge Summary -->
       <div class="mb-4">
         <h3 class="text-lg font-semibold mb-2">Judge Summary</h3>
-        <p class="text-sm leading-relaxed">{loader.transcript?.judgeSummary}</p>
+        <div class="bg-base-200 p-3 rounded-lg text-sm leading-relaxed">
+          {loader.transcript?.judgeSummary}
+        </div>
       </div>
 
       <!-- Judge Justification -->
       <div class="mb-4">
         <h3 class="text-lg font-semibold mb-2">Judge Justification</h3>
-        {@render justificationContent()}
-        {#if quoteToMessageMap.size > 0}
-          <div class="flex items-start gap-2 mt-3 text-xs text-base-content/70">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-4 h-4 mt-0.5">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <span>
-              Numbered references [1], [2], etc. are clickable and will jump to the corresponding message in the transcript.
-              Note: References only work if the message is visible in the current view (Evaluator/Target/Combined).
-            </span>
-          </div>
-        {/if}
+        <div class="bg-base-200 p-3 rounded-lg">
+          {@render justificationContent()}
+          {#if quoteToMessageMap.size > 0}
+            <div class="flex items-start gap-2 mt-3 text-xs text-base-content/70">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-4 h-4 mt-0.5">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+              <span>
+                Numbered references [1], [2], etc. are clickable and will jump to the corresponding message in the transcript.
+                Note: References only work if the message is visible in the current view (Evaluator/Target/Combined).
+              </span>
+            </div>
+          {/if}
+        </div>
       </div>
 
       <!-- System Prompt (Collapsible) -->
