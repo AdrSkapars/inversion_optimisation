@@ -2648,6 +2648,8 @@ def run_rollout_batched_local(
     generate_kickoff_additional = _get_override(prompts_yaml, "generate_kickoff_additional")
 
     between_turns_strategise = cfg.rollout.get("between_turns_strategise", True)
+    if cfg.rollout.get("max_turns", 1) <= 1:
+        between_turns_strategise = False  # no subsequent turns to strategise for
 
     def _build_kickoff_prompt(refined_strategy: str = "") -> str:
         """Build the per-variation kickoff prompt. The kickoff <strategy> block ONLY appears
@@ -3948,6 +3950,8 @@ async def run_parallel_round(
 
     refine_cfg = cfg.get("refinement", {}) or {}
     between_rounds_strategise = refine_cfg.get("between_rounds_strategise", True)
+    if refine_cfg.get("num_rounds", 1) <= 1:
+        between_rounds_strategise = False  # no subsequent rounds to strategise for
 
     # If strategy-injection is disabled, skip the refiner entirely. We still want to
     # re-run the rollout against the FROZEN scenario + sysprompt (pure resample baseline),
