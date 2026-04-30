@@ -4610,7 +4610,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_10/1turn_3rounds_no_brs",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_10/1turn_3rounds_rh1",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4666,8 +4666,8 @@ cfg = DotDict({
         "max_tokens": 1200,                  # max output tokens per refinement call (tags auto-closed if truncated)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_rounds": 3,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
-        "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
-        "between_rounds_strategise": False,  # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
+        "history_rounds": 1,                 # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+        "between_rounds_strategise": True,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "beast": {
         # Implicit max suffix length = max_num_iterations * (kept_candidate_length + unscored_filler_length).
