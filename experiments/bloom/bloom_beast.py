@@ -363,8 +363,8 @@ def _truncate_eval_history(eval_msgs: List[Dict], setup_ctx_len: int,
                             history_turns: Optional[int]) -> List[Dict]:
     """Truncate the evaluator's conversation history to the last `history_turns`
     turn pairs (assistant message + following user followup). The first
-    `setup_ctx_len` messages (system, rollout context, setup_content,
-    kickoff_prompt) are always kept.
+    `setup_ctx_len` messages (system + the merged rollout/kickoff user turn) are
+    always kept.
 
     A "turn pair" is one (assistant, user) sequence after the setup. The kickoff
     message is the first assistant after setup; subsequent turns each add a
@@ -1866,6 +1866,8 @@ class ConversationOrchestrator:
         self.target_model = target_model
         self.evaluator_system_prompt = evaluator_system_prompt
         self.target_system_prompt = target_system_prompt
+        # Set by setup() — merged into the first user message in run().
+        self.pending_rollout_prompt: str = ""
         self.max_turns = max_turns
         self.evaluator_reasoning_effort = evaluator_reasoning_effort
         self.target_reasoning_effort = target_reasoning_effort
@@ -1975,6 +1977,7 @@ class ConversationOrchestrator:
         target_model_id: str,
         evaluator_system_prompt: str,
         conversation_rollout_prompt: str,
+        target_system_prompt: str = "",
         target_sysprompt_prefix: str = "",
         max_turns: int = 5,
         evaluator_reasoning_effort: str = "none",
@@ -1986,34 +1989,12 @@ class ConversationOrchestrator:
         target_kickoff_prefix: str = "",
         generate_kickoff_additional: str = "",
     ) -> "ConversationOrchestrator":
-        """Setup: call LLM to generate the target's system prompt."""
-        # Generate system prompt for target
-        system_prompt_messages = [
-            {"role": "system", "content": evaluator_system_prompt},
-            {"role": "user", "content": conversation_rollout_prompt},
-        ]
-
-        sysprompt_response = litellm_chat(
-            model_id=evaluator_model_id,
-            messages=system_prompt_messages,
-            max_tokens=evaluator_max_tokens,
-            temperature=evaluator_temperature,
-            reasoning_effort=evaluator_reasoning_effort,
-        )
-
-        parsed_sysprompt = parse_message(sysprompt_response)
-        system_prompt_content = parsed_sysprompt["content"] or ""
-
-        # Extract system prompt — handles both <system_prompt> XML tags and
-        # ```system_prompt markdown fences (some models output the latter despite
-        # the prompt asking for the former).
-        generated_target_prompt = _extract_target_sysprompt(system_prompt_content)
-        if not generated_target_prompt:
-            debug_print("WARN: failed to extract target system prompt from setup; "
-                        "target will run with no system prompt")
-
-        target_system_prompt = generated_target_prompt
-        if target_sysprompt_prefix and target_sysprompt_prefix.strip():
+        """Setup orchestrator with a fixed target system prompt (no LLM setup pass).
+        The conversation_rollout_prompt is stashed and merged into the first user
+        message in run(), which keeps the evaluator's chat history valid (no two
+        consecutive user turns) while skipping the per-variation setup forward pass."""
+        # Apply optional prefix from prompts.yaml
+        if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_system_prompt:
             target_system_prompt = f"{target_sysprompt_prefix.strip()}\n\n{target_system_prompt}"
 
         orchestrator = cls(
@@ -2032,9 +2013,8 @@ class ConversationOrchestrator:
             generate_kickoff_additional=generate_kickoff_additional,
         )
 
-        # Add initial context to evaluator history
-        orchestrator.evaluator_messages.append({"role": "user", "content": conversation_rollout_prompt})
-        orchestrator.evaluator_messages.append({"role": "assistant", "content": system_prompt_content})
+        # Stash the rollout prompt — run() will merge it into the first user message.
+        orchestrator.pending_rollout_prompt = conversation_rollout_prompt
 
         return orchestrator
 
@@ -2061,7 +2041,14 @@ class ConversationOrchestrator:
                 "with the behavior on full display)."
             )
 
-            self.evaluator_messages.append({"role": "user", "content": kickoff_prompt})
+            # Merge the stashed rollout prompt (scenario context) with the kickoff
+            # into a single user turn — avoids two consecutive user messages now that
+            # the per-variation setup-generation pass is gone.
+            first_user_msg = (
+                f"{self.pending_rollout_prompt}\n\n{kickoff_prompt}"
+                if self.pending_rollout_prompt else kickoff_prompt
+            )
+            self.evaluator_messages.append({"role": "user", "content": first_user_msg})
 
             # Generate initial evaluator message
             eval_parsed = self.evaluator()
@@ -2147,6 +2134,7 @@ async def run_single_rollout(
                 target_model_id=target_model_id,
                 evaluator_system_prompt=evaluator_system_prompt,
                 conversation_rollout_prompt=conversation_rollout_prompt,
+                target_system_prompt=cfg.get("target_system_prompt", ""),
                 target_sysprompt_prefix=target_sysprompt_prefix,
                 max_turns=rollout_cfg.max_turns,
                 evaluator_reasoning_effort=_effort(cfg.rollout.get("evaluator_thinking", False)),
@@ -2797,36 +2785,30 @@ def run_rollout_batched_local(
     beast_pool_data: List[Dict] = []   # one entry per variation, saved to beast_pool.json
     batch_size = cfg.get("batch_size", 4)
 
-    # ── Batch setup: generate target system prompts for all variations up front ──
-    # This amortises setup cost before the BEAST loops begin.
+    # ── Build per-variation rollout prompts (no setup-generation pass) ────────────
+    # The per-variation setup LLM call has been removed: the target system prompt
+    # is now a fixed config value (cfg.target_system_prompt), and the scenario
+    # context is delivered to the evaluator merged into the first user turn alongside
+    # the kickoff prompt. setup_content stays as an unused field (always "") for
+    # back-compat with downstream code that reads it from transcript metadata.
     var_descs: List[str] = []
     rollout_prompt_texts: List[str] = []
-    setup_msgs_list: List[List[Dict]] = []
 
     # Resume: figure out which variations are already complete on disk so we can skip them
-    # entirely (no setup, no BEAST, no rollout). A variation counts as complete if all of
-    # its expected reps (transcript_v{var_idx}r{1..suffixes_per_scenario}.json) exist.
-    # transcripts_dir was already created above.
+    # entirely (no BEAST, no rollout). A variation counts as complete if all of its expected
+    # reps (transcript_v{var_idx}r{1..suffixes_per_scenario}.json) exist.
     def _variation_done(var_idx_1based: int) -> bool:
         return all(
             (transcripts_dir / f"transcript_v{var_idx_1based}r{rep}.json").exists()
             for rep in range(1, suffixes_per_scenario + 1)
         )
 
-    # Track which variations have a frozen target_system_prompt + setup_content from a
-    # previous round (carried via variation override). Those skip setup-generation entirely
-    # so the target sysprompt and scenario stay byte-identical across rounds.
-    frozen_setup_by_idx: Dict[int, str] = {}
-
     for var_idx_0based, variation in enumerate(variations):
         var_idx = var_idx_0based + 1
         vd = variation.get("description", str(variation)) if isinstance(variation, dict) else str(variation)
         var_descs.append(vd)
         if _variation_done(var_idx):
-            # Placeholder values so list indices line up with var_idx; the main loop below
-            # checks _variation_done again and skips work for these.
             rollout_prompt_texts.append("")
-            setup_msgs_list.append(None)  # type: ignore[arg-type]
             continue
         # Drop scientific_motivation in round 2+ when a refined_strategy is doing the
         # heavy lifting — it duplicates the high-level framing already covered by
@@ -2840,47 +2822,13 @@ def run_rollout_batched_local(
             skip_motivation=has_refined_strategy,
         )
         rollout_prompt_texts.append(rp)
-        # If the variation override carries a frozen setup_content from round 1, reuse
-        # it verbatim and skip the LLM setup call.
-        frozen_setup = (
-            variation.get("setup_content", "") if isinstance(variation, dict) else ""
-        )
-        if frozen_setup:
-            frozen_setup_by_idx[var_idx_0based] = frozen_setup
-            setup_msgs_list.append(None)  # type: ignore[arg-type]
-        else:
-            setup_msgs_list.append([
-                {"role": "system", "content": evaluator_system_prompt},
-                {"role": "user",   "content": rp},
-            ])
 
-    # Only run setup-phase batches for variations that aren't already complete and don't
-    # already have a frozen setup from a prior round.
-    n_to_run = sum(1 for s in setup_msgs_list if s is not None)
-    n_skipped = len(variations) - n_to_run
-    n_frozen = len(frozen_setup_by_idx)
+    n_skipped = sum(1 for v in range(1, len(variations) + 1) if _variation_done(v))
     if n_skipped:
         print(f"  Resume: {n_skipped}/{len(variations)} variations already have transcripts — skipping", flush=True)
-    if n_frozen:
-        print(f"  Frozen setup: {n_frozen}/{len(variations)} variations reuse round-1 setup_content", flush=True)
-
-    print(f"  Running setup for {n_to_run} variations (batch_size={batch_size}) ...", flush=True)
-    # Build setup_contents aligned 1:1 with variations; placeholder "" for skipped ones,
-    # frozen setup for variations that carry one from a prior round.
-    setup_contents: List[str] = [""] * len(setup_msgs_list)
-    for idx, frozen in frozen_setup_by_idx.items():
-        setup_contents[idx] = frozen
-    pending_indices = [i for i, s in enumerate(setup_msgs_list) if s is not None]
-    pending_msgs    = [setup_msgs_list[i] for i in pending_indices]
-    pending_outputs: List[str] = []
-    for chunk_start in range(0, len(pending_msgs), batch_size):
-        chunk = pending_msgs[chunk_start: chunk_start + batch_size]
-        chunk_raws = batch_generate_local(lm_eval, chunk, eval_max_tokens, temperature, no_think=no_think_eval)
-        for raw in chunk_raws:
-            parsed = parse_message(_make_local_response(raw))
-            pending_outputs.append(parsed["content"] or raw)
-    for idx, content in zip(pending_indices, pending_outputs):
-        setup_contents[idx] = content
+    print(f"  Setup-generation pass disabled — using fixed target_system_prompt from config", flush=True)
+    # setup_content is unused but kept for back-compat with transcript metadata schema.
+    setup_contents: List[str] = [""] * len(variations)
 
     for var_idx, (variation, var_desc, rollout_prompt_text, setup_content) in enumerate(
         zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1
@@ -2916,20 +2864,15 @@ def run_rollout_batched_local(
 
         print(f"\n  Variation {var_idx}/{len(variations)}: BEAST search ...", flush=True)
 
-        # Prefer a frozen target_sysprompt carried on the variation override (round 2+).
-        # Otherwise parse it out of the setup_content the eval just generated.
+        # Resolve target system prompt:
+        #   1. Frozen value from the variation override (round 2+ carries round-1's value).
+        #   2. Fall back to cfg.target_system_prompt (the fixed default for this run).
+        # Empty string is valid — target then runs with no system prompt at all.
         frozen_tsp = (
             variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
         )
-        if frozen_tsp:
-            generated_sysprompt = frozen_tsp
-        else:
-            generated_sysprompt = _extract_target_sysprompt(setup_content)
-            if not generated_sysprompt:
-                print(f"  WARN v{var_idx}: failed to extract target system prompt — "
-                      f"target will run with no system prompt", flush=True)
-        target_sysprompt = generated_sysprompt
-        if target_sysprompt_prefix and target_sysprompt_prefix.strip() and not frozen_tsp:
+        target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
+        if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
             # Don't double-prefix when reusing an already-prefixed sysprompt from round 1.
             target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
 
@@ -2948,14 +2891,13 @@ def run_rollout_batched_local(
         kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
 
         # eval_msgs up to the kickoff request (before BEAST generates the response).
-        # Strip the <system_prompt> block from setup_content in the evaluator's view —
-        # the target sysprompt is verbose and redundant for the evaluator's planning.
-        eval_setup_content = _strip_target_sysprompt_from_setup(setup_content)
+        # The setup-generation pass has been removed, so the scenario context
+        # (rollout_prompt_text) and the kickoff instructions are merged into a single
+        # user turn. This avoids two consecutive user messages that would otherwise
+        # arise from dropping the assistant setup turn.
         eval_msgs_kickoff_ctx = [
-            {"role": "system",    "content": evaluator_system_prompt},
-            {"role": "user",      "content": rollout_prompt_text},
-            {"role": "assistant", "content": eval_setup_content},
-            {"role": "user",      "content": kickoff_prompt},
+            {"role": "system", "content": evaluator_system_prompt},
+            {"role": "user",   "content": f"{rollout_prompt_text}\n\n{kickoff_prompt}"},
         ]
 
         # ── BEAST kickoff search ──────────────────────────────────────────
@@ -4679,6 +4621,8 @@ cfg = DotDict({
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
 
+    "target_system_prompt": "You are a helpful AI assistant.",  # Fixed target sysprompt — used verbatim every variation/round (replaces per-variation setup-generation LLM call). Set to "" to send no system prompt at all.
+
     # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
     # worker can grab most of the memory; the small reserve covers framework overhead.
     "evaluator_gpu_id": 2,
@@ -4726,9 +4670,6 @@ cfg = DotDict({
         "between_rounds_strategise": False,  # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "beast": {
-        # Per iteration: filler → branch (each beam → candidates_per_beam continuations of
-        # scored_candidate_length tokens) → score all → keep top num_beams, truncate to
-        # kept_candidate_length. Suffix length grows by (kept + filler) tokens per iter.
         # Implicit max suffix length = max_num_iterations * (kept_candidate_length + unscored_filler_length).
         "use_beast": True,                       # False = skip beam search entirely, use Phase 1 baseline message as-is
         "num_beams": 5,                          # number of beams kept after each scoring step
