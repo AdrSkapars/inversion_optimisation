@@ -308,17 +308,41 @@ def _strip_thinking(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text).strip()
 
 
+def _extract_target_sysprompt(setup_content: str) -> str:
+    """Extract the target system prompt from setup_content. The prompt template
+    asks for <system_prompt>...</system_prompt> XML tags, but some models output
+    a markdown ```system_prompt fenced code block instead. Try both formats
+    (XML first, then markdown) — silently returning "" makes the target run
+    with no system prompt at all, which is a worse failure mode than logging
+    a warning."""
+    # Auto-close truncated XML tags first so the regex can succeed on cutoff output.
+    closed = _auto_close_tags(setup_content, ["system_prompt"])
+    m = re.search(r"<system_prompt>(.*?)</system_prompt>", closed, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Markdown fence fallback — handle both closed (```\n) and truncated (end-of-string).
+    m = re.search(r"```system_prompt\s*\n([\s\S]*?)(?:\n```|$)", setup_content)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
 def _strip_target_sysprompt_from_setup(setup_content: str) -> str:
-    """Replace the <system_prompt>...</system_prompt> block in setup_content with
-    a placeholder so the evaluator's view doesn't carry the (verbose, redundant)
-    target system prompt across turns. The evaluator already knows it generated
-    one, and the actual sysprompt is delivered to the target separately."""
-    return re.sub(
+    """Replace the system prompt block in setup_content with a placeholder so the
+    evaluator's view doesn't carry the (verbose, redundant) target system prompt
+    across turns. Handles both XML tag and markdown fence formats."""
+    out = re.sub(
         r"<system_prompt>.*?</system_prompt>",
         "<system_prompt>[generated]</system_prompt>",
         setup_content,
         flags=re.DOTALL,
     )
+    out = re.sub(
+        r"```system_prompt\s*\n[\s\S]*?\n```",
+        "```system_prompt\n[generated]\n```",
+        out,
+    )
+    return out
 
 
 def _strip_thinking_from_msgs(msgs: List[Dict]) -> List[Dict]:
@@ -1979,11 +2003,14 @@ class ConversationOrchestrator:
 
         parsed_sysprompt = parse_message(sysprompt_response)
         system_prompt_content = parsed_sysprompt["content"] or ""
-        system_prompt_content = _auto_close_tags(system_prompt_content, ["system_prompt"])
 
-        # Extract system prompt from tags
-        match = re.search(r"<system_prompt>(.*?)</system_prompt>", system_prompt_content, re.DOTALL)
-        generated_target_prompt = match.group(1).strip() if match else ""
+        # Extract system prompt — handles both <system_prompt> XML tags and
+        # ```system_prompt markdown fences (some models output the latter despite
+        # the prompt asking for the former).
+        generated_target_prompt = _extract_target_sysprompt(system_prompt_content)
+        if not generated_target_prompt:
+            debug_print("WARN: failed to extract target system prompt from setup; "
+                        "target will run with no system prompt")
 
         target_system_prompt = generated_target_prompt
         if target_sysprompt_prefix and target_sysprompt_prefix.strip():
@@ -2897,12 +2924,10 @@ def run_rollout_batched_local(
         if frozen_tsp:
             generated_sysprompt = frozen_tsp
         else:
-            match = re.search(
-                r"<system_prompt>(.*?)</system_prompt>",
-                _auto_close_tags(setup_content, ["system_prompt"]),
-                re.DOTALL,
-            )
-            generated_sysprompt = match.group(1).strip() if match else ""
+            generated_sysprompt = _extract_target_sysprompt(setup_content)
+            if not generated_sysprompt:
+                print(f"  WARN v{var_idx}: failed to extract target system prompt — "
+                      f"target will run with no system prompt", flush=True)
         target_sysprompt = generated_sysprompt
         if target_sysprompt_prefix and target_sysprompt_prefix.strip() and not frozen_tsp:
             # Don't double-prefix when reusing an already-prefixed sysprompt from round 1.
