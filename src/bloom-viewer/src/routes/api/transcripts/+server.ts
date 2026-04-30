@@ -38,9 +38,9 @@ export const GET: RequestHandler = async ({ url }) => {
       const filename = path.basename(fullPath);
       const match = filename.match(/transcript_v(\d+)r\d+\.json/);
       if (match) {
-        const variationIndex = parseInt(match[1]);
+        const variationIndex = parseInt(match[1]) - 1; // variation numbers are 1-indexed
         const variations: any[] = ideation.variations || [];
-        if (variationIndex < variations.length) {
+        if (variationIndex >= 0 && variationIndex < variations.length) {
           const scenarioDescription = variations[variationIndex]?.description ?? null;
           if (scenarioDescription && 'transcript' in transcript) {
             (transcript as any).transcript.metadata.scenario_description = scenarioDescription;
