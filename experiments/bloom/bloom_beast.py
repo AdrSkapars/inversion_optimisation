@@ -4650,7 +4650,7 @@ cfg = DotDict({
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 1,                      # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
-        "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only (target always sees full context)
+        "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only (target always sees full context)  [th1 ablation showed no benefit]
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
@@ -4666,7 +4666,7 @@ cfg = DotDict({
         "max_tokens": 1200,                  # max output tokens per refinement call (tags auto-closed if truncated)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_rounds": 3,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
-        "history_rounds": 1,                 # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+        "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N  [rh1 ablation showed no benefit]
         "between_rounds_strategise": True,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "beast": {
