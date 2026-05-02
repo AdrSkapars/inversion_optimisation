@@ -28,7 +28,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from bloom_beast import (
     DotDict, litellm_chat, parse_message, parse_judgment_response,
     extract_transcript_text, build_judgment_system, build_judge_prompt,
-    save_json, _effort,
+    save_json, _effort, THINKING_BUDGETS,
 )
 
 
@@ -207,8 +207,19 @@ async def rejudge_round(
     judge_max_tokens = cfg.judgment.get("max_tokens", 1000)
     judge_thinking = cfg.judgment.get("thinking", False)
     reasoning_effort = _effort(judge_thinking)
+    # API models with reasoning enforce max_tokens > thinking_budget; the original local
+    # judge cfg used max_tokens=1000 which is below medium reasoning's 2048 budget.
+    # Bump to fit the reasoning budget plus headroom for visible output.
+    thinking_budget = THINKING_BUDGETS.get(reasoning_effort, 0)
+    if thinking_budget and judge_max_tokens <= thinking_budget:
+        judge_max_tokens = thinking_budget + 2000
+        print(f"    [bumped max_tokens to {judge_max_tokens} to fit reasoning_effort={reasoning_effort} budget]")
     num_samples = cfg.judgment.get("num_samples", 1)
     temperature = cfg.get("temperature")
+    # Reasoning APIs typically require temperature=None or 1.0; the original cfg used 1.0
+    # for everything. Force None when reasoning is on, to match litellm's safety check.
+    if reasoning_effort != "none" and temperature is not None and temperature != 1.0:
+        temperature = None
 
     variations = load_variations(round_dir, exp_root)
 
