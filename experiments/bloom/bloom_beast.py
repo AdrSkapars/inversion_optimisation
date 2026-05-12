@@ -2421,6 +2421,7 @@ def _beast_single_trial_local(
     baseline_prefix: str,
     latin_token_ids: Optional[List[int]] = None,
     beast_temperature: float = 0.0,
+    eval_beam_chunk_size: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
 
@@ -2428,7 +2429,10 @@ def _beast_single_trial_local(
       1. Filler:  each beam grows by `unscored_filler_length` randomly sampled tokens (unscored).
                   Drawn one token at a time so each draw is independent per beam.
       2. Branch:  each beam → `candidates_per_beam` continuations of `scored_candidate_length`
-                  tokens (single vLLM call with n=candidates_per_beam, max_tokens=scored_candidate_length).
+                  tokens (vLLM call with n=candidates_per_beam, max_tokens=scored_candidate_length).
+                  `eval_beam_chunk_size=None` issues one batched call across all beams (default,
+                  cheap for small n); set to 1 when n is large to avoid OOM after iter-1 beam
+                  divergence (vLLM can no longer share KV pages across beams).
       3. Score:   all `num_beams * candidates_per_beam` candidates scored by
                   log P(TRS | target_ctx + decoded_msg).
       4. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
@@ -2474,13 +2478,20 @@ def _beast_single_trial_local(
                     beam[i] = beam[i] + cand_list[0]
 
         # ── Phase 2: Branch — sample candidates_per_beam extensions per beam ──
-        # Single vLLM call: n=candidates_per_beam, max_tokens=scored_candidate_length.
-        # When scored_candidate_length=1 this is exactly the original BEAST cost.
-        extensions = _vllm_sample_extensions(
-            lm_eval, beam, n=candidates_per_beam, max_tokens=scored_candidate_length,
-            temperature=temperature, top_p=top_p,
-            allowed_token_ids=latin_token_ids,
-        )
+        # eval_beam_chunk_size=None → one batched call (all beams together, default for
+        # normal BEAST where n is small). Set to 1 when candidates_per_beam is large:
+        # after iter 1 beams diverge so vLLM can't share KV pages, and a batched call
+        # across all beams allocates fully separate KV caches per sequence → OOM.
+        # Chunking keeps peak memory at (chunk * candidates_per_beam).
+        chunk = eval_beam_chunk_size or len(beam)
+        extensions: List[List[List[int]]] = []
+        for start in range(0, len(beam), chunk):
+            ext = _vllm_sample_extensions(
+                lm_eval, beam[start:start + chunk], n=candidates_per_beam,
+                max_tokens=scored_candidate_length, temperature=temperature, top_p=top_p,
+                allowed_token_ids=latin_token_ids,
+            )
+            extensions.extend(ext)
 
         # Flatten to num_beams * candidates_per_beam full candidates.
         candidates: List[List[int]] = []
@@ -2571,6 +2582,7 @@ def beast_search_evaluator_message(
     temperature              = beast_cfg.get("temperature", 1.0)
     top_p                    = beast_cfg.get("top_p", 1.0)
     beast_temperature        = beast_cfg.get("beast_temperature", 0.0)
+    eval_beam_chunk_size     = beast_cfg.get("eval_beam_chunk_size", None)
     max_prefix_length        = beast_cfg.get("max_prefix_length", None)
     max_reward_output_length = beast_cfg.get("max_reward_output_length", 0)
 
@@ -2629,6 +2641,7 @@ def beast_search_evaluator_message(
         unscored_filler_length, max_num_iterations, max_pool_size, max_batch_sz,
         temperature, top_p, baseline_prefix, latin_token_ids,
         beast_temperature=beast_temperature,
+        eval_beam_chunk_size=eval_beam_chunk_size,
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -4686,6 +4699,7 @@ cfg = DotDict({
         "temperature": 1.0,                      # sampling temperature for token expansion
         "top_p": 1.0,                            # nucleus sampling p for token expansion
         "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
+        "eval_beam_chunk_size": 1,               # None = batch all beams together; N = process N beams per vLLM call (use 1 when candidates_per_beam is large to avoid OOM after iter-1 beam divergence)
         "max_prefix_length": None,               # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
