@@ -2290,10 +2290,14 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     return rollout_results
 
 
-def build_latin_token_ids(tokenizer, vocab_size: int) -> List[int]:
+def build_latin_token_ids(tokenizer, vocab_size: int,
+                           extra_allowed_ids: Optional[List[int]] = None) -> List[int]:
     """Return the list of token IDs whose decoded text contains ONLY characters from
     the Latin allowlist (ASCII letters, space, basic punctuation .,!?-). vLLM's
-    SamplingParams.allowed_token_ids takes this list and constrains sampling to it."""
+    SamplingParams.allowed_token_ids takes this list and constrains sampling to it.
+
+    `extra_allowed_ids` are appended unconditionally — useful for letting EOS or
+    other special tokens through the mask without lifting the Latin restriction."""
     allowed_chars = set(
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -2314,7 +2318,21 @@ def build_latin_token_ids(tokenizer, vocab_size: int) -> List[int]:
             continue
         if all(ch in allowed_chars for ch in text):
             allowed.append(token_id)
+    if extra_allowed_ids:
+        allowed = sorted(set(allowed).union(extra_allowed_ids))
     return allowed
+
+
+def _strip_eos_tail(seq: List[int], eos_id: Optional[int]) -> List[int]:
+    """Return `seq` truncated at the first occurrence of `eos_id` (EOS excluded).
+    Returns `seq` unchanged if eos_id is None or not found."""
+    if eos_id is None:
+        return seq
+    try:
+        k = seq.index(eos_id)
+        return seq[:k]
+    except ValueError:
+        return seq
 
 
 def _score_beast_candidates(
@@ -2326,14 +2344,18 @@ def _score_beast_candidates(
     trs: str,
     baseline_prefix: str,
     max_batch_size: int,
+    eos_token_id: Optional[int] = None,
 ) -> List[float]:
     """Score BEAST candidate token sequences by log P(trs | target_msgs + decoded_msg).
     Decodes each candidate's suffix using lm_eval's tokenizer, builds the scoring
-    context for lm_target, and batches the forward passes. Returns float scores
+    context for lm_target, and batches the forward passes. When `eos_token_id` is
+    set, each candidate's suffix is truncated at the first EOS before decoding so
+    candidates are scored as their natural-end form. Returns float scores
     (higher = more likely TRS; -inf for failed items)."""
     items: List[Tuple[List[Dict], str]] = []
     for seq in candidates:
-        suffix_text = lm_eval.tokenizer.decode(seq[prefix_length:], skip_special_tokens=False)
+        suffix_ids = _strip_eos_tail(seq[prefix_length:], eos_token_id)
+        suffix_text = lm_eval.tokenizer.decode(suffix_ids, skip_special_tokens=False)
         msg_text = baseline_prefix + suffix_text
         items.append((list(target_msgs) + [{"role": "user", "content": msg_text}], trs))
 
@@ -2352,6 +2374,7 @@ def _vllm_sample_extensions(
     temperature: float,
     top_p: float,
     allowed_token_ids: Optional[List[int]] = None,
+    ignore_eos: bool = False,
 ) -> List[List[List[int]]]:
     """Sample `n` extensions of `max_tokens` tokens each per prompt, via vLLM.
 
@@ -2359,6 +2382,10 @@ def _vllm_sample_extensions(
     The Latin mask (allowed_token_ids) is enforced at every sampling step via
     SamplingParams.allowed_token_ids. When max_tokens=1 each inner list is length 1
     — same single-forward-pass cost as the old single-token sampler.
+
+    `ignore_eos=True` keeps generation going past EOS so the returned sequences are
+    rectangular (length == max_tokens) even when EOS is sampled — callers truncate
+    at the first EOS during decoding.
     """
     sampling_kwargs = dict(
         n=n,
@@ -2367,6 +2394,7 @@ def _vllm_sample_extensions(
         top_p=top_p,
         allowed_token_ids=allowed_token_ids,
         skip_special_tokens=False,
+        ignore_eos=ignore_eos,
     )
     if _DEFAULT_SEED is not None:
         sampling_kwargs["seed"] = _DEFAULT_SEED
@@ -2422,6 +2450,7 @@ def _beast_single_trial_local(
     latin_token_ids: Optional[List[int]] = None,
     beast_temperature: float = 0.0,
     eval_beam_chunk_size: Optional[int] = None,
+    eos_token_id: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
 
@@ -2490,6 +2519,7 @@ def _beast_single_trial_local(
                 lm_eval, beam[start:start + chunk], n=candidates_per_beam,
                 max_tokens=scored_candidate_length, temperature=temperature, top_p=top_p,
                 allowed_token_ids=latin_token_ids,
+                ignore_eos=(eos_token_id is not None),
             )
             extensions.extend(ext)
 
@@ -2503,6 +2533,7 @@ def _beast_single_trial_local(
         scores = _score_beast_candidates(
             lm_eval, lm_target, candidates, prefix_length,
             target_msgs, trs, baseline_prefix, max_batch_size,
+            eos_token_id=eos_token_id,
         )
 
         # ── Phase 4: Select num_beams; truncate to kept_candidate_length ────
@@ -2585,6 +2616,13 @@ def beast_search_evaluator_message(
     eval_beam_chunk_size     = beast_cfg.get("eval_beam_chunk_size", None)
     max_prefix_length        = beast_cfg.get("max_prefix_length", None)
     max_reward_output_length = beast_cfg.get("max_reward_output_length", 0)
+    truncate_at_eos          = beast_cfg.get("truncate_at_eos", False)
+
+    # When truncate_at_eos is on, EOS becomes a samplable token and decoding cuts at
+    # the first EOS. Resolve the eos_token_id from lm_eval's tokenizer once.
+    eos_token_id: Optional[int] = (
+        lm_eval.tokenizer.eos_token_id if truncate_at_eos else None
+    )
 
     # ── Compute baseline_prefix: the part of baseline_msg kept before the suffix ──
     # None  → keep full baseline_msg (append suffix after it)
@@ -2615,17 +2653,21 @@ def beast_search_evaluator_message(
     prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
     prefix_length = len(prefix_tokens)
 
-    # ── Build latin token-id list (cached per lm_eval) ───────────────────
+    # ── Build latin token-id list (cached per lm_eval + EOS-inclusion state) ───
     # vLLM's SamplingParams.allowed_token_ids takes a list of allowed token IDs.
+    # When truncate_at_eos is on, EOS is added to the allowlist so vLLM can sample
+    # it (and we truncate the decoded suffix at it during scoring/pool decoding).
     latin_token_ids: Optional[List[int]] = None
     if beast_cfg.get("latin_mask", False):
-        cache_key = id(lm_eval)
+        cache_key = (id(lm_eval), eos_token_id is not None)
         latin_token_ids = _LATIN_MASK_CACHE.get(cache_key)
         if latin_token_ids is None:
             vocab_size = lm_eval.tokenizer.vocab_size
-            latin_token_ids = build_latin_token_ids(lm_eval.tokenizer, vocab_size)
+            extra = [eos_token_id] if eos_token_id is not None else None
+            latin_token_ids = build_latin_token_ids(lm_eval.tokenizer, vocab_size, extra_allowed_ids=extra)
             _LATIN_MASK_CACHE[cache_key] = latin_token_ids
-            print(f"    Latin mask: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
+            extra_note = " (+EOS)" if eos_token_id is not None else ""
+            print(f"    Latin mask{extra_note}: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
 
     # ── Run single BEAST trial ────────────────────────────────────────────
     print(
@@ -2642,6 +2684,7 @@ def beast_search_evaluator_message(
         temperature, top_p, baseline_prefix, latin_token_ids,
         beast_temperature=beast_temperature,
         eval_beam_chunk_size=eval_beam_chunk_size,
+        eos_token_id=eos_token_id,
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -2652,7 +2695,8 @@ def beast_search_evaluator_message(
     for i in order:
         seq         = global_pool_seqs[i]
         score       = global_pool_scores[i]
-        suffix_text = lm_eval.tokenizer.decode(seq[prefix_length:], skip_special_tokens=False)
+        suffix_ids  = _strip_eos_tail(seq[prefix_length:], eos_token_id)
+        suffix_text = lm_eval.tokenizer.decode(suffix_ids, skip_special_tokens=False)
         # Strip any <targeted_response_start> block that leaked into the suffix
         suffix_text = re.sub(r"<targeted_response_start>.*", "", suffix_text, flags=re.DOTALL).strip()
         baseline    = baseline_prefix
@@ -4703,6 +4747,7 @@ cfg = DotDict({
         "max_prefix_length": None,               # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
+        "truncate_at_eos": False,                # If True: allow EOS to be sampled and truncate each candidate's decoded text at the first EOS before scoring/pool decoding. Lets BoN explore variable-length messages.
     },
 })
 
