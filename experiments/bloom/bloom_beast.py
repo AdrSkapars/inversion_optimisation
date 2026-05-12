@@ -4668,7 +4668,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_11/2turns_2rounds_short_bon250",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_11/bon25_full200",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4733,9 +4733,9 @@ cfg = DotDict({
         # 25 × (1+2+...+19) = 4750 — fair on target-side suffix-token compute (the actual bottleneck).
         "use_beast": True,                       # False = skip beam search entirely, use Phase 1 baseline message as-is
         "num_beams": 1,                          # only need to select the single best at the end
-        "candidates_per_beam": 250,              # 250 × 19 suffix tokens matches BEAST's 4750 target compute
-        "scored_candidate_length": 19,           # each candidate is a full 19-token suffix
-        "kept_candidate_length": 19,             # commit the entire sampled sequence
+        "candidates_per_beam": 25,               # 25 × 200 = 5000 target suffix tokens, ~ matching BEAST's 4750 compute
+        "scored_candidate_length": 200,          # full message length
+        "kept_candidate_length": 200,            # commit the entire sampled sequence
         "unscored_filler_length": 0,             # extra random tokens appended per iter without scoring (0 = pure BEAST)
         "max_num_iterations": 1,                 # single pass — Best-of-N has no iteration
         "max_pool_size": 20,                     # max candidates accumulated across the search
@@ -4744,7 +4744,7 @@ cfg = DotDict({
         "top_p": 1.0,                            # nucleus sampling p for token expansion
         "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
         "eval_beam_chunk_size": 1,               # None = batch all beams together; N = process N beams per vLLM call (use 1 when candidates_per_beam is large to avoid OOM after iter-1 beam divergence)
-        "max_prefix_length": None,               # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
+        "max_prefix_length": 0,                  # None = full baseline; 0 = generate from scratch; N = keep first N tokens of baseline
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         "truncate_at_eos": False,                # If True: allow EOS to be sampled and truncate each candidate's decoded text at the first EOS before scoring/pool decoding. Lets BoN explore variable-length messages.
