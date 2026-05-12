@@ -703,16 +703,29 @@ class VLLMWorker:
         return self._call("compute_target_logprobs", items)
 
     def shutdown(self) -> None:
+        """Polite → SIGTERM → SIGKILL escalation. vLLM spawns its own internal
+        worker processes that don't always die from SIGTERM, so the SIGKILL
+        fallback is essential to prevent the script hanging at exit."""
         if not self.proc.is_alive():
             return
         try:
             self.req_q.put(("shutdown",))
-            self.proc.join(timeout=10)
+            self.proc.join(timeout=5)
         except Exception:
             pass
         if self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(timeout=5)
+            self.proc.terminate()  # SIGTERM
+            self.proc.join(timeout=3)
+        if self.proc.is_alive():
+            self.proc.kill()       # SIGKILL — definitely dies
+            self.proc.join(timeout=2)
+        # Close the IPC queues so the parent doesn't hang on their internal threads.
+        for q in (self.req_q, self.res_q):
+            try:
+                q.close()
+                q.join_thread()
+            except Exception:
+                pass
         if self in _ALL_WORKERS:
             _ALL_WORKERS.remove(self)
 
