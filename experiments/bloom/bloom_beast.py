@@ -507,12 +507,6 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     # Quiet the worker — vLLM is chatty and we already log from the parent.
     os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
-    # Use hf_transfer (Rust-based, faster + more reliable than the default Xet
-    # backend, which has been known to stall at 99% on large GGUF downloads).
-    # Falls back gracefully if hf_transfer isn't installed.
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-    # Belt-and-suspenders: also disable Xet in case hf_transfer isn't available.
-    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
     try:
