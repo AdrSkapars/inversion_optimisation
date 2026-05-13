@@ -308,43 +308,6 @@ def _strip_thinking(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text).strip()
 
 
-def _extract_target_sysprompt(setup_content: str) -> str:
-    """Extract the target system prompt from setup_content. The prompt template
-    asks for <system_prompt>...</system_prompt> XML tags, but some models output
-    a markdown ```system_prompt fenced code block instead. Try both formats
-    (XML first, then markdown) — silently returning "" makes the target run
-    with no system prompt at all, which is a worse failure mode than logging
-    a warning."""
-    # Auto-close truncated XML tags first so the regex can succeed on cutoff output.
-    closed = _auto_close_tags(setup_content, ["system_prompt"])
-    m = re.search(r"<system_prompt>(.*?)</system_prompt>", closed, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    # Markdown fence fallback — handle both closed (```\n) and truncated (end-of-string).
-    m = re.search(r"```system_prompt\s*\n([\s\S]*?)(?:\n```|$)", setup_content)
-    if m:
-        return m.group(1).strip()
-    return ""
-
-
-def _strip_target_sysprompt_from_setup(setup_content: str) -> str:
-    """Replace the system prompt block in setup_content with a placeholder so the
-    evaluator's view doesn't carry the (verbose, redundant) target system prompt
-    across turns. Handles both XML tag and markdown fence formats."""
-    out = re.sub(
-        r"<system_prompt>.*?</system_prompt>",
-        "<system_prompt>[generated]</system_prompt>",
-        setup_content,
-        flags=re.DOTALL,
-    )
-    out = re.sub(
-        r"```system_prompt\s*\n[\s\S]*?\n```",
-        "```system_prompt\n[generated]\n```",
-        out,
-    )
-    return out
-
-
 def _strip_thinking_from_msgs(msgs: List[Dict]) -> List[Dict]:
     """Return a copy of msgs with <thinking>/<think> blocks removed from each
     message's string content. Non-string content (e.g., multimodal blocks) is
