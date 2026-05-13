@@ -2304,18 +2304,25 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
 
 
 def build_latin_token_ids(tokenizer, vocab_size: int,
-                           extra_allowed_ids: Optional[List[int]] = None) -> List[int]:
+                           extra_allowed_ids: Optional[List[int]] = None,
+                           extra_allowed_chars: str = "") -> List[int]:
     """Return the list of token IDs whose decoded text contains ONLY characters from
     the Latin allowlist (ASCII letters, space, basic punctuation .,!?-). vLLM's
     SamplingParams.allowed_token_ids takes this list and constrains sampling to it.
 
     `extra_allowed_ids` are appended unconditionally — useful for letting EOS or
-    other special tokens through the mask without lifting the Latin restriction."""
+    other special tokens through the mask without lifting the Latin restriction.
+
+    `extra_allowed_chars` expands the per-character allowlist — useful for letting
+    the model emit tag characters (e.g. \"</>\") so it can produce </message>
+    naturally. This is more robust than passing token IDs because tokenizers may
+    fuse `</`, `>`, etc. into multi-char tokens in ways that depend on context."""
     allowed_chars = set(
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         " .,!?-"
     )
+    allowed_chars.update(extra_allowed_chars)
     extra_blocked_tokens = ["..."]
     blocked_ids: set = set()
     for tok_str in extra_blocked_tokens:
@@ -2704,18 +2711,28 @@ def beast_search_evaluator_message(
 
     # ── Build latin token-id list (cached per lm_eval + EOS-inclusion state) ───
     # vLLM's SamplingParams.allowed_token_ids takes a list of allowed token IDs.
-    # When truncate_at_eos is on, EOS is added to the allowlist so vLLM can sample
-    # it (and we truncate the decoded suffix at it during scoring/pool decoding).
+    # When truncate_at_eos is on, three things are added to the allowlist so the
+    # model can produce a natural </message> end-of-message marker:
+    #   - the EOS token (as a backup terminator)
+    #   - the characters '<', '/', '>' (so any token containing those + latin chars
+    #     is allowed, covering all tokenizer variants of </message>, e.g. [</][message][>]
+    #     or [<][/][message][>])
+    # The model's natural choice will then be to emit </message> after the body,
+    # and post-hoc extraction (via _extract_message_tags) truncates the suffix there.
     latin_token_ids: Optional[List[int]] = None
     if beast_cfg.get("latin_mask", False):
         cache_key = (id(lm_eval), eos_token_id is not None)
         latin_token_ids = _LATIN_MASK_CACHE.get(cache_key)
         if latin_token_ids is None:
             vocab_size = lm_eval.tokenizer.vocab_size
-            extra = [eos_token_id] if eos_token_id is not None else None
-            latin_token_ids = build_latin_token_ids(lm_eval.tokenizer, vocab_size, extra_allowed_ids=extra)
+            extra_ids = [eos_token_id] if eos_token_id is not None else None
+            extra_chars = "</>" if eos_token_id is not None else ""
+            latin_token_ids = build_latin_token_ids(
+                lm_eval.tokenizer, vocab_size,
+                extra_allowed_ids=extra_ids, extra_allowed_chars=extra_chars,
+            )
             _LATIN_MASK_CACHE[cache_key] = latin_token_ids
-            extra_note = " (+EOS)" if eos_token_id is not None else ""
+            extra_note = " (+EOS+</>)" if eos_token_id is not None else ""
             print(f"    Latin mask{extra_note}: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
 
     # ── Run single BEAST trial ────────────────────────────────────────────
@@ -4808,7 +4825,7 @@ cfg = DotDict({
         "max_prefix_length": 0,                  # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
-        "truncate_at_eos": False,                # If True: allow EOS to be sampled and truncate each candidate's decoded text at the first EOS before scoring/pool decoding. Lets BoN explore variable-length messages.
+        "truncate_at_eos": False,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
 })
 
