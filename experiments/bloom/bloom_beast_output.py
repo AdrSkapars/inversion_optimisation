@@ -2529,12 +2529,81 @@ def _select_beam_indices(scores: List[float], num_to_select: int,
     return random.choices(range(n), weights=weights, k=num_to_select)
 
 
+# ── Shared search-stage helpers (used by both input_search and output_search) ──
+
+def _resolve_eos_token_id(lm: "LocalModel", truncate_at_eos: bool) -> Optional[int]:
+    """EOS resolution: returns the tokenizer's eos_token_id if truncation is enabled,
+    None otherwise. None == EOS is not in the sampler's allowed-token set and decoded
+    suffixes are not truncated."""
+    return lm.tokenizer.eos_token_id if truncate_at_eos else None
+
+
+def _get_or_build_latin_mask(
+    lm: "LocalModel",
+    enabled: bool,
+    eos_token_id: Optional[int],
+    extra_chars: str,
+    cache_tag: str,
+    label: str,
+) -> Optional[List[int]]:
+    """Cached Latin token-id mask for a given (lm, EOS-inclusion, cache_tag) combo.
+
+    Returns None when `enabled` is False. When True, builds (or fetches from
+    `_LATIN_MASK_CACHE`) the allowed-token list, including:
+      - the EOS token (if eos_token_id is set) so the sampler can terminate
+      - any tokens whose decoded form contains chars from `extra_chars` (e.g. "</>"
+        so the model can produce </message> closers under input_search's tag flow)
+
+    `cache_tag` discriminates separate caches when the same `lm` is used in
+    multiple search modes (e.g. input_search vs output_search may want
+    different `extra_chars` even though the underlying tokenizer is the same).
+    """
+    if not enabled:
+        return None
+    cache_key = (id(lm), eos_token_id is not None, cache_tag)
+    cached = _LATIN_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    vocab_size = lm.tokenizer.vocab_size
+    extra_ids = [eos_token_id] if eos_token_id is not None else None
+    token_ids = build_latin_token_ids(
+        lm.tokenizer, vocab_size,
+        extra_allowed_ids=extra_ids, extra_allowed_chars=extra_chars,
+    )
+    _LATIN_MASK_CACHE[cache_key] = token_ids
+    extras: List[str] = []
+    if eos_token_id is not None: extras.append("EOS")
+    if extra_chars:              extras.append(extra_chars)
+    note = f" (+{'+'.join(extras)})" if extras else ""
+    print(f"    Latin mask {label}{note}: {len(token_ids)}/{vocab_size} tokens allowed", flush=True)
+    return token_ids
+
+
+def _build_sampling_prefix(
+    lm: "LocalModel",
+    msgs: List[Dict],
+    no_think: bool,
+    baseline_prefix: str,
+) -> Tuple[str, List[int]]:
+    """Render chat-template prompt + optional no-think prefix + baseline_prefix,
+    then tokenize. Returns (prompt_str, prefix_token_ids). Mirrors exactly how
+    `batch_generate_local` builds prompts so searched candidates come from the
+    same distribution as the model's natural generation.
+    """
+    prompt_str = lm.tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True,
+    )
+    if no_think:
+        prompt_str += "<think>\n\n</think>\n"
+    prompt_str += baseline_prefix
+    prefix_tokens = lm.tokenizer.encode(prompt_str, add_special_tokens=False)
+    return prompt_str, prefix_tokens
+
+
 def _beast_single_trial_local(
-    lm_eval: "LocalModel",
-    lm_target: "LocalModel",
+    lm_sampler: "LocalModel",
     prefix_tokens: List[int],
-    target_msgs: List[Dict],
-    trs: str,
+    scorer_fn: Callable[[List[List[int]], int], List[float]],
     num_beams: int,
     candidates_per_beam: int,
     scored_candidate_length: int,
@@ -2542,17 +2611,18 @@ def _beast_single_trial_local(
     unscored_filler_length: int,
     max_num_iterations: int,
     max_pool_size: int,
-    max_batch_size: int,
     temperature: float,
     top_p: float,
-    baseline_prefix: str,
     latin_token_ids: Optional[List[int]] = None,
     beast_temperature: float = 0.0,
     eval_beam_chunk_size: Optional[int] = None,
     eos_token_id: Optional[int] = None,
-    scorer_fn: Optional[Callable[[List[List[int]], int], List[float]]] = None,
 ) -> Tuple[List[List[int]], List[float]]:
     """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
+
+    Role-agnostic: `lm_sampler` generates candidate token sequences; `scorer_fn` scores
+    them with whatever reward signal the caller wires up (input_search → log P(TRS | ...);
+    output_search → log P("Yes" | judge prompt + candidate)).
 
     Per iteration:
       1. Filler:  each beam grows by `unscored_filler_length` randomly sampled tokens (unscored).
@@ -2562,8 +2632,7 @@ def _beast_single_trial_local(
                   `eval_beam_chunk_size=None` issues one batched call across all beams (default,
                   cheap for small n); set to 1 when n is large to avoid OOM after iter-1 beam
                   divergence (vLLM can no longer share KV pages across beams).
-      3. Score:   all `num_beams * candidates_per_beam` candidates scored by
-                  log P(TRS | target_ctx + decoded_msg).
+      3. Score:   all `num_beams * candidates_per_beam` candidates → scorer_fn(candidates, prefix_length).
       4. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
                   tokens. Selection is hard top-K when `beast_temperature == 0` (classic BEAST),
                   or SMC-style multinomial resampling on softmax(scores / T) with replacement
@@ -2573,7 +2642,6 @@ def _beast_single_trial_local(
     Per-iteration token growth = unscored_filler_length + kept_candidate_length.
     Implicit max suffix length = max_num_iterations * (kept + filler).
 
-    `baseline_prefix` is prepended to the decoded suffix when scoring against lm_target.
     Sampling is via vLLM SamplingParams (allowed_token_ids enforces the Latin mask).
     Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores.
     """
@@ -2598,7 +2666,7 @@ def _beast_single_trial_local(
         # One random token per beam per filler step (independent draws).
         for _ in range(unscored_filler_length):
             filler = _vllm_sample_extensions(
-                lm_eval, beam, n=1, max_tokens=1,
+                lm_sampler, beam, n=1, max_tokens=1,
                 temperature=temperature, top_p=top_p,
                 allowed_token_ids=latin_token_ids,
             )
@@ -2616,7 +2684,7 @@ def _beast_single_trial_local(
         extensions: List[List[List[int]]] = []
         for start in range(0, len(beam), chunk):
             ext = _vllm_sample_extensions(
-                lm_eval, beam[start:start + chunk], n=candidates_per_beam,
+                lm_sampler, beam[start:start + chunk], n=candidates_per_beam,
                 max_tokens=scored_candidate_length, temperature=temperature, top_p=top_p,
                 allowed_token_ids=latin_token_ids,
                 ignore_eos=(eos_token_id is not None),
@@ -2629,18 +2697,10 @@ def _beast_single_trial_local(
             for ext in extensions[i]:
                 candidates.append(beam_seq + ext)
 
-        # ── Phase 3: Score all candidates ─────────────────────────────────────
-        # Default scorer = input-search style (log P(TRS | target + candidate)).
-        # When `scorer_fn` is supplied (e.g. output_search), it replaces the
-        # default scoring step entirely. Signature: (candidates, prefix_length) -> scores.
-        if scorer_fn is not None:
-            scores = scorer_fn(candidates, prefix_length)
-        else:
-            scores = _score_beast_candidates(
-                lm_eval, lm_target, candidates, prefix_length,
-                target_msgs, trs, baseline_prefix, max_batch_size,
-                eos_token_id=eos_token_id,
-            )
+        # ── Phase 3: Score all candidates via the caller-provided scorer ──────
+        # Signature: (candidates, prefix_length) -> scores. Caller decides the
+        # reward signal (input_search: log P(TRS | ...); output_search: log P("Yes" | ...)).
+        scores = scorer_fn(candidates, prefix_length)
 
         # ── Phase 4: Select num_beams; truncate to kept_candidate_length ────
         # All beams had the same length L at iteration start; all candidates have
@@ -2663,7 +2723,7 @@ def _beast_single_trial_local(
     return pool_seqs, pool_scores
 
 
-def beast_search_evaluator_message(
+def input_search_evaluator_message(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
     eval_msgs: List[Dict],
@@ -2682,12 +2742,13 @@ def beast_search_evaluator_message(
       • trs:          targeted response start (reward signal for scoring)
       • strategy:     evaluator's between-turns reasoning (from <strategy> tags)
 
-    Phase 2 — BEAST: token-level beam search using lm_eval for token generation
-      and lm_target for scoring log P(trs | target_msgs + decoded_msg).
+    Phase 2 — token-level beam/BoN search: sample candidate continuations from
+      lm_eval and score each with log P(trs | target_msgs + decoded_candidate)
+      via lm_target. The top candidate replaces the Phase 1 baseline.
 
     Returns:
-      pool     — List[(msg_text, score, baseline, suffix)] sorted best-first
-                 baseline + suffix == msg_text; suffix is the BEAST-generated part
+      pool     — List[(msg_text, score, baseline, suffix)] sorted best-first;
+                 baseline + suffix == msg_text; suffix is the searched part
       trs      — the targeted response start string used as the reward signal
       strategy — the evaluator's <strategy> reasoning block (empty string if absent)
     """
@@ -2702,8 +2763,7 @@ def beast_search_evaluator_message(
         # No TRS generated — return just the normal message as the single pool entry
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
 
-    # ── Short-circuit if input search is disabled ─────────────────────────
-    # Skip the entire beam search and return the Phase 1 baseline as-is (vanilla bloom).
+    # Short-circuit if disabled — return Phase 1 baseline as-is (vanilla bloom).
     if not search_cfg.get("enabled", True):
         return [(baseline_msg, 0.0, baseline_msg, "")], trs, strategy
 
@@ -2724,32 +2784,23 @@ def beast_search_evaluator_message(
     max_reward_output_length = search_cfg.get("max_reward_output_length", 0)
     truncate_at_eos          = search_cfg.get("truncate_at_eos", False)
 
-    # When truncate_at_eos is on, EOS becomes a samplable token and decoding cuts at
-    # the first EOS. Resolve the eos_token_id from lm_eval's tokenizer once.
-    eos_token_id: Optional[int] = (
-        lm_eval.tokenizer.eos_token_id if truncate_at_eos else None
-    )
+    eos_token_id = _resolve_eos_token_id(lm_eval, truncate_at_eos)
 
     # ── Compute baseline_prefix: raw Phase 1 output up to a cursor position ──
-    # The prefix is built from the RAW Phase 1 content (with <strategy>/<message>
-    # tags + preamble) so BoN sees full context. The cursor anchors at the closing
-    # </message> tag; max_prefix_length controls how much of the message BODY is
-    # kept before the cursor.
-    #
-    #   None → cursor right before </message>  (keep full message body)
-    #   0    → cursor right after <message>    (keep no body — BoN samples whole body)
+    # The prefix is the RAW Phase 1 content (with <strategy>/<message> tags +
+    # preamble) so the search sees full context. Cursor anchors at </message>;
+    # `max_prefix_length` controls how much of the message BODY is kept before it:
+    #   None → cursor right before </message>  (keep full body, classic suffix attack)
+    #   0    → cursor right after <message>    (no body — sampler regenerates whole body)
     #   N>0  → cursor after first N tokens of body
     #   N<0  → cursor |N| tokens before end of body
-    #
-    # When extraction runs on (baseline_prefix + sampled_suffix) downstream, the
-    # surrounding tags/strategy/preamble are stripped automatically by
-    # _extract_message_tags — so the target only receives the clean message body.
+    # Downstream extraction (_extract_message_tags) strips the surrounding tags
+    # so the target only receives the clean message body.
     msg_open  = re.search(r"<message>", content)
     msg_close = re.search(r"</message>", content)
     if msg_open and msg_close and msg_open.end() <= msg_close.start():
         before_msg_text = content[:msg_open.end()]  # includes <message> opener
         body_text       = content[msg_open.end():msg_close.start()]
-
         if max_prefix_length is None:
             body_prefix = body_text
         elif max_prefix_length == 0:
@@ -2761,9 +2812,7 @@ def beast_search_evaluator_message(
             )
         baseline_prefix = before_msg_text + body_prefix
     else:
-        # Phase 1 output was malformed (no/incomplete <message> tag). Fall back to
-        # the old behavior of slicing the extracted baseline_msg, with no surrounding
-        # context. Extraction downstream will still handle this gracefully.
+        # Phase 1 output malformed — slice the extracted baseline_msg directly.
         if max_prefix_length is None:
             baseline_prefix = baseline_msg
         elif max_prefix_length == 0:
@@ -2773,62 +2822,52 @@ def beast_search_evaluator_message(
             baseline_prefix = lm_eval.tokenizer.decode(
                 bm_ids[:max_prefix_length], skip_special_tokens=True
             )
-        body_prefix = baseline_prefix  # for viewer's baseline/suffix highlight
 
     # ── Truncate TRS to first max_reward_output_length target-model tokens ──
     if max_reward_output_length > 0 and trs:
         trs_ids = lm_target.tokenizer.encode(trs, add_special_tokens=False)
         trs = lm_target.tokenizer.decode(trs_ids[:max_reward_output_length], skip_special_tokens=False)
 
-    # ── Build lm_eval prefix tokens ───────────────────────────────────────
-    prompt_str = lm_eval.tokenizer.apply_chat_template(
-        eval_msgs, tokenize=False, add_generation_prompt=True
-    )
-    if no_think_eval:
-        prompt_str += "<think>\n\n</think>\n"
-    prompt_str += baseline_prefix   # empty string when max_prefix_length == 0
-    prefix_tokens = lm_eval.tokenizer.encode(prompt_str, add_special_tokens=False)
+    # ── Build sampling prefix + Latin mask via shared helpers ─────────────
+    _, prefix_tokens = _build_sampling_prefix(lm_eval, eval_msgs, no_think_eval, baseline_prefix)
     prefix_length = len(prefix_tokens)
+    # Allow `<`, `/`, `>` chars so the sampler can naturally emit </message> when
+    # truncate_at_eos is on; otherwise stay strict.
+    extra_chars = "</>" if eos_token_id is not None else ""
+    latin_token_ids = _get_or_build_latin_mask(
+        lm_eval, search_cfg.get("latin_mask", False),
+        eos_token_id, extra_chars, cache_tag="input_search", label="",
+    )
 
-    # ── Build latin token-id list (cached per lm_eval + EOS-inclusion state) ───
-    # vLLM's SamplingParams.allowed_token_ids takes a list of allowed token IDs.
-    # When truncate_at_eos is on, three things are added to the allowlist so the
-    # model can produce a natural </message> end-of-message marker:
-    #   - the EOS token (as a backup terminator)
-    #   - the characters '<', '/', '>' (so any token containing those + latin chars
-    #     is allowed, covering all tokenizer variants of </message>, e.g. [</][message][>]
-    #     or [<][/][message][>])
-    # The model's natural choice will then be to emit </message> after the body,
-    # and post-hoc extraction (via _extract_message_tags) truncates the suffix there.
-    latin_token_ids: Optional[List[int]] = None
-    if search_cfg.get("latin_mask", False):
-        cache_key = (id(lm_eval), eos_token_id is not None)
-        latin_token_ids = _LATIN_MASK_CACHE.get(cache_key)
-        if latin_token_ids is None:
-            vocab_size = lm_eval.tokenizer.vocab_size
-            extra_ids = [eos_token_id] if eos_token_id is not None else None
-            extra_chars = "</>" if eos_token_id is not None else ""
-            latin_token_ids = build_latin_token_ids(
-                lm_eval.tokenizer, vocab_size,
-                extra_allowed_ids=extra_ids, extra_allowed_chars=extra_chars,
-            )
-            _LATIN_MASK_CACHE[cache_key] = latin_token_ids
-            extra_note = " (+EOS+</>)" if eos_token_id is not None else ""
-            print(f"    Latin mask{extra_note}: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
+    # ── Bind input-search scorer (closure captures lm_target + scoring ctx) ──
+    def _scorer(candidates: List[List[int]], pfx_len: int) -> List[float]:
+        return _score_beast_candidates(
+            lm_eval, lm_target, candidates, pfx_len,
+            target_msgs, trs, baseline_prefix, max_batch_sz,
+            eos_token_id=eos_token_id,
+        )
 
-    # ── Run single BEAST trial ────────────────────────────────────────────
     print(
-        f"    BEAST search (beams={num_beams}, cand/beam={candidates_per_beam}, "
+        f"    input search (beams={num_beams}, cand/beam={candidates_per_beam}, "
         f"iters={max_num_iterations}, scored={scored_candidate_length}, "
         f"kept={kept_candidate_length}, filler={unscored_filler_length}, "
         f"beast_T={beast_temperature}) ...",
         flush=True,
     )
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
-        lm_eval, lm_target, prefix_tokens, target_msgs, trs,
-        num_beams, candidates_per_beam, scored_candidate_length, kept_candidate_length,
-        unscored_filler_length, max_num_iterations, max_pool_size, max_batch_sz,
-        temperature, top_p, baseline_prefix, latin_token_ids,
+        lm_sampler=lm_eval,
+        prefix_tokens=prefix_tokens,
+        scorer_fn=_scorer,
+        num_beams=num_beams,
+        candidates_per_beam=candidates_per_beam,
+        scored_candidate_length=scored_candidate_length,
+        kept_candidate_length=kept_candidate_length,
+        unscored_filler_length=unscored_filler_length,
+        max_num_iterations=max_num_iterations,
+        max_pool_size=max_pool_size,
+        temperature=temperature,
+        top_p=top_p,
+        latin_token_ids=latin_token_ids,
         beast_temperature=beast_temperature,
         eval_beam_chunk_size=eval_beam_chunk_size,
         eos_token_id=eos_token_id,
@@ -2890,7 +2929,7 @@ def output_search_target_response(
     Search over the TARGET's response tokens, scored by lm_eval's log P("Yes")
     on a judge prompt asking whether the response exhibits the named behavior.
 
-    Mirror of `beast_search_evaluator_message` with roles swapped:
+    Mirror of `input_search_evaluator_message` with roles swapped:
       • lm_target generates candidates (sampler)
       • lm_eval scores them (judge)
 
@@ -2925,9 +2964,7 @@ def output_search_target_response(
     truncate_at_eos          = output_cfg.get("truncate_at_eos", True)
 
     # EOS resolved from lm_target's tokenizer (it's the one doing the sampling).
-    eos_token_id: Optional[int] = (
-        lm_target.tokenizer.eos_token_id if truncate_at_eos else None
-    )
+    eos_token_id = _resolve_eos_token_id(lm_target, truncate_at_eos)
 
     # ── Compute baseline_prefix: slice of natural target response ──────────
     # The target's natural response has no XML tag scaffolding (unlike input_search,
@@ -2952,34 +2989,14 @@ def output_search_target_response(
             kept_ids = body_ids[:max(0, len(body_ids) + max_prefix_length)]
         baseline_prefix = lm_target.tokenizer.decode(kept_ids, skip_special_tokens=True)
 
-    # ── Build lm_target sampling prefix tokens ─────────────────────────────
-    # Mirror exactly how `batch_generate_local` builds the prompt for the natural
-    # target generation, so searched candidates come from the same distribution.
-    prompt_str = lm_target.tokenizer.apply_chat_template(
-        target_msgs, tokenize=False, add_generation_prompt=True,
-    )
-    if no_think_target:
-        prompt_str += "<think>\n\n</think>\n"
-    prompt_str += baseline_prefix
-    prefix_tokens = lm_target.tokenizer.encode(prompt_str, add_special_tokens=False)
+    # ── Build sampling prefix + Latin mask via shared helpers ─────────────
+    _, prefix_tokens = _build_sampling_prefix(lm_target, target_msgs, no_think_target, baseline_prefix)
     prefix_length = len(prefix_tokens)
-
-    # ── Latin mask (cache keyed on lm_target + EOS-inclusion state) ────────
-    # No `</>" extra chars: target output has no <message> tags to terminate with.
-    latin_token_ids: Optional[List[int]] = None
-    if output_cfg.get("latin_mask", False):
-        cache_key = (id(lm_target), eos_token_id is not None, "output_search")
-        latin_token_ids = _LATIN_MASK_CACHE.get(cache_key)
-        if latin_token_ids is None:
-            vocab_size = lm_target.tokenizer.vocab_size
-            extra_ids = [eos_token_id] if eos_token_id is not None else None
-            latin_token_ids = build_latin_token_ids(
-                lm_target.tokenizer, vocab_size,
-                extra_allowed_ids=extra_ids, extra_allowed_chars="",
-            )
-            _LATIN_MASK_CACHE[cache_key] = latin_token_ids
-            extra_note = " (+EOS)" if eos_token_id is not None else ""
-            print(f"    Latin mask (output){extra_note}: {len(latin_token_ids)}/{vocab_size} tokens allowed", flush=True)
+    # Target output has no <message> tags, so no `</>" extras in the mask.
+    latin_token_ids = _get_or_build_latin_mask(
+        lm_target, output_cfg.get("latin_mask", False),
+        eos_token_id, extra_chars="", cache_tag="output_search", label="(output)",
+    )
 
     # ── Bind judge scorer (lm_eval scores, lm_target decodes candidate text) ──
     def _scorer(candidates: List[List[int]], pfx_len: int) -> List[float]:
@@ -3004,16 +3021,10 @@ def output_search_target_response(
         f"beast_T={beast_temperature}) ...",
         flush=True,
     )
-    # NOTE: parameter names in _beast_single_trial_local are inherited from
-    # input_search. Here we pass lm_target into the `lm_eval` slot (sampler)
-    # and lm_eval into the `lm_target` slot (scorer). The `target_msgs`/`trs`
-    # args are unused when `scorer_fn` is provided. Refactor sweep will rename.
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
-        lm_eval=lm_target,                    # sampler = target
-        lm_target=lm_eval,                    # unused when scorer_fn provided
+        lm_sampler=lm_target,
         prefix_tokens=prefix_tokens,
-        target_msgs=[],                       # unused when scorer_fn provided
-        trs="",                               # unused when scorer_fn provided
+        scorer_fn=_scorer,
         num_beams=num_beams,
         candidates_per_beam=candidates_per_beam,
         scored_candidate_length=scored_candidate_length,
@@ -3021,15 +3032,12 @@ def output_search_target_response(
         unscored_filler_length=unscored_filler_length,
         max_num_iterations=max_num_iterations,
         max_pool_size=max_pool_size,
-        max_batch_size=max_batch_sz,
         temperature=temperature,
         top_p=top_p,
-        baseline_prefix=baseline_prefix,
         latin_token_ids=latin_token_ids,
         beast_temperature=beast_temperature,
         eval_beam_chunk_size=eval_beam_chunk_size,
         eos_token_id=eos_token_id,
-        scorer_fn=_scorer,
     )
 
     # ── Decode pool into (response_text, score, baseline, suffix), best first ──
@@ -3324,7 +3332,7 @@ def run_rollout_batched_local(
         # ── Kickoff input search ──────────────────────────────────────────
         # Strip <thinking> blocks from past evaluator messages before passing
         # to search (cheap defense in depth even if parse_message already handled them).
-        kickoff_pool, trs_kickoff, kickoff_strategy = beast_search_evaluator_message(
+        kickoff_pool, trs_kickoff, kickoff_strategy = input_search_evaluator_message(
             lm_eval, lm_target,
             _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
             search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
@@ -3454,7 +3462,7 @@ def run_rollout_batched_local(
                 eval_msgs_for_search = _strip_thinking_from_msgs(eval_msgs_for_search)
 
                 # Input search for next evaluator message (keep top 1 — conversation committed)
-                turn_pool, turn_trs, turn_strategy = beast_search_evaluator_message(
+                turn_pool, turn_trs, turn_strategy = input_search_evaluator_message(
                     lm_eval, lm_target,
                     eval_msgs_for_search, target_msgs,
                     search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
