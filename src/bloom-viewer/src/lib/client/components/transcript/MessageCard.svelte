@@ -594,6 +594,7 @@
   {@const targetedResponseStart = (message as any).metadata?.targeted_response_start ?? null}
   {@const beastBaseline = (message as any).metadata?.beast_baseline ?? null}
   {@const beastSuffix = (message as any).metadata?.beast_suffix ?? null}
+  {@const trsLogprob = (message as any).metadata?.targeted_response_start_logprob ?? null}
   {#if strategy}
     <div class="mb-3 p-3 rounded-lg bg-indigo-50/60 dark:bg-indigo-950/25 border border-dashed border-indigo-300 dark:border-indigo-700/50">
       <div class="flex items-center gap-1.5 mb-1.5">
@@ -605,6 +606,12 @@
       <div class="text-sm text-indigo-900 dark:text-indigo-100 whitespace-pre-wrap leading-relaxed italic">
         {@html highlightPlainText(strategy)}
       </div>
+    </div>
+  {/if}
+  {#if trsLogprob !== null}
+    <div class="mb-2 flex items-center gap-1.5">
+      <span class="text-xs font-semibold uppercase tracking-wide text-blue-700 dark:text-blue-400">Input search</span>
+      <span class="text-xs font-mono text-blue-800 dark:text-blue-300">log P(TRS) = {Number(trsLogprob).toFixed(3)}</span>
     </div>
   {/if}
   {#if textContent !== null}

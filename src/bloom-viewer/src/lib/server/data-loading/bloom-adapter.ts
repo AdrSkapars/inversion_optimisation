@@ -18,6 +18,7 @@ interface BloomMessage {
   targeted_response_start?: string;
   beast_baseline?: string;
   beast_suffix?: string;
+  targeted_response_start_logprob?: number;
   output_search_baseline?: string;
   output_search_suffix?: string;
   output_search_score?: number;
@@ -228,6 +229,7 @@ export function convertBloomTranscript(data: any): any {
     if (msg.targeted_response_start)      meta.targeted_response_start    = msg.targeted_response_start;
     if (msg.beast_baseline !== undefined) meta.beast_baseline             = msg.beast_baseline;
     if (msg.beast_suffix !== undefined)   meta.beast_suffix               = msg.beast_suffix;
+    if (msg.targeted_response_start_logprob !== undefined) meta.targeted_response_start_logprob = msg.targeted_response_start_logprob;
     if (msg.output_search_baseline !== undefined) meta.output_search_baseline = msg.output_search_baseline;
     if (msg.output_search_suffix !== undefined)   meta.output_search_suffix   = msg.output_search_suffix;
     if (msg.output_search_score !== undefined)    meta.output_search_score    = msg.output_search_score;
