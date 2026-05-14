@@ -4709,7 +4709,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_11/bon25_full200_eos",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
+    "folder_name": "runs_11/beast_new",  # output folder (relative to script); each round saved in round_1/, round_2/, etc.
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -4773,22 +4773,22 @@ cfg = DotDict({
         # Best-of-250 config: 250 candidates × 19 tokens = 4750 suffix tokens, matching BEAST's
         # 25 × (1+2+...+19) = 4750 — fair on target-side suffix-token compute (the actual bottleneck).
         "use_beast": True,                       # False = skip beam search entirely, use Phase 1 baseline message as-is
-        "num_beams": 1,                          # only need to select the single best at the end
-        "candidates_per_beam": 25,               # 25 × 200 = 5000 target suffix tokens, ~ matching BEAST's 4750 compute
-        "scored_candidate_length": 200,          # full message length
-        "kept_candidate_length": 200,            # commit the entire sampled sequence
+        "num_beams": 5,                          # only need to select the single best at the end
+        "candidates_per_beam": 5,               # 25 × 200 = 5000 target suffix tokens, ~ matching BEAST's 4750 compute
+        "scored_candidate_length": 1,          # full message length
+        "kept_candidate_length": 1,            # commit the entire sampled sequence
         "unscored_filler_length": 0,             # extra random tokens appended per iter without scoring (0 = pure BEAST)
-        "max_num_iterations": 1,                 # single pass — Best-of-N has no iteration
+        "max_num_iterations": 19,                 # single pass — Best-of-N has no iteration
         "max_pool_size": 20,                     # max candidates accumulated across the search
         "suffixes_per_scenario": 1,              # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                      # sampling temperature for token expansion
         "top_p": 1.0,                            # nucleus sampling p for token expansion
         "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
         "eval_beam_chunk_size": 1,               # None = batch all beams together; N = process N beams per vLLM call (use 1 when candidates_per_beam is large to avoid OOM after iter-1 beam divergence)
-        "max_prefix_length": 0,                  # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
+        "max_prefix_length": None,                  # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
-        "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
+        "truncate_at_eos": False,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
 })
 
