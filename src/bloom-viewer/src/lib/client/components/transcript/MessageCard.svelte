@@ -141,6 +141,25 @@
     );
   }
 
+  // Render content with output_search baseline/suffix distinction.
+  // Same shape as renderWithBeastSuffix but emerald-tinted so output-search
+  // highlights are visually distinct from input-search/BEAST highlights.
+  function renderWithOutputSearchSuffix(text: string, baseline: string, suffix: string): string {
+    if (!suffix) return highlightPlainText(text);
+
+    const escapeHtml = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+       .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
+    const escapedBaseline = highlightPlainText(escapeHtml(baseline));
+    const escapedSuffix   = highlightPlainText(escapeHtml(suffix));
+
+    return (
+      escapedBaseline +
+      `<mark class="output-search-suffix rounded px-0.5">${escapedSuffix}</mark>`
+    );
+  }
+
   // Helper function to highlight text in plain content (non-markdown)
   function highlightPlainText(text: string): string {
     if (!highlightText || !text.includes(highlightText)) {
@@ -391,6 +410,19 @@
     background-color: rgb(30 58 138 / 0.5); /* blue-900/50 */
     color: rgb(147 197 253);                /* blue-300 */
   }
+
+  /* output_search suffix highlight — emerald tint, distinct from BEAST blue */
+  :global(mark.output-search-suffix) {
+    background-color: rgb(209 250 229); /* emerald-100 */
+    color: rgb(6 78 59);                /* emerald-900 */
+    border-radius: 2px;
+    padding: 0 2px;
+  }
+
+  :global(.dark mark.output-search-suffix) {
+    background-color: rgb(6 78 59 / 0.5); /* emerald-900/50 */
+    color: rgb(110 231 183);              /* emerald-300 */
+  }
 </style>
 
 <!-- Message Card Container -->
@@ -599,6 +631,9 @@
 <!-- Assistant Message Snippet -->
 {#snippet assistantMessage(message: AssistantMessage)}
   {@const textContent = extractTextFromContent(message.content)}
+  {@const outputSearchBaseline = (message as any).metadata?.output_search_baseline ?? null}
+  {@const outputSearchSuffix   = (message as any).metadata?.output_search_suffix ?? null}
+  {@const outputSearchScore    = (message as any).metadata?.output_search_score ?? null}
   {#if message.reasoning}
     <div class="mb-3 p-3 rounded-lg bg-purple-100/50 dark:bg-purple-900/20 border border-purple-200/50 dark:border-purple-700/30">
       <div class="flex items-center gap-2 mb-2">
@@ -612,8 +647,14 @@
       </div>
     </div>
   {/if}
+  {#if outputSearchScore !== null}
+    <div class="mb-2 flex items-center gap-1.5">
+      <span class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Output search</span>
+      <span class="text-xs font-mono text-emerald-800 dark:text-emerald-300">log P("Yes") = {Number(outputSearchScore).toFixed(3)}</span>
+    </div>
+  {/if}
   {#if textContent !== null}
-    <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html highlightPlainText(textContent)}</span>
+    <span class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{@html outputSearchSuffix ? renderWithOutputSearchSuffix(textContent, outputSearchBaseline ?? '', outputSearchSuffix) : highlightPlainText(textContent)}</span>
   {:else}
     <JsonViewer value={message.content} theme={$themeString} inlineShortContainers={80} />
   {/if}
