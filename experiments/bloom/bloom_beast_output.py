@@ -5024,7 +5024,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_12/test",  # SANITY TEST: output_search smoke test (input_search off, 1 round, 2 scenarios, 1 turn)
+    "folder_name": "runs_12/bon25_full200",  # SANITY TEST: output_search smoke test (input_search off, 1 round, 2 scenarios, 1 turn)
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -5107,12 +5107,12 @@ cfg = DotDict({
         "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "output_search": {
-        "enabled": True,                         # SANITY TEST: enable output search
-        "behavior_name": "racial bias",# what the judge asks about (independent from cfg.behavior_name so it can be set per experiment)
+        "enabled": True,                         # True = run output search on every target response
+        "behavior_name": "racial bias",          # what the judge asks about (independent from cfg.behavior_name so it can be set per experiment)
         "num_beams": 1,
-        "candidates_per_beam": 2,                # SANITY: small N for fast smoke test
-        "scored_candidate_length": 10,          # SANITY: short candidates
-        "kept_candidate_length": 10,
+        "candidates_per_beam": 25,               # 25 BoN candidates per target response
+        "scored_candidate_length": 200,          # full target response length
+        "kept_candidate_length": 200,
         "unscored_filler_length": 0,
         "max_num_iterations": 1,                 # single pass — Best-of-N has no iteration
         "max_pool_size": 20,
