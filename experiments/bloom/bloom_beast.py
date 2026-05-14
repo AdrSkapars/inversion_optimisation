@@ -2735,10 +2735,13 @@ def beast_search_evaluator_message(
         extracted_msg, _, _ = _extract_message_tags(full_text)
         msg_text    = extracted_msg if extracted_msg else full_text
         # Viewer baseline/suffix highlight: split msg_text at the carried-over body
-        # portion, if msg_text begins with it. Otherwise highlight nothing.
-        if msg_text.startswith(body_prefix):
-            baseline_view = body_prefix
-            suffix_view   = msg_text[len(body_prefix):]
+        # portion. _extract_message_tags strips leading/trailing whitespace, but
+        # body_prefix is the raw substring (often with a leading newline from
+        # <message>\nBODY\n</message>) — so strip body_prefix before comparing.
+        body_prefix_norm = body_prefix.strip()
+        if body_prefix_norm and msg_text.startswith(body_prefix_norm):
+            baseline_view = body_prefix_norm
+            suffix_view   = msg_text[len(body_prefix_norm):]
         else:
             baseline_view = ""
             suffix_view   = msg_text
