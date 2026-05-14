@@ -2531,6 +2531,22 @@ def _select_beam_indices(scores: List[float], num_to_select: int,
 
 # ── Shared search-stage helpers (used by both input_search and output_search) ──
 
+# Cfg keys passed directly into _beast_single_trial_local. Both input_search and
+# output_search cfg blocks define all of these (same names, same meanings).
+_TRIAL_KWARGS_KEYS: Tuple[str, ...] = (
+    "num_beams", "candidates_per_beam",
+    "scored_candidate_length", "kept_candidate_length",
+    "unscored_filler_length", "max_num_iterations", "max_pool_size",
+    "temperature", "top_p", "beast_temperature", "eval_beam_chunk_size",
+)
+
+
+def _trial_kwargs(search_cfg) -> Dict[str, Any]:
+    """Pluck the trial hyperparams out of a search cfg block as a dict suitable
+    for `**`-unpacking into `_beast_single_trial_local`."""
+    return {k: getattr(search_cfg, k) for k in _TRIAL_KWARGS_KEYS}
+
+
 def _resolve_eos_token_id(lm: "LocalModel", truncate_at_eos: bool) -> Optional[int]:
     """EOS resolution: returns the tokenizer's eos_token_id if truncation is enabled,
     None otherwise. None == EOS is not in the sampler's allowed-token set and decoded
@@ -2764,27 +2780,10 @@ def input_search_evaluator_message(
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
 
     # Short-circuit if disabled — return Phase 1 baseline as-is (vanilla bloom).
-    if not search_cfg.get("enabled", True):
+    if not search_cfg.enabled:
         return [(baseline_msg, 0.0, baseline_msg, "")], trs, strategy
 
-    # ── Extract search hyperparams ─────────────────────────────────────────
-    num_beams                = search_cfg.get("num_beams", 5)
-    candidates_per_beam      = search_cfg.get("candidates_per_beam", 5)
-    scored_candidate_length  = search_cfg.get("scored_candidate_length", 1)
-    kept_candidate_length    = search_cfg.get("kept_candidate_length", 1)
-    unscored_filler_length   = search_cfg.get("unscored_filler_length", 0)
-    max_num_iterations       = search_cfg.get("max_num_iterations", 19)
-    max_pool_size            = search_cfg.get("max_pool_size", 20)
-    max_batch_sz             = batch_size
-    temperature              = search_cfg.get("temperature", 1.0)
-    top_p                    = search_cfg.get("top_p", 1.0)
-    beast_temperature        = search_cfg.get("beast_temperature", 0.0)
-    eval_beam_chunk_size     = search_cfg.get("eval_beam_chunk_size", None)
-    max_prefix_length        = search_cfg.get("max_prefix_length", None)
-    max_reward_output_length = search_cfg.get("max_reward_output_length", 0)
-    truncate_at_eos          = search_cfg.get("truncate_at_eos", False)
-
-    eos_token_id = _resolve_eos_token_id(lm_eval, truncate_at_eos)
+    eos_token_id = _resolve_eos_token_id(lm_eval, search_cfg.truncate_at_eos)
 
     # ── Compute baseline_prefix: raw Phase 1 output up to a cursor position ──
     # The prefix is the RAW Phase 1 content (with <strategy>/<message> tags +
@@ -2796,81 +2795,64 @@ def input_search_evaluator_message(
     #   N<0  → cursor |N| tokens before end of body
     # Downstream extraction (_extract_message_tags) strips the surrounding tags
     # so the target only receives the clean message body.
+    mpl = search_cfg.max_prefix_length
     msg_open  = re.search(r"<message>", content)
     msg_close = re.search(r"</message>", content)
     if msg_open and msg_close and msg_open.end() <= msg_close.start():
         before_msg_text = content[:msg_open.end()]  # includes <message> opener
         body_text       = content[msg_open.end():msg_close.start()]
-        if max_prefix_length is None:
+        if mpl is None:
             body_prefix = body_text
-        elif max_prefix_length == 0:
+        elif mpl == 0:
             body_prefix = ""
         else:
             body_ids = lm_eval.tokenizer.encode(body_text, add_special_tokens=False)
-            body_prefix = lm_eval.tokenizer.decode(
-                body_ids[:max_prefix_length], skip_special_tokens=True
-            )
+            body_prefix = lm_eval.tokenizer.decode(body_ids[:mpl], skip_special_tokens=True)
         baseline_prefix = before_msg_text + body_prefix
     else:
         # Phase 1 output malformed — slice the extracted baseline_msg directly.
-        if max_prefix_length is None:
+        if mpl is None:
             baseline_prefix = baseline_msg
-        elif max_prefix_length == 0:
+        elif mpl == 0:
             baseline_prefix = ""
         else:
             bm_ids = lm_eval.tokenizer.encode(baseline_msg, add_special_tokens=False)
-            baseline_prefix = lm_eval.tokenizer.decode(
-                bm_ids[:max_prefix_length], skip_special_tokens=True
-            )
+            baseline_prefix = lm_eval.tokenizer.decode(bm_ids[:mpl], skip_special_tokens=True)
 
     # ── Truncate TRS to first max_reward_output_length target-model tokens ──
-    if max_reward_output_length > 0 and trs:
+    if search_cfg.max_reward_output_length > 0 and trs:
         trs_ids = lm_target.tokenizer.encode(trs, add_special_tokens=False)
-        trs = lm_target.tokenizer.decode(trs_ids[:max_reward_output_length], skip_special_tokens=False)
+        trs = lm_target.tokenizer.decode(
+            trs_ids[:search_cfg.max_reward_output_length], skip_special_tokens=False,
+        )
 
     # ── Build sampling prefix + Latin mask via shared helpers ─────────────
     _, prefix_tokens = _build_sampling_prefix(lm_eval, eval_msgs, no_think_eval, baseline_prefix)
     prefix_length = len(prefix_tokens)
     # Allow `<`, `/`, `>` chars so the sampler can naturally emit </message> when
     # truncate_at_eos is on; otherwise stay strict.
-    extra_chars = "</>" if eos_token_id is not None else ""
     latin_token_ids = _get_or_build_latin_mask(
-        lm_eval, search_cfg.get("latin_mask", False),
-        eos_token_id, extra_chars, cache_tag="input_search", label="",
+        lm_eval, search_cfg.latin_mask, eos_token_id,
+        extra_chars="</>" if eos_token_id is not None else "",
+        cache_tag="input_search", label="",
     )
 
     # ── Bind input-search scorer (closure captures lm_target + scoring ctx) ──
     def _scorer(candidates: List[List[int]], pfx_len: int) -> List[float]:
         return _score_beast_candidates(
             lm_eval, lm_target, candidates, pfx_len,
-            target_msgs, trs, baseline_prefix, max_batch_sz,
+            target_msgs, trs, baseline_prefix, batch_size,
             eos_token_id=eos_token_id,
         )
 
-    print(
-        f"    input search (beams={num_beams}, cand/beam={candidates_per_beam}, "
-        f"iters={max_num_iterations}, scored={scored_candidate_length}, "
-        f"kept={kept_candidate_length}, filler={unscored_filler_length}, "
-        f"beast_T={beast_temperature}) ...",
-        flush=True,
-    )
+    print(f"    input search {dict(_trial_kwargs(search_cfg))} ...", flush=True)
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_sampler=lm_eval,
         prefix_tokens=prefix_tokens,
         scorer_fn=_scorer,
-        num_beams=num_beams,
-        candidates_per_beam=candidates_per_beam,
-        scored_candidate_length=scored_candidate_length,
-        kept_candidate_length=kept_candidate_length,
-        unscored_filler_length=unscored_filler_length,
-        max_num_iterations=max_num_iterations,
-        max_pool_size=max_pool_size,
-        temperature=temperature,
-        top_p=top_p,
         latin_token_ids=latin_token_ids,
-        beast_temperature=beast_temperature,
-        eval_beam_chunk_size=eval_beam_chunk_size,
         eos_token_id=eos_token_id,
+        **_trial_kwargs(search_cfg),
     )
 
     # ── Decode pool into (msg_text, score, baseline, suffix) tuples, best first ──
@@ -2944,49 +2926,26 @@ def output_search_target_response(
     searched continuation.
     """
     # ── Short-circuit if output search is disabled ─────────────────────────
-    if not output_cfg.get("enabled", False):
+    if not output_cfg.enabled:
         return [(baseline_response, 0.0, baseline_response, "")]
 
-    # ── Extract hyperparams ─────────────────────────────────────────────────
-    num_beams                = output_cfg.get("num_beams", 1)
-    candidates_per_beam      = output_cfg.get("candidates_per_beam", 25)
-    scored_candidate_length  = output_cfg.get("scored_candidate_length", 200)
-    kept_candidate_length    = output_cfg.get("kept_candidate_length", 200)
-    unscored_filler_length   = output_cfg.get("unscored_filler_length", 0)
-    max_num_iterations       = output_cfg.get("max_num_iterations", 1)
-    max_pool_size            = output_cfg.get("max_pool_size", 20)
-    max_batch_sz             = batch_size
-    temperature              = output_cfg.get("temperature", 1.0)
-    top_p                    = output_cfg.get("top_p", 1.0)
-    beast_temperature        = output_cfg.get("beast_temperature", 0.0)
-    eval_beam_chunk_size     = output_cfg.get("eval_beam_chunk_size", None)
-    max_prefix_length        = output_cfg.get("max_prefix_length", 0)
-    truncate_at_eos          = output_cfg.get("truncate_at_eos", True)
-
-    # EOS resolved from lm_target's tokenizer (it's the one doing the sampling).
-    eos_token_id = _resolve_eos_token_id(lm_target, truncate_at_eos)
+    eos_token_id = _resolve_eos_token_id(lm_target, output_cfg.truncate_at_eos)
 
     # ── Compute baseline_prefix: slice of natural target response ──────────
-    # The target's natural response has no XML tag scaffolding (unlike input_search,
-    # where Phase 1 emits <strategy>+<message> structure). So baseline_prefix is
-    # just a token-level slice of baseline_response.
-    #
+    # Target response has no XML scaffolding (unlike input_search's <message> tags),
+    # so baseline_prefix is just a token-level slice of baseline_response.
     #   None → keep full response  (cursor at end, classic suffix attack)
     #   0    → keep nothing        (cursor at start, BoN regenerates whole response)
     #   N>0  → first N tokens
     #   N<0  → drop last |N| tokens
-    if not baseline_response:
+    mpl = output_cfg.max_prefix_length
+    if not baseline_response or mpl == 0:
         baseline_prefix = ""
-    elif max_prefix_length is None:
+    elif mpl is None:
         baseline_prefix = baseline_response
-    elif max_prefix_length == 0:
-        baseline_prefix = ""
     else:
         body_ids = lm_target.tokenizer.encode(baseline_response, add_special_tokens=False)
-        if max_prefix_length > 0:
-            kept_ids = body_ids[:max_prefix_length]
-        else:
-            kept_ids = body_ids[:max(0, len(body_ids) + max_prefix_length)]
+        kept_ids = body_ids[:mpl] if mpl > 0 else body_ids[:max(0, len(body_ids) + mpl)]
         baseline_prefix = lm_target.tokenizer.decode(kept_ids, skip_special_tokens=True)
 
     # ── Build sampling prefix + Latin mask via shared helpers ─────────────
@@ -2994,8 +2953,8 @@ def output_search_target_response(
     prefix_length = len(prefix_tokens)
     # Target output has no <message> tags, so no `</>" extras in the mask.
     latin_token_ids = _get_or_build_latin_mask(
-        lm_target, output_cfg.get("latin_mask", False),
-        eos_token_id, extra_chars="", cache_tag="output_search", label="(output)",
+        lm_target, output_cfg.latin_mask, eos_token_id,
+        extra_chars="", cache_tag="output_search", label="(output)",
     )
 
     # ── Bind judge scorer (lm_eval scores, lm_target decodes candidate text) ──
@@ -3010,34 +2969,18 @@ def output_search_target_response(
             user_input=user_input,
             baseline_prefix=baseline_prefix,
             no_think_judge=no_think_judge,
-            max_batch_size=max_batch_sz,
+            max_batch_size=batch_size,
             eos_token_id=eos_token_id,
         )
 
-    print(
-        f"    output search (beams={num_beams}, cand/beam={candidates_per_beam}, "
-        f"iters={max_num_iterations}, scored={scored_candidate_length}, "
-        f"kept={kept_candidate_length}, behavior={behavior_name!r}, "
-        f"beast_T={beast_temperature}) ...",
-        flush=True,
-    )
+    print(f"    output search {dict(_trial_kwargs(output_cfg))} (behavior={behavior_name!r}) ...", flush=True)
     global_pool_seqs, global_pool_scores = _beast_single_trial_local(
         lm_sampler=lm_target,
         prefix_tokens=prefix_tokens,
         scorer_fn=_scorer,
-        num_beams=num_beams,
-        candidates_per_beam=candidates_per_beam,
-        scored_candidate_length=scored_candidate_length,
-        kept_candidate_length=kept_candidate_length,
-        unscored_filler_length=unscored_filler_length,
-        max_num_iterations=max_num_iterations,
-        max_pool_size=max_pool_size,
-        temperature=temperature,
-        top_p=top_p,
         latin_token_ids=latin_token_ids,
-        beast_temperature=beast_temperature,
-        eval_beam_chunk_size=eval_beam_chunk_size,
         eos_token_id=eos_token_id,
+        **_trial_kwargs(output_cfg),
     )
 
     # ── Decode pool into (response_text, score, baseline, suffix), best first ──
@@ -3141,14 +3084,14 @@ def run_rollout_batched_local(
                                  gpu_memory_utilization=target_gpu_util,
                                  max_model_len=target_max_len)
 
-    search_cfg       = cfg.get("input_search", {})
-    suffixes_per_scenario = search_cfg.get("suffixes_per_scenario", 1)
+    search_cfg = cfg.input_search
+    suffixes_per_scenario = search_cfg.suffixes_per_scenario
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
     # target response is used as-is.
-    output_cfg        = cfg.get("output_search", {})
-    output_search_on  = output_cfg.get("enabled", False)
+    output_cfg       = cfg.output_search
+    output_search_on = output_cfg.enabled
     output_judge_template = ""
     output_behavior_name  = ""
     if output_search_on:
@@ -3158,7 +3101,7 @@ def run_rollout_batched_local(
                 "output_search.enabled=True but 'output_search_judge_prompt' is missing "
                 "from prompts.yaml"
             )
-        output_behavior_name = output_cfg.get("behavior_name", "")
+        output_behavior_name = output_cfg.behavior_name
         if not output_behavior_name:
             raise RuntimeError(
                 "output_search.enabled=True requires output_search.behavior_name to be set"
