@@ -2734,14 +2734,14 @@ def beast_search_evaluator_message(
         # cuts at </message> or <targeted_response_start>. Falls back to full_text.
         extracted_msg, _, _ = _extract_message_tags(full_text)
         msg_text    = extracted_msg if extracted_msg else full_text
-        # Viewer baseline/suffix highlight: split msg_text at the carried-over body
-        # portion. _extract_message_tags strips leading/trailing whitespace, but
-        # body_prefix is the raw substring (often with a leading newline from
-        # <message>\nBODY\n</message>) — so strip body_prefix before comparing.
-        body_prefix_norm = body_prefix.strip()
-        if body_prefix_norm and msg_text.startswith(body_prefix_norm):
-            baseline_view = body_prefix_norm
-            suffix_view   = msg_text[len(body_prefix_norm):]
+        # Viewer baseline/suffix highlight: derive the carried-over body using the
+        # same _extract_message_tags pipeline that produced msg_text, so the two
+        # are directly comparable (identical whitespace handling, identical tag
+        # parsing). This is more robust than ad-hoc .strip() on body_prefix.
+        carried_over, _, _ = _extract_message_tags(baseline_prefix) if baseline_prefix else ("", "", "")
+        if carried_over and msg_text.startswith(carried_over):
+            baseline_view = carried_over
+            suffix_view   = msg_text[len(carried_over):]
         else:
             baseline_view = ""
             suffix_view   = msg_text
