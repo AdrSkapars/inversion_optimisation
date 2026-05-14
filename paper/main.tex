@@ -138,6 +138,13 @@
   \emph{Stub.}
 \end{abstract}
 
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/method_diagram.png}
+  \caption{\textbf{We search a tree of conversational trajectories, branching on both sides of the conversation and scoring each fan-out against the target's own probabilities.} Input-side branches are scored by target log-prefix-probability; output-side branches by a contrastive jailbroken-vs-safe logit gap. A judge scores each completed trajectory and a refiner updates the evaluator strategy for the next round.}
+  \label{fig:method}
+\end{figure*}
+
 \section{Introduction}
 
 As frontier language models are deployed into increasingly agentic settings, the worst-case behaviour they will exhibit on the long tail of \emph{natural} inputs --- realistic user turns, not engineered adversarial strings --- matters more than their average-case behaviour on a static benchmark~\citep{jones2025forecasting}.
@@ -158,7 +165,7 @@ We close this gap by recasting each behavioural rollout as a search problem over
 On the input side, we draw evaluator messages from BLOOM's existing deliberative context (strategy, scenario, open message tag), but search over them at three granularities --- token, sequence, and turn --- scored by the target's log-probability of a hypothesised behaviour-eliciting response start.
 On the output side, we use a contrastive proposal distribution --- adapted from contrastive decoding~\citep{li2023contrastive,liu2021dexperts} as a red-teaming mechanism --- that biases target-side sampling towards regions where bad continuations are concentrated, while still reporting scores under the target's own distribution.
 The whole loop is closed by a model-driven refiner that observes previous transcripts and judgement scores and produces an updated evaluator strategy for the next round.
-Section~\ref{sec:method} gives the full mechanics.
+Figure~\ref{fig:method} shows the resulting tree-search rollout end-to-end; Section~\ref{sec:method} gives the full mechanics.
 
 Empirically, the combined pipeline dominates every existing method on the main-comparison slice across elicitation, fluency, on-topic-ness, and diversity, while preserving the variance and reproducibility properties of BLOOM.
 Refined strategies transfer only weakly across target models, indicating that the gains are genuinely model-specific rather than universal jailbreak templates.
