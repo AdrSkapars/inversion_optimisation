@@ -4777,7 +4777,7 @@ cfg = DotDict({
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 2,                      # conversation turns per rollout (each turn = one target response + one BEAST evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
-        "target_before_input": False,        # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
+        "target_before_input": True,        # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
     },
     "judgment": {
