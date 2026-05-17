@@ -5054,7 +5054,7 @@ cfg = DotDict({
         "model": judge_model,                # model that generates evaluation scenarios
         "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_scenarios": 2,                  # SANITY: tiny for smoke test (normal: 25)
+        "num_scenarios": 25,                 # total scenarios to generate; more = broader coverage but slower rollout
     },
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via input search
@@ -5063,7 +5063,7 @@ cfg = DotDict({
         "target_max_tokens": 250,            # cap on target response length — reduced to match 2-5 sentence constraint
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 1,                      # SANITY: single turn (normal: 2)
+        "max_turns": 2,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": True,        # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
@@ -5081,14 +5081,14 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 1,                     # SANITY: single round (normal: 2)
+        "num_rounds": 2,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
         "between_rounds_strategise": True,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "input_search": {
         # Best-of-250 config: 250 candidates × 19 tokens = 4750 suffix tokens, matching BEAST's
         # 25 × (1+2+...+19) = 4750 — fair on target-side suffix-token compute (the actual bottleneck).
-        "enabled": False,                        # SANITY: input_search OFF to isolate output_search behavior
+        "enabled": False,                        # OFF for output_search experiments — isolates output-side optimisation
         "num_beams": 1,                          # only need to select the single best at the end
         "candidates_per_beam": 25,               # 25 × 200 = 5000 target suffix tokens, ~ matching BEAST's 4750 compute
         "scored_candidate_length": 200,          # full message length
