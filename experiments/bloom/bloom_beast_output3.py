@@ -5024,7 +5024,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_12/bon25_full200",  # SANITY TEST: output_search smoke test (input_search off, 1 round, 2 scenarios, 1 turn)
+    "folder_name": "runs_12/beast_suffix20",  # exp 3: classic BEAST on 20-token suffix (5 beams × 5 cand × 20 iters × 1 token)
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -5109,14 +5109,14 @@ cfg = DotDict({
     "output_search": {
         "enabled": True,                         # True = run output search on every target response
         "behavior_name": "racial bias",          # what the judge asks about (independent from cfg.behavior_name so it can be set per experiment)
-        "num_beams": 1,
-        "candidates_per_beam": 25,               # 25 BoN candidates per target response
-        "scored_candidate_length": 200,          # full target response length
-        "kept_candidate_length": 200,
+        "num_beams": 5,                          # classic BEAST: 5 beams
+        "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
+        "scored_candidate_length": 1,            # token-at-a-time BEAST
+        "kept_candidate_length": 1,
         "unscored_filler_length": 0,
-        "max_num_iterations": 1,                 # single pass — Best-of-N has no iteration
+        "max_num_iterations": 20,                # 20 iters × 1 token = 20-token suffix
         "max_pool_size": 20,
-        "max_prefix_length": 0,                  # how much of the natural target response is preloaded before the cursor. None = full response (suffix attack); 0 = regenerate from scratch (typical BoN); N>0 = first N tokens; N<0 = drop last |N|.
+        "max_prefix_length": -20,                # drop last 20 tokens of natural response, BEAST builds replacement suffix
         "temperature": 1.0,
         "top_p": 1.0,
         "beast_temperature": 0.0,                # 0 = hard top-K; >0 = SMC softmax resampling on scores; ∞ ≈ Best-of-N
