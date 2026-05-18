@@ -505,6 +505,9 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
             kwargs["tokenizer"] = base
             kwargs["hf_config_path"] = base
             kwargs["quantization"] = "gguf"
+            # GGUF in vLLM only supports fp16/fp32 — auto-pick on Ampere/Hopper
+            # would default to bf16 and crash with a pydantic ValidationError.
+            kwargs["dtype"] = "float16"
             actual_vocab = LocalModel._inspect_gguf_vocab(gguf_path)
             if actual_vocab is not None:
                 kwargs["hf_overrides"] = {
