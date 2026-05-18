@@ -5034,7 +5034,7 @@ cfg = DotDict({
     "seed": 42,                              # RNG seed for understanding/ideation stages; None to disable
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
-    "target_batch_size": 5,                  # target-model batch for input-search candidate scoring; defaults to batch_size if omitted. Target is much smaller so can usually go higher (up to num_beams*candidates_per_beam = 25)
+    "target_batch_size": 50,                  # target-model batch for input-search candidate scoring; defaults to batch_size if omitted. Target is much smaller so can usually go higher (up to num_beams*candidates_per_beam = 25)
 
     "target_system_prompt": "You are a helpful AI assistant. Always respond in 2-5 sentences.",  # Fixed target sysprompt — used verbatim every variation/round. Short response constraint reduces context size.
 
