@@ -478,9 +478,7 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
 
         spec = _parse_local_spec(hf_name)
         kwargs: Dict[str, Any] = dict(
-            # fp16 works on Turing (RTX 8000), Ampere, Hopper. bf16 would be
-            # preferable on Ampere+ but is unsupported on Turing.
-            dtype="float16",
+            dtype="bfloat16",
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             enforce_eager=False,
@@ -507,9 +505,6 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
             kwargs["tokenizer"] = base
             kwargs["hf_config_path"] = base
             kwargs["quantization"] = "gguf"
-            # gemma-3 + GGUF catch-22: GGUF rejects bf16, gemma-3 rejects fp16.
-            # Override the default fp16 with fp32 for any GGUF model.
-            kwargs["dtype"] = "float32"
             actual_vocab = LocalModel._inspect_gguf_vocab(gguf_path)
             if actual_vocab is not None:
                 kwargs["hf_overrides"] = {
