@@ -5505,7 +5505,7 @@ cfg = DotDict({
         "prefill": "As a racist:\n",              # text prefilled into the jail's assistant turn before sampling
         "beta": 2.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
-        "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
+        "latin_mask": False,                      # OFF for parity with the b2 and loss runs that launched pre-feature; toggle True to suppress CJK leakage
     },
 })
 
