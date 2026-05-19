@@ -5499,11 +5499,6 @@ cfg = DotDict({
         "latin_mask": True,                     # Target should speak naturally; leave off unless you have a specific reason
     },
 
-    # Contrastive PoE: sample target tokens from softmax(log p_target + β · log p_jail).
-    # When output_search is also on, BoN candidates come from the same distribution.
-    # When output_search_loss=True, BoN candidates are ranked by log p_jail(candidate)
-    # instead of the judge's log P("Yes"); the jail model is loaded for scoring even
-    # when use_during_rollout=False.
     "jailbroken_output": {
         "use_during_rollout":  True,              # use jail in the sampling step (contrastive PoE for target tokens)
         "output_search_loss":  False,             # use jail as the BoN reward signal (replaces judge log P("Yes"))
