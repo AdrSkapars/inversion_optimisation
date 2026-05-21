@@ -5474,7 +5474,7 @@ cfg = DotDict({
     "examples": [],                          # seed transcripts: [{conversation: [{role, content}]}]; used to ground understanding/ideation
 
     "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
-    "seed": 42,                              # RNG seed for understanding/ideation stages; None to disable
+    "seed": 42,                              # base RNG seed; rollout/judgment use seed+round_num so rounds are reproducible but distinct. None = no seeding (truly random)
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
     "target_batch_size": 25,                 # target-model batch for input-search candidate scoring; defaults to batch_size if omitted. Target is much smaller so can usually go higher (up to num_beams*candidates_per_beam = 25)
@@ -5599,8 +5599,10 @@ if __name__ == "__main__":
 
     base_folder = cfg.get("folder_name", "runs/default")
     num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
+    base_seed = cfg.get("seed")  # offset per round to keep vLLM samples reproducible-but-distinct across rounds
     async def run_parallel() -> bool:
         """Returns True if there was an error."""
+        global _DEFAULT_SEED
         # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
@@ -5613,6 +5615,8 @@ if __name__ == "__main__":
             with open(round_1_judgment, "r", encoding="utf-8") as f:
                 result = json.load(f)
         else:
+            if base_seed is not None:
+                _DEFAULT_SEED = base_seed + 1
             result = await run_pipeline(cfg)
             if not result:
                 print("\n  Round 1 FAILED", flush=True)
@@ -5636,6 +5640,8 @@ if __name__ == "__main__":
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
+            if base_seed is not None:
+                _DEFAULT_SEED = base_seed + round_num
             result = await run_parallel_round(
                 completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
             )
