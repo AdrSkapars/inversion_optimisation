@@ -3559,18 +3559,21 @@ def _joint_io_search_one_turn(
         behavior_understanding, scientific_motivation, behavior_name, target_model_name,
     )
 
-    # 4) Pick best (ties → first sample order).
+    # 4) Pick best (ties → first sample order) and return all candidates so the caller
+    #    can add them to a global pool for back-off / beam-search prep.
     best_idx = max(range(n_candidates), key=lambda i: (scores[i], -i))
-    best_um_clean, best_trs, best_strat = extracted[best_idx]
-    return {
-        "user_msg_for_target": user_msgs_for_target[best_idx],  # prefix-prepended if kickoff
-        "user_msg_clean":      best_um_clean,                    # cleaned <message> body, no prefix
-        "target_resp":         target_resps[best_idx],
-        "trs":                 best_trs,
-        "strategy":            best_strat,
-        "best_score":          scores[best_idx],
-        "all_scores":          scores,
-    }
+    candidates = [
+        {
+            "user_msg_for_target": user_msgs_for_target[i],
+            "user_msg_clean":      extracted[i][0],
+            "target_resp":         target_resps[i],
+            "trs":                 extracted[i][1],
+            "strategy":            extracted[i][2],
+            "score":               scores[i],
+        }
+        for i in range(n_candidates)
+    ]
+    return {"best_idx": best_idx, "candidates": candidates}
 
 
 def run_rollout_batched_local(
@@ -3886,13 +3889,16 @@ def run_rollout_batched_local(
             {"role": "user",   "content": f"{rollout_prompt_text}\n\n{kickoff_prompt}"},
         ]
 
-        # ── Branch: joint input_and_output_search path (single rep, judge-driven) ──
+        # ── Branch: joint input_and_output_search path (single rep, judge-driven + pool) ──
         if io_search_on:
             setup_ctx_len = len(eval_msgs_kickoff_ctx)
             target_msgs    = list(target_msgs_base)
             transcript_msgs = list(transcript_msgs_base)
             eval_msgs      = list(eval_msgs_kickoff_ctx)
-            last_score = 0
+            # Pool collects every (candidate transcript-so-far, score, depth) across all turns
+            # so the final saved transcript can be the globally best one — possibly a
+            # shallower turn count if deeper turns regress. Foundation for beam search later.
+            pool: List[Dict[str, Any]] = []
             for turn in range(max_turns):
                 if turn == 0:
                     # Kickoff: context already includes the scenario + kickoff prompt
@@ -3925,33 +3931,54 @@ def run_rollout_batched_local(
                     target_kickoff_prefix=target_prefix_for_turn,
                 )
 
-                # End-of-conversation sentinel: same convention as input_search path
-                if "<END>" in result["user_msg_clean"]:
+                # Add every candidate at this depth to the pool with its full transcript-so-far.
+                for c in result["candidates"]:
+                    cand_user_entry: Dict[str, Any] = {
+                        "role": "user", "content": c["user_msg_for_target"], "source": "evaluator",
+                        "targeted_response_start": c["trs"],
+                        "input_and_output_search_score": c["score"],
+                    }
+                    if c["strategy"]:
+                        cand_user_entry["strategy"] = c["strategy"]
+                    cand_messages = list(transcript_msgs) + [
+                        cand_user_entry,
+                        {"role": "assistant", "content": c["target_resp"], "source": "target",
+                         "input_and_output_search_score": c["score"]},
+                    ]
+                    pool.append({"messages": cand_messages, "score": c["score"], "depth": turn + 1})
+
+                best = result["candidates"][result["best_idx"]]
+
+                # End-of-conversation sentinel — stop extending, but keep what's in the pool.
+                if "<END>" in best["user_msg_clean"]:
                     break
 
-                # Advance state
-                target_msgs.append({"role": "user", "content": result["user_msg_for_target"]})
-                target_msgs.append({"role": "assistant", "content": result["target_resp"]})
+                # Greedy depth-first: commit best of this turn and extend.
+                target_msgs.append({"role": "user", "content": best["user_msg_for_target"]})
+                target_msgs.append({"role": "assistant", "content": best["target_resp"]})
                 if turn == 0:
-                    eval_msgs = list(eval_msgs) + [{"role": "assistant", "content": result["user_msg_clean"]}]
+                    eval_msgs = list(eval_msgs) + [{"role": "assistant", "content": best["user_msg_clean"]}]
                 else:
-                    eval_msgs = eval_msgs_turn + [{"role": "assistant", "content": result["user_msg_clean"]}]
+                    eval_msgs = eval_msgs_turn + [{"role": "assistant", "content": best["user_msg_clean"]}]
 
-                user_entry: Dict[str, Any] = {
-                    "role": "user", "content": result["user_msg_for_target"], "source": "evaluator",
-                    "targeted_response_start": result["trs"],
-                    "input_and_output_search_score": result["best_score"],
+                committed_user: Dict[str, Any] = {
+                    "role": "user", "content": best["user_msg_for_target"], "source": "evaluator",
+                    "targeted_response_start": best["trs"],
+                    "input_and_output_search_score": best["score"],
                 }
-                if result["strategy"]:
-                    user_entry["strategy"] = result["strategy"]
-                transcript_msgs.append(user_entry)
+                if best["strategy"]:
+                    committed_user["strategy"] = best["strategy"]
+                transcript_msgs.append(committed_user)
                 transcript_msgs.append({
-                    "role": "assistant", "content": result["target_resp"], "source": "target",
-                    "input_and_output_search_score": result["best_score"],
+                    "role": "assistant", "content": best["target_resp"], "source": "target",
+                    "input_and_output_search_score": best["score"],
                 })
-                last_score = result["best_score"]
 
-            # Save transcript (same schema as the existing path)
+            # Pick the globally best pool entry — may be shallower than max_turns if deeper
+            # turns regressed. Ties → first occurrence (earliest depth, earliest sample order).
+            best_pool_idx = max(range(len(pool)), key=lambda i: (pool[i]["score"], -i))
+            best_pool = pool[best_pool_idx]
+
             transcript_data = {
                 "metadata": {
                     "evaluator_model": evaluator_model_id,
@@ -3964,20 +3991,26 @@ def run_rollout_batched_local(
                     "created_at": datetime.now().isoformat(),
                     "search_type":        "input_and_output_search",
                     "n_candidates":       io_n_candidates,
+                    "pool_best_depth":    best_pool["depth"],
+                    "pool_best_score":    best_pool["score"],
+                    "pool_size":          len(pool),
                 },
-                "messages":  transcript_msgs,
+                "messages":  best_pool["messages"],
                 "judgment":  None,
             }
             filename = f"transcript_v{var_idx}r1.json"
             save_json(transcript_data, transcripts_dir / filename)
-            print(f"  Rollout v{var_idx}r1 done ({len(transcript_msgs)//2} turn pairs, io_search last_score={last_score})", flush=True)
+            print(f"  Rollout v{var_idx}r1 done — pool={len(pool)} cands, "
+                  f"best score={best_pool['score']} at depth {best_pool['depth']}/{max_turns}", flush=True)
             rollouts.append({
                 "variation_number":      var_idx,
                 "variation_description": var_desc,
                 "repetition_number":     1,
-                "num_turns":             len(transcript_msgs),
+                "num_turns":             len(best_pool["messages"]),
                 "transcript_file":       filename,
-                "io_search_last_score":  last_score,
+                "io_search_best_score":  best_pool["score"],
+                "io_search_best_depth":  best_pool["depth"],
+                "io_search_pool_size":   len(pool),
             })
             continue  # skip the existing kickoff+turn flow for this variation
 
