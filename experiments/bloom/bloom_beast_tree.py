@@ -5602,7 +5602,10 @@ if __name__ == "__main__":
     base_seed = cfg.get("seed")  # offset per round to keep vLLM samples reproducible-but-distinct across rounds
     async def run_parallel() -> bool:
         """Returns True if there was an error."""
-        global _DEFAULT_SEED
+        global _DEFAULT_SEED, _DEFAULT_LOCAL_GPU_ID
+        # Set the default GPU here too: run_pipeline sets it, but is skipped on resume (round_1/judgment.json exists),
+        # so without this the judgment stage would spawn a redundant judge worker on GPU 0.
+        _DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
         # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
