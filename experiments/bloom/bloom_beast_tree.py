@@ -3692,6 +3692,7 @@ def run_rollout_batched_local(
     io_search_cfg = cfg.get("input_and_output_search", {}) or {}
     io_search_on  = bool(io_search_cfg.get("enabled", False))
     io_n_candidates = int(io_search_cfg.get("n_candidates", 25))
+    io_max_pool_size = int(io_search_cfg.get("max_pool_size", 20))
     if io_search_on:
         if bool(cfg.input_search.get("enabled", False)) or bool(cfg.output_search.get("enabled", False)):
             raise RuntimeError(
@@ -3702,7 +3703,7 @@ def run_rollout_batched_local(
             raise RuntimeError("input_and_output_search.n_candidates must be >= 1")
         # Judge runs on the eval GPU (shares the eval Gemma worker).
         lm_judge_io = lm_eval
-        print(f"  [input_and_output_search] enabled — N={io_n_candidates} candidates/turn, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        print(f"  [input_and_output_search] enabled — N={io_n_candidates} candidates/turn, max_pool_size={io_max_pool_size}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -3946,6 +3947,12 @@ def run_rollout_batched_local(
                          "input_and_output_search_score": c["score"]},
                     ]
                     pool.append({"messages": cand_messages, "score": c["score"], "depth": turn + 1})
+
+                # Trim pool to max_pool_size, keeping highest-score entries.
+                # Tie-break on insertion order (stable sort + descending score keeps earlier first).
+                if len(pool) > io_max_pool_size:
+                    pool.sort(key=lambda p: -p["score"])
+                    pool = pool[:io_max_pool_size]
 
                 best = result["candidates"][result["best_idx"]]
 
@@ -5884,8 +5891,9 @@ cfg = DotDict({
         # judge each transcript-so-far with the full judge model (using cfg.judgment.thinking and
         # cfg.judgment.max_tokens), keep the top-1 by behavior_presence (ties → first sample).
         # Mutually exclusive with input_search.enabled and output_search.enabled.
-        "enabled":      False,
-        "n_candidates": 25,
+        "enabled":       False,
+        "n_candidates":  25,
+        "max_pool_size": 20,    # cap on candidates retained across all turns; final transcript = top-1 of pool
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
