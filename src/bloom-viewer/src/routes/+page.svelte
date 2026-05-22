@@ -346,8 +346,22 @@
 		</div>
 	</div>
 
+	<!-- DEBUG: bestAcrossRounds visibility (remove after debugging) -->
+	<div class="bg-yellow-100 border border-yellow-400 text-xs p-2 font-mono">
+		DEBUG — viewMode: {viewSettings.value.viewMode} |
+		currentPath: "{currentPath}" |
+		roundSuites: {roundSuites.length} |
+		bestAcrossRounds: {bestAcrossRounds ? `entries=${bestAcrossRounds.count} avg=${bestAcrossRounds.avgScore.toFixed(2)}` : 'null'} |
+		allTranscripts: {allTranscripts.length} |
+		filteredFolderTree: {filteredFolderTree?.length ?? 0} |
+		filteredFolderTreeWithBest: {filteredFolderTreeWithBest?.length ?? 0}
+		{#if allTranscripts.length > 0}
+			| sample _filePath: "{(allTranscripts[0] as any)._filePath}" id: "{(allTranscripts[0] as any).id}"
+		{/if}
+	</div>
+
 	<!-- Filters -->
-	<FilterControls 
+	<FilterControls
 		{scoreTypes} 
 		filteredCount={filteredTranscriptCount} 
 		totalCount={totalTranscriptCount} 
