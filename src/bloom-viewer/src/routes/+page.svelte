@@ -147,6 +147,87 @@
 	});
 	let hasRounds = $derived(roundSuites.length >= 1);
 
+	// "Best across rounds" computation: for each variation, find the earliest round whose
+	// transcript has the highest behavior_presence score. Returns a synthetic round summary
+	// and a list of winning TranscriptDisplay objects (each pointing at the real source file).
+	// Only produced when there are 2+ rounds (no point in 1-round case).
+	function _parseVarRep(idOrPath: string): { v: number; r: number } | null {
+		const m = idOrPath.match(/transcript_v(\d+)r(\d+)/);
+		return m ? { v: parseInt(m[1]), r: parseInt(m[2]) } : null;
+	}
+	let bestAcrossRounds = $derived.by(() => {
+		if (roundSuites.length < 2) return null;
+		// Collect (round_number, transcript) tuples filtered to transcripts living under a round_N folder.
+		const byVar = new Map<number, { round: number; transcript: any; score: number }>();
+		for (const r of roundSuites) {
+			for (const t of allTranscripts) {
+				const fp = (t as any)._filePath || '';
+				// Filter: this transcript's _filePath starts with the round's path
+				if (!fp.startsWith(r.path + '/') && fp !== r.path) continue;
+				const parsed = _parseVarRep((t as any).id || fp);
+				if (!parsed) continue;
+				const score = (t.scores as any)?.behavior_presence;
+				if (score == null) continue;
+				const existing = byVar.get(parsed.v);
+				// Earliest round on tie: skip if existing round number is lower-or-equal AND score is the same
+				if (!existing || score > existing.score) {
+					byVar.set(parsed.v, { round: r.number, transcript: t, score });
+				}
+			}
+		}
+		const entries = Array.from(byVar.values()).sort((a, b) => {
+			const ap = _parseVarRep((a.transcript as any).id || '');
+			const bp = _parseVarRep((b.transcript as any).id || '');
+			return (ap?.v ?? 0) - (bp?.v ?? 0);
+		});
+		if (entries.length === 0) return null;
+		const avgScore = entries.reduce((s, e) => s + e.score, 0) / entries.length;
+		const elicRate = entries.filter(e => e.score >= 5).length / entries.length;
+		return {
+			entries,
+			count: entries.length,
+			avgScore,
+			elicRate,
+		};
+	});
+
+	// Virtual "best" folder injected at the top of filteredFolderTree when 2+ rounds exist.
+	// Mirrors the shape of the existing round_N folders so the rest of the UI just works.
+	let filteredFolderTreeWithBest = $derived.by(() => {
+		const base = filteredFolderTree || [];
+		if (!bestAcrossRounds) return base;
+		const bestFolder: any = {
+			id: 'best',
+			name: 'best',
+			path: 'best',
+			type: 'folder',
+			isEmpty: false,
+			transcriptCount: bestAcrossRounds.count,
+			subRows: bestAcrossRounds.entries.map(e => {
+				const t = e.transcript as any;
+				const fileName = (t._filePath || '').split('/').pop() || t.id;
+				const displayId = fileName.replace(/^transcript_/, '').replace(/\.json$/, '') + ` (R${e.round})`;
+				return {
+					id: displayId,
+					name: (t.summary || '').substring(0, 50) + ((t.summary || '').length > 50 ? '...' : ''),
+					path: t._filePath || t.id,
+					type: 'transcript' as const,
+					model: t.model,
+					split: t.split,
+					summary: t.summary,
+					scores: t.scores,
+					concerningScore: t.concerningScore,
+					judgeSummary: t.judgeSummary,
+					justification: t.justification,
+					tags: t.tags,
+					_filePath: t._filePath,            // preserve the real path for click navigation
+					originalTranscript: t,
+				};
+			}),
+		};
+		return [bestFolder, ...base];
+	});
+
 	// Detect which optional quality columns are present across all rounds
 	let roundQualityColumns = $derived.by(() => {
 		const possible: { key: string; label: string; invert: boolean; raw?: boolean }[] = [
@@ -322,6 +403,25 @@
 									</tr>
 								</thead>
 								<tbody>
+									{#if bestAcrossRounds}
+										<tr class="bg-base-200/60 font-semibold">
+											<td class="font-bold">Best</td>
+											<td>{bestAcrossRounds.count}</td>
+											<td>
+												<span class="badge badge-sm" style={getScoreColorContinuous(bestAcrossRounds.avgScore)}>
+													{bestAcrossRounds.avgScore.toFixed(2)}
+												</span>
+											</td>
+											<td>
+												<span class="badge badge-sm" style={getScoreColorContinuous(bestAcrossRounds.elicRate * 10)}>
+													{(bestAcrossRounds.elicRate * 100).toFixed(1)}%
+												</span>
+											</td>
+											{#each roundQualityColumns as _col}
+												<td><span class="text-base-content/50">—</span></td>
+											{/each}
+										</tr>
+									{/if}
 									{#each roundSuites as round, i}
 										{@const stats = round.judgment?.summaryStatistics}
 										{@const avgScore = stats?.average_behavior_presence_score}
@@ -376,7 +476,7 @@
 
 				<h2 class="text-2xl font-bold mb-6">Evaluation Suites</h2>
 
-				{#each filteredFolderTree as suite}
+				{#each filteredFolderTreeWithBest as suite}
 					{#if suite.type === 'folder'}
 						{@const suiteJudgment = getJudgmentData(suite.path)}
 						<div class="collapse collapse-arrow bg-base-100 border border-base-300 shadow-sm">
