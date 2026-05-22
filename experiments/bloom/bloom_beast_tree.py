@@ -859,6 +859,7 @@ def batch_generate_local(
     temperature: float,
     no_think: bool = False,
     seed: Optional[int] = None,
+    allowed_token_ids: Optional[List[int]] = None,
 ) -> List[str]:
     """
     Batched generation via vLLM. Returns one string per input conversation, decoded
@@ -866,6 +867,9 @@ def batch_generate_local(
 
     no_think: if True, pre-fills <think>\\n\\n</think> after the generation prompt
     so that thinking models skip their reasoning phase entirely.
+
+    allowed_token_ids: if provided, restricts sampling to this token-id set
+    (vLLM SamplingParams.allowed_token_ids). Used by io_search latin-masking.
     """
     if not messages_list:
         return []
@@ -887,6 +891,8 @@ def batch_generate_local(
     effective_seed = seed if seed is not None else _DEFAULT_SEED
     if effective_seed is not None:
         sampling_kwargs["seed"] = effective_seed
+    if allowed_token_ids is not None:
+        sampling_kwargs["allowed_token_ids"] = allowed_token_ids
     return lm.worker.generate_text(prompts, sampling_kwargs)
 
 
@@ -3509,6 +3515,8 @@ def _joint_io_search_one_turn(
     scientific_motivation: str,
     behavior_name: str,
     target_model_name: Optional[str],
+    eval_allowed_token_ids: Optional[List[int]] = None,
+    target_allowed_token_ids: Optional[List[int]] = None,
 ) -> List[Dict[str, Any]]:
     """Per-turn beam expansion: for each beam, sample candidates_per_beam (user_msg,
     target_resp) pairs, judge every (transcript-so-far) with the full judge, return
@@ -3541,6 +3549,7 @@ def _joint_io_search_one_turn(
 
     eval_raw_list = batch_generate_local(
         lm_eval, eval_prompts, eval_max_tokens, temperature, no_think=no_think_eval,
+        allowed_token_ids=eval_allowed_token_ids,
     )
     extracted: List[Tuple[str, str, str]] = [_extract_message_tags(r) for r in eval_raw_list]
 
@@ -3557,6 +3566,7 @@ def _joint_io_search_one_turn(
     ]
     target_raw_list = batch_generate_local(
         lm_target, target_msg_lists, target_max_tokens, temperature, no_think=no_think_target,
+        allowed_token_ids=target_allowed_token_ids,
     )
     target_resps = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
 
@@ -3707,6 +3717,10 @@ def run_rollout_batched_local(
     io_num_beams           = int(io_search_cfg.get("num_beams", 1))
     io_candidates_per_beam = int(io_search_cfg.get("candidates_per_beam", 25))
     io_max_pool_size       = int(io_search_cfg.get("max_pool_size", 20))
+    io_input_latin_mask    = bool(io_search_cfg.get("input_latin_mask", False))
+    io_output_latin_mask   = bool(io_search_cfg.get("output_latin_mask", False))
+    io_eval_allowed_ids: Optional[List[int]] = None
+    io_target_allowed_ids: Optional[List[int]] = None
     if io_search_on:
         if bool(cfg.input_search.get("enabled", False)) or bool(cfg.output_search.get("enabled", False)):
             raise RuntimeError(
@@ -3719,7 +3733,22 @@ def run_rollout_batched_local(
             raise RuntimeError("input_and_output_search.candidates_per_beam must be >= 1")
         # Judge runs on the eval GPU (shares the eval Gemma worker).
         lm_judge_io = lm_eval
-        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        # Build latin masks. Always allow EOS (so the model can terminate naturally,
+        # equivalent to truncate_at_eos=True). Input mask also allows `<`, `/`, `>` so the
+        # eval can emit </message> and <targeted_response_start> tags.
+        if io_input_latin_mask:
+            io_eval_allowed_ids = _get_or_build_latin_mask(
+                lm_eval, True,
+                _resolve_eos_token_id(lm_eval, True),
+                extra_chars="</>", cache_tag="io_search_input", label="(io input)",
+            )
+        if io_output_latin_mask:
+            io_target_allowed_ids = _get_or_build_latin_mask(
+                lm_target, True,
+                _resolve_eos_token_id(lm_target, True),
+                extra_chars="", cache_tag="io_search_output", label="(io output)",
+            )
+        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -3936,6 +3965,8 @@ def run_rollout_batched_local(
                     no_think_eval, no_think_target,
                     cfg, prompts_yaml,
                     behavior_understanding, scientific_motivation, behavior_name, target_model_name,
+                    eval_allowed_token_ids=io_eval_allowed_ids,
+                    target_allowed_token_ids=io_target_allowed_ids,
                 )
 
                 # Pool: every candidate gets a transcript snapshot at this depth.
@@ -5943,6 +5974,11 @@ cfg = DotDict({
         "num_beams":           1,    # 1 = simple BoN; e.g. 5 = beam search 5×5
         "candidates_per_beam": 25,   # candidates sampled per beam per turn
         "max_pool_size":       20,   # cap on candidates retained across all turns; final transcript = top-1 of pool
+        # Latin-token masking during sampling. Both masks always include EOS so the model can
+        # terminate naturally (equivalent to truncate_at_eos=True in input_search/output_search).
+        # Input mask also includes `<`, `/`, `>` so the eval can emit </message> / TRS tags.
+        "input_latin_mask":    False,
+        "output_latin_mask":   False,
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
