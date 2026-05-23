@@ -5901,6 +5901,8 @@ cfg = DotDict({
         "target": target_model,              # model under evaluation
         "evaluator_max_tokens": 1200,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; tags auto-closed if truncated)
         "target_max_tokens": 250,            # cap on target response length — reduced to match 2-5 sentence constraint
+        "evaluator_max_model_len": 8192,     # vLLM context window for the eval model
+        "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 2,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
