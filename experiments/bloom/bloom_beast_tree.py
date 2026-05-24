@@ -3719,6 +3719,7 @@ def run_rollout_batched_local(
     io_max_pool_size       = int(io_search_cfg.get("max_pool_size", 20))
     io_input_latin_mask    = bool(io_search_cfg.get("input_latin_mask", False))
     io_output_latin_mask   = bool(io_search_cfg.get("output_latin_mask", False))
+    io_use_pool            = bool(io_search_cfg.get("use_pool", False))
     io_eval_allowed_ids: Optional[List[int]] = None
     io_target_allowed_ids: Optional[List[int]] = None
     if io_search_on:
@@ -3748,7 +3749,7 @@ def run_rollout_batched_local(
                 _resolve_eos_token_id(lm_target, True),
                 extra_chars="", cache_tag="io_search_output", label="(io output)",
             )
-        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -3969,68 +3970,32 @@ def run_rollout_batched_local(
                     target_allowed_token_ids=io_target_allowed_ids,
                 )
 
-                # Pool: every candidate gets a transcript snapshot at this depth.
-                for c in cands:
-                    cand_user_entry: Dict[str, Any] = {
-                        "role": "user", "content": c["user_msg_for_target"], "source": "evaluator",
-                        "targeted_response_start": c["trs"],
-                        "input_and_output_search_score": c["score"],
-                    }
-                    if c["strategy"]:
-                        cand_user_entry["strategy"] = c["strategy"]
-                    cand_messages = list(beams[c["beam_idx"]]["transcript_prior"]) + [
-                        cand_user_entry,
-                        {"role": "assistant", "content": c["target_resp"], "source": "target",
-                         "input_and_output_search_score": c["score"]},
-                    ]
-                    pool.append({"messages": cand_messages, "score": c["score"], "depth": turn + 1})
-
-                if len(pool) > io_max_pool_size:
-                    pool.sort(key=lambda p: -p["score"])
-                    pool = pool[:io_max_pool_size]
-
-                # Pick top num_beams candidates by score, ties broken by earlier sample order.
-                # Drop candidates that emitted <END> — they don't extend.
-                indexed = [(i, c) for i, c in enumerate(cands) if "<END>" not in c["user_msg_clean"]]
-                indexed.sort(key=lambda x: (-x[1]["score"], x[0]))
-                top = indexed[:io_num_beams]
-
-                next_beams: List[Dict[str, Any]] = []
-                for _orig_idx, c in top:
-                    parent = beams[c["beam_idx"]]
+                # Helper: build the beam state that would extend `parent` with candidate `c` at
+                # `depth` (= turn+1). Used for both pool insertion and next-beam construction.
+                def _build_child_state(parent: Dict[str, Any], c: Dict[str, Any], depth: int):
                     new_target_msgs = list(parent["target_msgs_prior"]) + [
                         {"role": "user", "content": c["user_msg_for_target"]},
                         {"role": "assistant", "content": c["target_resp"]},
                     ]
-                    committed_user: Dict[str, Any] = {
+                    committed_user_e: Dict[str, Any] = {
                         "role": "user", "content": c["user_msg_for_target"], "source": "evaluator",
                         "targeted_response_start": c["trs"],
                         "input_and_output_search_score": c["score"],
                     }
                     if c["strategy"]:
-                        committed_user["strategy"] = c["strategy"]
+                        committed_user_e["strategy"] = c["strategy"]
                     new_transcript = list(parent["transcript_prior"]) + [
-                        committed_user,
+                        committed_user_e,
                         {"role": "assistant", "content": c["target_resp"], "source": "target",
                          "input_and_output_search_score": c["score"]},
                     ]
-                    # Eval context: append this candidate's clean message body, then build the
-                    # next-turn followup prompt for use as the new eval_ctx.
-                    if turn == 0:
-                        eval_msgs_full_after = list(parent["eval_msgs_full"]) + [
-                            {"role": "assistant", "content": c["user_msg_clean"]}
-                        ]
-                    else:
-                        # parent["eval_msgs_full"] already includes the followup prompt that
-                        # produced this candidate, so just append the clean reply.
-                        eval_msgs_full_after = list(parent["eval_msgs_full"]) + [
-                            {"role": "assistant", "content": c["user_msg_clean"]}
-                        ]
-
-                    if turn + 1 < max_turns:
+                    eval_msgs_full_after = list(parent["eval_msgs_full"]) + [
+                        {"role": "assistant", "content": c["user_msg_clean"]}
+                    ]
+                    if depth < max_turns:
                         followup_prompt = _build_evaluator_followup(
                             c["target_resp"], None,
-                            turn + 1, max_turns,
+                            depth, max_turns,
                             between_turns_strategise=between_turns_strategise,
                             partial_history=history_turns is not None,
                             target_before_input=target_before_input,
@@ -4043,16 +4008,51 @@ def run_rollout_batched_local(
                         )
                         next_eval_msgs_full = eval_msgs_with_followup
                     else:
-                        next_eval_ctx = []          # unused — won't expand further
+                        next_eval_ctx = []
                         next_eval_msgs_full = eval_msgs_full_after
-
-                    next_beams.append({
+                    return {
                         "eval_ctx":              next_eval_ctx,
                         "target_msgs_prior":     new_target_msgs,
                         "transcript_prior":      new_transcript,
                         "eval_msgs_full":        next_eval_msgs_full,
-                        "target_kickoff_prefix": "",   # only the very first turn uses the kickoff prefix
+                        "target_kickoff_prefix": "",  # only the very first beam carries the kickoff prefix
+                    }, new_transcript
+
+                # Pool: every candidate gets a transcript snapshot at this depth + full beam
+                # state (so it can be re-expanded later under use_pool=True).
+                for c in cands:
+                    child_state, cand_messages = _build_child_state(beams[c["beam_idx"]], c, turn + 1)
+                    pool.append({
+                        "messages":   cand_messages,
+                        "score":      c["score"],
+                        "depth":      turn + 1,
+                        "beam_state": child_state,
+                        "expanded":   False,
+                        "ended":      "<END>" in c["user_msg_clean"],
                     })
+
+                if len(pool) > io_max_pool_size:
+                    pool.sort(key=lambda p: -p["score"])
+                    pool = pool[:io_max_pool_size]
+
+                # Build next beams: either from this turn's candidates (fixed-depth beam) or
+                # from top-K unexpanded pool entries (best-first).
+                next_beams: List[Dict[str, Any]] = []
+                if io_use_pool:
+                    eligible = [
+                        (i, p) for i, p in enumerate(pool)
+                        if not p["expanded"] and not p["ended"] and p["depth"] < max_turns
+                    ]
+                    eligible.sort(key=lambda x: (-x[1]["score"], x[0]))
+                    for _i, p in eligible[:io_num_beams]:
+                        p["expanded"] = True
+                        next_beams.append(p["beam_state"])
+                else:
+                    indexed = [(i, c) for i, c in enumerate(cands) if "<END>" not in c["user_msg_clean"]]
+                    indexed.sort(key=lambda x: (-x[1]["score"], x[0]))
+                    for _orig_idx, c in indexed[:io_num_beams]:
+                        child_state, _ = _build_child_state(beams[c["beam_idx"]], c, turn + 1)
+                        next_beams.append(child_state)
 
                 beams = next_beams
 
@@ -4078,6 +4078,7 @@ def run_rollout_batched_local(
                     "search_type":        "input_and_output_search",
                     "num_beams":          io_num_beams,
                     "candidates_per_beam": io_candidates_per_beam,
+                    "use_pool":           io_use_pool,
                 },
                 "messages":  best_pool["messages"],
                 "judgment":  None,
@@ -5976,6 +5977,11 @@ cfg = DotDict({
         "num_beams":           1,    # 1 = simple BoN; e.g. 5 = beam search 5×5
         "candidates_per_beam": 25,   # candidates sampled per beam per turn
         "max_pool_size":       20,   # cap on candidates retained across all turns; final transcript = top-1 of pool
+        # When use_pool=False (default): next beams are top-K of THIS turn's candidates → fixed-depth beam search.
+        # When use_pool=True: candidates go into the pool, next beams = top-K UNEXPANDED pool entries → best-first
+        # tree search. With num_beams=1 + use_pool=True this is plain best-first; pool entries at max depth are
+        # filtered out (can't extend further), and we still loop max_turns iterations for compute parity.
+        "use_pool":            False,
         # Latin-token masking during sampling. Both masks always include EOS so the model can
         # terminate naturally (equivalent to truncate_at_eos=True in input_search/output_search).
         # Input mask also includes `<`, `/`, `>` so the eval can emit </message> / TRS tags.
