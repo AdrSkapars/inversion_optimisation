@@ -3498,12 +3498,53 @@ def _judge_partial_transcripts(
     return scores
 
 
+def _io_sample_turn_batch(
+    lm_eval: "LocalModel",
+    lm_target: "LocalModel",
+    eval_prompts: List[List[Dict[str, Any]]],
+    target_msg_lists: List[List[Dict[str, Any]]],
+    eval_max_tokens: int,
+    target_max_tokens: int,
+    temperature: float,
+    no_think_eval: bool,
+    no_think_target: bool,
+    eval_allowed_token_ids: Optional[List[int]],
+    target_allowed_token_ids: Optional[List[int]],
+    lm_jail: Optional["LocalModel"],
+    jail_runtime_cfg: Optional[Dict[str, Any]],
+) -> Tuple[List[Tuple[str, str, str]], List[str]]:
+    """One batched turn-sampling pass: eval generates messages, target responds.
+    Returns (extracted_eval_outputs, target_responses)."""
+    eval_raw_list = batch_generate_local(
+        lm_eval, eval_prompts, eval_max_tokens, temperature,
+        no_think=no_think_eval, allowed_token_ids=eval_allowed_token_ids,
+    )
+    extracted: List[Tuple[str, str, str]] = [_extract_message_tags(r) for r in eval_raw_list]
+
+    # target_msg_lists is pre-built by the caller (so kickoff prefix can be applied per-call).
+    if (lm_jail is not None and jail_runtime_cfg is not None
+            and jail_runtime_cfg.get("use_during_rollout", False)):
+        target_raw_list = batch_generate_contrastive_local(
+            lm_target, lm_jail, jail_runtime_cfg,
+            target_msg_lists, target_max_tokens, temperature, no_think_target,
+        )
+    else:
+        target_raw_list = batch_generate_local(
+            lm_target, target_msg_lists, target_max_tokens, temperature,
+            no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
+        )
+    target_resps = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
+    return extracted, target_resps
+
+
 def _joint_io_search_one_turn(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
     lm_judge: "LocalModel",
     beams: List[Dict[str, Any]],
     candidates_per_beam: int,
+    chain_lens: List[int],
+    build_next_state,
     eval_max_tokens: int,
     target_max_tokens: int,
     temperature: float,
@@ -3520,28 +3561,28 @@ def _joint_io_search_one_turn(
     lm_jail: Optional["LocalModel"] = None,
     jail_runtime_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Per-turn beam expansion: for each beam, sample candidates_per_beam (user_msg,
-    target_resp) pairs, judge every (transcript-so-far) with the full judge, return
-    all candidates so the caller can pick top-K beams and update a global pool.
+    """Per-step beam expansion with optional lookahead chains.
 
-    Each beam dict carries the state needed to continue from that trajectory:
-        beam = {
-            "eval_ctx":              List[Dict] — eval prompt (already stripped/truncated for this turn),
-            "target_msgs_prior":     List[Dict] — target conversation up to this turn,
-            "transcript_prior":      List[Dict] — committed transcript_msgs so far,
-            "target_kickoff_prefix": str       — only set on turn 0 of a kickoff beam,
-        }
+    For each input beam, samples candidates_per_beam first-turn extensions (with branching),
+    then for each candidate simulates up to chain_lens[bi]-1 ADDITIONAL turns (no branching,
+    each candidate continues independently). The judge scores each candidate's CHAIN-END
+    transcript.
 
-    All N*K candidates are produced in 2 batched generate calls (eval + target) and one
-    batched judge pass. Returned candidates carry `beam_idx` so the caller can map back
-    to the parent beam when extending.
+    `build_next_state(parent, turn)` is a caller-provided closure that builds the post-turn
+    beam state (eval_ctx, target_msgs_prior, transcript_prior, eval_msgs_full, depth, etc.)
+    given a parent state and a turn dict. Used both for the lookahead extensions and for the
+    chain itself (the caller can replay the chain over the parent beam to build commit states).
+
+    Returns one dict per candidate with keys:
+      beam_idx, score, chain (list of turn dicts, length 1..chain_lens[bi]),
+      chain_end_state (the state AFTER the last chain turn), ended (bool, hit <END>).
     """
     K = len(beams)
     if K == 0:
         return []
     N = candidates_per_beam
 
-    # 1) Build N*K eval prompts: K beams × N replicates each.
+    # ── Step 1: first turn of each chain (branched: K*N candidates) ────────────────
     eval_prompts: List[List[Dict[str, Any]]] = []
     beam_indices: List[int] = []
     for bi, beam in enumerate(beams):
@@ -3549,66 +3590,121 @@ def _joint_io_search_one_turn(
             eval_prompts.append(list(beam["eval_ctx"]))
             beam_indices.append(bi)
 
+    # Target prompts need the kickoff prefix applied for kickoff beams.
+    # (Built after we have the eval outputs.)
+    extracted1, target_resps1 = [], []
     eval_raw_list = batch_generate_local(
-        lm_eval, eval_prompts, eval_max_tokens, temperature, no_think=no_think_eval,
-        allowed_token_ids=eval_allowed_token_ids,
+        lm_eval, eval_prompts, eval_max_tokens, temperature,
+        no_think=no_think_eval, allowed_token_ids=eval_allowed_token_ids,
     )
-    extracted: List[Tuple[str, str, str]] = [_extract_message_tags(r) for r in eval_raw_list]
+    extracted1 = [_extract_message_tags(r) for r in eval_raw_list]
 
-    # 2) For each candidate, build the target prompt conditioned on that candidate's user_msg.
-    user_msgs_for_target: List[str] = []
-    for i, (um, _trs, _strat) in enumerate(extracted):
+    user_msgs_for_target1: List[str] = []
+    for i, (um, _trs, _strat) in enumerate(extracted1):
         prefix = beams[beam_indices[i]].get("target_kickoff_prefix", "") or ""
-        user_msgs_for_target.append(
-            ((prefix.strip() + " ") if prefix else "") + um
-        )
-    target_msg_lists = [
-        list(beams[beam_indices[i]]["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target[i]}]
-        for i in range(len(extracted))
+        user_msgs_for_target1.append(((prefix.strip() + " ") if prefix else "") + um)
+    target_msg_lists1 = [
+        list(beams[beam_indices[i]]["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target1[i]}]
+        for i in range(K * N)
     ]
-    # Dispatch to contrastive PoE sampling when jail rollout is active. Note:
-    # batch_generate_contrastive_local manages its own latin mask via
-    # jail_runtime_cfg["latin_mask"], so target_allowed_token_ids is ignored in
-    # this branch.
     if (lm_jail is not None and jail_runtime_cfg is not None
             and jail_runtime_cfg.get("use_during_rollout", False)):
         target_raw_list = batch_generate_contrastive_local(
             lm_target, lm_jail, jail_runtime_cfg,
-            target_msg_lists, target_max_tokens, temperature, no_think_target,
+            target_msg_lists1, target_max_tokens, temperature, no_think_target,
         )
     else:
         target_raw_list = batch_generate_local(
-            lm_target, target_msg_lists, target_max_tokens, temperature, no_think=no_think_target,
-            allowed_token_ids=target_allowed_token_ids,
+            lm_target, target_msg_lists1, target_max_tokens, temperature,
+            no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
         )
-    target_resps = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
+    target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
 
-    # 3) Build N*K partial transcripts for batched judging.
-    partial_transcripts: List[List[Dict[str, Any]]] = []
-    for i, (um, tr) in enumerate(zip(user_msgs_for_target, target_resps)):
-        partial_transcripts.append(
-            list(beams[beam_indices[i]]["transcript_prior"])
-            + [{"role": "user", "content": um, "source": "evaluator"},
-               {"role": "assistant", "content": tr, "source": "target"}]
+    # Build per-candidate state after first turn.
+    cand_chains: List[List[Dict[str, Any]]] = []
+    cand_states: List[Dict[str, Any]] = []
+    cand_ended:  List[bool] = []
+    for i in range(K * N):
+        first_turn = {
+            "user_msg_for_target": user_msgs_for_target1[i],
+            "user_msg_clean":      extracted1[i][0],
+            "target_resp":         target_resps1[i],
+            "trs":                 extracted1[i][1],
+            "strategy":            extracted1[i][2],
+        }
+        cand_chains.append([first_turn])
+        cand_states.append(build_next_state(beams[beam_indices[i]], first_turn))
+        cand_ended.append("<END>" in first_turn["user_msg_clean"])
+
+    # ── Step 2: lookahead loop (no branching) ──────────────────────────────────────
+    max_chain_len = max(chain_lens) if chain_lens else 1
+    for la_step in range(1, max_chain_len):
+        # Active candidates: chain not done per its beam's chain_len, not ended, eval_ctx non-empty (next turn possible).
+        active = [
+            i for i in range(K * N)
+            if (not cand_ended[i]
+                and len(cand_chains[i]) < chain_lens[beam_indices[i]]
+                and cand_states[i].get("eval_ctx"))
+        ]
+        if not active:
+            break
+
+        eval_prompts_la = [list(cand_states[i]["eval_ctx"]) for i in active]
+        target_msg_lists_la_prefixes = [list(cand_states[i]["target_msgs_prior"]) for i in active]
+
+        # Two-pass: eval first, then target conditioned on each eval output.
+        eval_raw_la = batch_generate_local(
+            lm_eval, eval_prompts_la, eval_max_tokens, temperature,
+            no_think=no_think_eval, allowed_token_ids=eval_allowed_token_ids,
         )
+        extracted_la = [_extract_message_tags(r) for r in eval_raw_la]
 
+        target_msg_lists_la = [
+            target_msg_lists_la_prefixes[j] + [{"role": "user", "content": extracted_la[j][0]}]
+            for j in range(len(active))
+        ]
+        if (lm_jail is not None and jail_runtime_cfg is not None
+                and jail_runtime_cfg.get("use_during_rollout", False)):
+            target_raw_la = batch_generate_contrastive_local(
+                lm_target, lm_jail, jail_runtime_cfg,
+                target_msg_lists_la, target_max_tokens, temperature, no_think_target,
+            )
+        else:
+            target_raw_la = batch_generate_local(
+                lm_target, target_msg_lists_la, target_max_tokens, temperature,
+                no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
+            )
+        target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
+
+        for j, i in enumerate(active):
+            turn = {
+                "user_msg_for_target": extracted_la[j][0],  # no kickoff prefix on lookahead turns
+                "user_msg_clean":      extracted_la[j][0],
+                "target_resp":         target_resps_la[j],
+                "trs":                 extracted_la[j][1],
+                "strategy":            extracted_la[j][2],
+            }
+            cand_chains[i].append(turn)
+            cand_states[i] = build_next_state(cand_states[i], turn)
+            if "<END>" in turn["user_msg_clean"]:
+                cand_ended[i] = True
+
+    # ── Step 3: judge chain-end transcripts ────────────────────────────────────────
+    chain_end_transcripts = [cand_states[i]["transcript_prior"] for i in range(K * N)]
     scores = _judge_partial_transcripts(
-        partial_transcripts, lm_judge, cfg, prompts_yaml,
+        chain_end_transcripts, lm_judge, cfg, prompts_yaml,
         behavior_understanding, scientific_motivation, behavior_name, target_model_name,
     )
 
     return [
         {
-            "beam_idx":             beam_indices[i],
-            "user_msg_for_target":  user_msgs_for_target[i],
-            "user_msg_clean":       extracted[i][0],
-            "target_resp":          target_resps[i],
-            "trs":                  extracted[i][1],
-            "strategy":             extracted[i][2],
-            "score":                scores[i],
-            "transcript":           partial_transcripts[i],
+            "beam_idx":        beam_indices[i],
+            "score":           scores[i],
+            "chain":           cand_chains[i],
+            "chain_end_state": cand_states[i],
+            "ended":           cand_ended[i],
         }
-        for i in range(len(extracted))
+        for i in range(K * N)
     ]
 
 
@@ -3733,6 +3829,8 @@ def run_rollout_batched_local(
     io_input_latin_mask    = bool(io_search_cfg.get("input_latin_mask", False))
     io_output_latin_mask   = bool(io_search_cfg.get("output_latin_mask", False))
     io_use_pool            = bool(io_search_cfg.get("use_pool", False))
+    io_scored_turns        = int(io_search_cfg.get("scored_turns_amount", 1))
+    io_kept_turns          = int(io_search_cfg.get("kept_turns_amount", 1))
     io_eval_allowed_ids: Optional[List[int]] = None
     io_target_allowed_ids: Optional[List[int]] = None
     if io_search_on:
@@ -3745,6 +3843,14 @@ def run_rollout_batched_local(
             raise RuntimeError("input_and_output_search.num_beams must be >= 1")
         if io_candidates_per_beam < 1:
             raise RuntimeError("input_and_output_search.candidates_per_beam must be >= 1")
+        if io_scored_turns < 1:
+            raise RuntimeError("input_and_output_search.scored_turns_amount must be >= 1")
+        if io_kept_turns < 1:
+            raise RuntimeError("input_and_output_search.kept_turns_amount must be >= 1")
+        if io_kept_turns > io_scored_turns:
+            raise RuntimeError("input_and_output_search.kept_turns_amount must be <= scored_turns_amount")
+        if io_use_pool and io_kept_turns != 1:
+            print(f"  [input_and_output_search] WARN: kept_turns_amount={io_kept_turns} is ignored when use_pool=True (pool drives commit granularity); set kept=1 to silence.", flush=True)
         # Judge runs on the eval GPU (shares the eval Gemma worker).
         lm_judge_io = lm_eval
         # Build latin masks. Always allow EOS (so the model can terminate naturally,
@@ -3763,7 +3869,7 @@ def run_rollout_batched_local(
                 extra_chars="", cache_tag="io_search_output", label="(io output)",
             )
         _io_jail_rollout_on = bool(jail_cfg.get("use_during_rollout", False))
-        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}{', jail PoE rollout ON' if _io_jail_rollout_on else ''}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam}, scored_turns={io_scored_turns}, kept_turns={io_kept_turns}, max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}{', jail PoE rollout ON' if _io_jail_rollout_on else ''}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -3950,33 +4056,95 @@ def run_rollout_batched_local(
             {"role": "user",   "content": f"{rollout_prompt_text}\n\n{kickoff_prompt}"},
         ]
 
-        # ── Branch: joint input_and_output_search path (beam search + pool) ──
+        # ── Branch: joint input_and_output_search path (beam search + pool + optional lookahead) ──
         if io_search_on:
             setup_ctx_len = len(eval_msgs_kickoff_ctx)
 
-            # Initial single beam = the starting state (target + scenario + kickoff prompt).
+            # Closure: build the post-turn beam state given a parent state + new turn.
+            # `score` is attached to user/assistant entries when committing turns (so the
+            # transcript records the chain-end judge score for the committed turn).
+            def build_next_state(parent: Dict[str, Any], turn: Dict[str, Any], score: Optional[float] = None) -> Dict[str, Any]:
+                new_target_msgs = list(parent["target_msgs_prior"]) + [
+                    {"role": "user", "content": turn["user_msg_for_target"]},
+                    {"role": "assistant", "content": turn["target_resp"]},
+                ]
+                committed_user_e: Dict[str, Any] = {
+                    "role": "user", "content": turn["user_msg_for_target"], "source": "evaluator",
+                    "targeted_response_start": turn["trs"],
+                }
+                if score is not None:
+                    committed_user_e["input_and_output_search_score"] = score
+                if turn.get("strategy"):
+                    committed_user_e["strategy"] = turn["strategy"]
+                assistant_entry: Dict[str, Any] = {
+                    "role": "assistant", "content": turn["target_resp"], "source": "target",
+                }
+                if score is not None:
+                    assistant_entry["input_and_output_search_score"] = score
+                new_transcript = list(parent["transcript_prior"]) + [committed_user_e, assistant_entry]
+
+                eval_msgs_full_after = list(parent["eval_msgs_full"]) + [
+                    {"role": "assistant", "content": turn["user_msg_clean"]}
+                ]
+                new_depth = parent.get("depth", 0) + 1
+                if new_depth < max_turns:
+                    followup_prompt = _build_evaluator_followup(
+                        turn["target_resp"], None,
+                        new_depth, max_turns,
+                        between_turns_strategise=between_turns_strategise,
+                        partial_history=history_turns is not None,
+                        target_before_input=target_before_input,
+                    )
+                    eval_msgs_with_followup = eval_msgs_full_after + [
+                        {"role": "user", "content": followup_prompt}
+                    ]
+                    next_eval_ctx = _strip_thinking_from_msgs(
+                        _truncate_eval_history(eval_msgs_with_followup, setup_ctx_len, history_turns)
+                    )
+                    next_eval_msgs_full = eval_msgs_with_followup
+                else:
+                    next_eval_ctx = []
+                    next_eval_msgs_full = eval_msgs_full_after
+                return {
+                    "eval_ctx":              next_eval_ctx,
+                    "target_msgs_prior":     new_target_msgs,
+                    "transcript_prior":      new_transcript,
+                    "eval_msgs_full":        next_eval_msgs_full,
+                    "target_kickoff_prefix": "",
+                    "depth":                 new_depth,
+                }
+
+            # Initial single beam = the starting state (target + scenario + kickoff prompt) at depth 0.
             initial_beam: Dict[str, Any] = {
                 "eval_ctx":              _strip_thinking_from_msgs(list(eval_msgs_kickoff_ctx)),
                 "target_msgs_prior":     list(target_msgs_base),
                 "transcript_prior":      list(transcript_msgs_base),
                 "eval_msgs_full":        list(eval_msgs_kickoff_ctx),
                 "target_kickoff_prefix": target_kickoff_prefix,
+                "depth":                 0,
             }
             beams: List[Dict[str, Any]] = [initial_beam]
-            # Pool collects every candidate (across all turns and all beams) so the final
-            # saved transcript can be the globally best — possibly a shallower depth if
-            # deeper turns regress, and possibly from a beam other than the depth-leader.
+            # Pool entries = judged chain-end transcripts (the "actually scored thing").
             pool: List[Dict[str, Any]] = []
 
-            for turn in range(max_turns):
+            # Loop while there are beams that can still extend (depth < max_turns).
+            # Each iteration is one "search step": each beam emits N first-turn candidates
+            # and (scored_turns_amount - 1) lookahead extensions per candidate.
+            while True:
+                beams = [b for b in beams if b.get("depth", 0) < max_turns]
                 if not beams:
                     break
 
-                # Expand every beam this turn: K*N candidates, all judged in one batched pass.
-                # Jail PoE rollout is applied to target sampling when use_during_rollout=True.
+                # Per-beam chain length: capped at remaining turns.
+                chain_lens = [
+                    min(io_scored_turns, max_turns - b.get("depth", 0))
+                    for b in beams
+                ]
+
                 cands = _joint_io_search_one_turn(
                     lm_eval, lm_target, lm_judge_io,
                     beams, io_candidates_per_beam,
+                    chain_lens, build_next_state,
                     eval_max_tokens, target_max_tokens, temperature,
                     no_think_eval, no_think_target,
                     cfg, prompts_yaml,
@@ -3987,75 +4155,26 @@ def run_rollout_batched_local(
                     jail_runtime_cfg=jail_runtime_cfg,
                 )
 
-                # Helper: build the beam state that would extend `parent` with candidate `c` at
-                # `depth` (= turn+1). Used for both pool insertion and next-beam construction.
-                def _build_child_state(parent: Dict[str, Any], c: Dict[str, Any], depth: int):
-                    new_target_msgs = list(parent["target_msgs_prior"]) + [
-                        {"role": "user", "content": c["user_msg_for_target"]},
-                        {"role": "assistant", "content": c["target_resp"]},
-                    ]
-                    committed_user_e: Dict[str, Any] = {
-                        "role": "user", "content": c["user_msg_for_target"], "source": "evaluator",
-                        "targeted_response_start": c["trs"],
-                        "input_and_output_search_score": c["score"],
-                    }
-                    if c["strategy"]:
-                        committed_user_e["strategy"] = c["strategy"]
-                    new_transcript = list(parent["transcript_prior"]) + [
-                        committed_user_e,
-                        {"role": "assistant", "content": c["target_resp"], "source": "target",
-                         "input_and_output_search_score": c["score"]},
-                    ]
-                    eval_msgs_full_after = list(parent["eval_msgs_full"]) + [
-                        {"role": "assistant", "content": c["user_msg_clean"]}
-                    ]
-                    if depth < max_turns:
-                        followup_prompt = _build_evaluator_followup(
-                            c["target_resp"], None,
-                            depth, max_turns,
-                            between_turns_strategise=between_turns_strategise,
-                            partial_history=history_turns is not None,
-                            target_before_input=target_before_input,
-                        )
-                        eval_msgs_with_followup = eval_msgs_full_after + [
-                            {"role": "user", "content": followup_prompt}
-                        ]
-                        next_eval_ctx = _strip_thinking_from_msgs(
-                            _truncate_eval_history(eval_msgs_with_followup, setup_ctx_len, history_turns)
-                        )
-                        next_eval_msgs_full = eval_msgs_with_followup
-                    else:
-                        next_eval_ctx = []
-                        next_eval_msgs_full = eval_msgs_full_after
-                    return {
-                        "eval_ctx":              next_eval_ctx,
-                        "target_msgs_prior":     new_target_msgs,
-                        "transcript_prior":      new_transcript,
-                        "eval_msgs_full":        next_eval_msgs_full,
-                        "target_kickoff_prefix": "",  # only the very first beam carries the kickoff prefix
-                    }, new_transcript
-
-                # Pool: every candidate gets a transcript snapshot at this depth + full beam
-                # state (so it can be re-expanded later under use_pool=True).
+                # Pool: each candidate contributes its chain-end (judged) transcript + state.
                 for c in cands:
-                    child_state, cand_messages = _build_child_state(beams[c["beam_idx"]], c, turn + 1)
+                    ce_state = c["chain_end_state"]
                     pool.append({
-                        "messages":   cand_messages,
+                        "messages":   ce_state["transcript_prior"],
                         "score":      c["score"],
-                        "depth":      turn + 1,
-                        "beam_state": child_state,
+                        "depth":      ce_state.get("depth", 0),
+                        "beam_state": ce_state,  # for re-expansion under use_pool=True
                         "expanded":   False,
-                        "ended":      "<END>" in c["user_msg_clean"],
+                        "ended":      c["ended"],
                     })
 
                 if len(pool) > io_max_pool_size:
                     pool.sort(key=lambda p: -p["score"])
                     pool = pool[:io_max_pool_size]
 
-                # Build next beams: either from this turn's candidates (fixed-depth beam) or
-                # from top-K unexpanded pool entries (best-first).
+                # Build next beams.
                 next_beams: List[Dict[str, Any]] = []
                 if io_use_pool:
+                    # Best-first: pop top-K unexpanded non-ended non-max-depth pool entries.
                     eligible = [
                         (i, p) for i, p in enumerate(pool)
                         if not p["expanded"] and not p["ended"] and p["depth"] < max_turns
@@ -4065,11 +4184,18 @@ def run_rollout_batched_local(
                         p["expanded"] = True
                         next_beams.append(p["beam_state"])
                 else:
-                    indexed = [(i, c) for i, c in enumerate(cands) if "<END>" not in c["user_msg_clean"]]
-                    indexed.sort(key=lambda x: (-x[1]["score"], x[0]))
-                    for _orig_idx, c in indexed[:io_num_beams]:
-                        child_state, _ = _build_child_state(beams[c["beam_idx"]], c, turn + 1)
-                        next_beams.append(child_state)
+                    # Fixed-depth beam: top-K candidates by chain-end score.
+                    # Commit the first `kept_turns_amount` turns of each chain (lookahead beyond
+                    # kept is discarded; the next step will resample from the committed depth).
+                    good = [c for c in cands if not c["ended"]]
+                    good.sort(key=lambda c: -c["score"])
+                    for c in good[:io_num_beams]:
+                        kept = min(io_kept_turns, len(c["chain"]))
+                        parent = beams[c["beam_idx"]]
+                        state = parent
+                        for k in range(kept):
+                            state = build_next_state(state, c["chain"][k], score=c["score"])
+                        next_beams.append(state)
 
                 beams = next_beams
 
@@ -4095,6 +4221,8 @@ def run_rollout_batched_local(
                     "search_type":        "input_and_output_search",
                     "num_beams":          io_num_beams,
                     "candidates_per_beam": io_candidates_per_beam,
+                    "scored_turns_amount": io_scored_turns,
+                    "kept_turns_amount":  io_kept_turns,
                     "use_pool":           io_use_pool,
                 },
                 "messages":  best_pool["messages"],
@@ -5994,6 +6122,16 @@ cfg = DotDict({
         "num_beams":           1,    # 1 = simple BoN; e.g. 5 = beam search 5×5
         "candidates_per_beam": 25,   # candidates sampled per beam per turn
         "max_pool_size":       20,   # cap on candidates retained across all turns; final transcript = top-1 of pool
+        # Lookahead options. A "chain" = the candidate (turn 1) plus scored_turns_amount-1 simulated
+        # extension turns (capped by max_turns - current_depth). The judge scores the CHAIN END
+        # transcript (the "actually scored thing" goes into the pool). When use_pool=False, the next
+        # beam state commits the first `kept_turns_amount` turns of the chain; the rest is discarded.
+        # When use_pool=True, the pool drives commit granularity and kept_turns_amount is ignored.
+        # scored=1, kept=1 = no lookahead (current behavior).
+        # scored=max_turns, kept=1 = full lookahead with greedy 1-turn commit.
+        # scored=max_turns, kept=max_turns = single search step, BoN-K over full trajectories.
+        "scored_turns_amount": 1,
+        "kept_turns_amount":   1,
         # When use_pool=False (default): next beams are top-K of THIS turn's candidates → fixed-depth beam search.
         # When use_pool=True: candidates go into the pool, next beams = top-K UNEXPANDED pool entries → best-first
         # tree search. With num_beams=1 + use_pool=True this is plain best-first; pool entries at max depth are
