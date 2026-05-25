@@ -3517,6 +3517,8 @@ def _joint_io_search_one_turn(
     target_model_name: Optional[str],
     eval_allowed_token_ids: Optional[List[int]] = None,
     target_allowed_token_ids: Optional[List[int]] = None,
+    lm_jail: Optional["LocalModel"] = None,
+    jail_runtime_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Per-turn beam expansion: for each beam, sample candidates_per_beam (user_msg,
     target_resp) pairs, judge every (transcript-so-far) with the full judge, return
@@ -3564,10 +3566,21 @@ def _joint_io_search_one_turn(
         list(beams[beam_indices[i]]["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target[i]}]
         for i in range(len(extracted))
     ]
-    target_raw_list = batch_generate_local(
-        lm_target, target_msg_lists, target_max_tokens, temperature, no_think=no_think_target,
-        allowed_token_ids=target_allowed_token_ids,
-    )
+    # Dispatch to contrastive PoE sampling when jail rollout is active. Note:
+    # batch_generate_contrastive_local manages its own latin mask via
+    # jail_runtime_cfg["latin_mask"], so target_allowed_token_ids is ignored in
+    # this branch.
+    if (lm_jail is not None and jail_runtime_cfg is not None
+            and jail_runtime_cfg.get("use_during_rollout", False)):
+        target_raw_list = batch_generate_contrastive_local(
+            lm_target, lm_jail, jail_runtime_cfg,
+            target_msg_lists, target_max_tokens, temperature, no_think_target,
+        )
+    else:
+        target_raw_list = batch_generate_local(
+            lm_target, target_msg_lists, target_max_tokens, temperature, no_think=no_think_target,
+            allowed_token_ids=target_allowed_token_ids,
+        )
     target_resps = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
 
     # 3) Build N*K partial transcripts for batched judging.
@@ -3749,7 +3762,8 @@ def run_rollout_batched_local(
                 _resolve_eos_token_id(lm_target, True),
                 extra_chars="", cache_tag="io_search_output", label="(io output)",
             )
-        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        _io_jail_rollout_on = bool(jail_cfg.get("use_during_rollout", False))
+        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam} ({io_num_beams * io_candidates_per_beam} judged/turn), max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}{', jail PoE rollout ON' if _io_jail_rollout_on else ''}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -3959,6 +3973,7 @@ def run_rollout_batched_local(
                     break
 
                 # Expand every beam this turn: K*N candidates, all judged in one batched pass.
+                # Jail PoE rollout is applied to target sampling when use_during_rollout=True.
                 cands = _joint_io_search_one_turn(
                     lm_eval, lm_target, lm_judge_io,
                     beams, io_candidates_per_beam,
@@ -3968,6 +3983,8 @@ def run_rollout_batched_local(
                     behavior_understanding, scientific_motivation, behavior_name, target_model_name,
                     eval_allowed_token_ids=io_eval_allowed_ids,
                     target_allowed_token_ids=io_target_allowed_ids,
+                    lm_jail=lm_jail,
+                    jail_runtime_cfg=jail_runtime_cfg,
                 )
 
                 # Helper: build the beam state that would extend `parent` with candidate `c` at
