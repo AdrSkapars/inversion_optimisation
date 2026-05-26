@@ -3498,6 +3498,56 @@ def _judge_partial_transcripts(
     return scores
 
 
+def _mmr_select(
+    n: int,
+    k: int,
+    scores: List[float],
+    get_text,
+    lambda_: float,
+) -> List[int]:
+    """Greedy MMR selection of k of n items.
+
+    lambda_=1.0 → pure score (sort by score desc, return top-k; no similarity work).
+    lambda_<1.0 → at each step pick argmax(lambda*norm_score - (1-lambda)*max_sim_to_selected).
+    Similarity is Jaccard over whitespace-split tokens of get_text(i).
+
+    Returns list of selected indices (length min(k, n)), in selection order.
+    """
+    if n <= 0 or k <= 0:
+        return []
+    order = sorted(range(n), key=lambda i: -scores[i])
+    if k >= n:
+        return order
+    if lambda_ >= 1.0:
+        return order[:k]
+
+    toksets: List[set] = [set((get_text(i) or "").split()) for i in range(n)]
+
+    def jaccard(a: set, b: set) -> float:
+        if not a and not b:
+            return 0.0
+        u = a | b
+        return (len(a & b) / len(u)) if u else 0.0
+
+    smin = min(scores)
+    smax = max(scores)
+    span = (smax - smin) if smax > smin else 1.0
+    norm = [(scores[i] - smin) / span for i in range(n)]
+
+    selected = [order[0]]
+    remaining = [i for i in order[1:]]
+    while remaining and len(selected) < k:
+        best_i, best_v = remaining[0], -1e18
+        for i in remaining:
+            max_sim = max(jaccard(toksets[i], toksets[j]) for j in selected)
+            v = lambda_ * norm[i] - (1.0 - lambda_) * max_sim
+            if v > best_v:
+                best_v, best_i = v, i
+        selected.append(best_i)
+        remaining.remove(best_i)
+    return selected
+
+
 def _io_sample_turn_batch(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
@@ -3831,6 +3881,7 @@ def run_rollout_batched_local(
     io_use_pool            = bool(io_search_cfg.get("use_pool", False))
     io_scored_turns        = int(io_search_cfg.get("scored_turns_amount", 1))
     io_kept_turns          = int(io_search_cfg.get("kept_turns_amount", 1))
+    io_mmr_lambda          = float(io_search_cfg.get("mmr_lambda", 1.0))
     io_eval_allowed_ids: Optional[List[int]] = None
     io_target_allowed_ids: Optional[List[int]] = None
     if io_search_on:
@@ -3869,7 +3920,7 @@ def run_rollout_batched_local(
                 extra_chars="", cache_tag="io_search_output", label="(io output)",
             )
         _io_jail_rollout_on = bool(jail_cfg.get("use_during_rollout", False))
-        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam}, scored_turns={io_scored_turns}, kept_turns={io_kept_turns}, max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}{', jail PoE rollout ON' if _io_jail_rollout_on else ''}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
+        print(f"  [input_and_output_search] enabled — beams={io_num_beams}, candidates/beam={io_candidates_per_beam}, scored_turns={io_scored_turns}, kept_turns={io_kept_turns}, max_pool_size={io_max_pool_size}, use_pool={io_use_pool} ({'best-first style' if io_use_pool else 'fixed-depth beam'}), mmr_lambda={io_mmr_lambda}{' (pure score)' if io_mmr_lambda >= 1.0 else ' (diversity-aware)'}, input_latin_mask={io_input_latin_mask}, output_latin_mask={io_output_latin_mask}{', jail PoE rollout ON' if _io_jail_rollout_on else ''}, judge=eval Gemma (thinking={cfg.judgment.get('thinking', False)}, max_tokens={cfg.judgment.get('max_tokens', 500)})", flush=True)
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
@@ -4179,23 +4230,44 @@ def run_rollout_batched_local(
                         (i, p) for i, p in enumerate(pool)
                         if not p["expanded"] and not p["ended"] and p["depth"] < max_turns
                     ]
-                    eligible.sort(key=lambda x: (-x[1]["score"], x[0]))
-                    for _i, p in eligible[:io_num_beams]:
-                        p["expanded"] = True
-                        next_beams.append(p["beam_state"])
+                    if eligible:
+                        elig_scores = [p["score"] for _i, p in eligible]
+                        def _elig_text(j: int) -> str:
+                            msgs = eligible[j][1].get("messages", []) or []
+                            return " ".join((m.get("content", "") or "") for m in msgs)
+                        sel = _mmr_select(
+                            len(eligible), io_num_beams, elig_scores, _elig_text, io_mmr_lambda,
+                        )
+                        for j in sel:
+                            _i, p = eligible[j]
+                            p["expanded"] = True
+                            next_beams.append(p["beam_state"])
                 else:
                     # Fixed-depth beam: top-K candidates by chain-end score.
                     # Commit the first `kept_turns_amount` turns of each chain (lookahead beyond
                     # kept is discarded; the next step will resample from the committed depth).
                     good = [c for c in cands if not c["ended"]]
-                    good.sort(key=lambda c: -c["score"])
-                    for c in good[:io_num_beams]:
-                        kept = min(io_kept_turns, len(c["chain"]))
-                        parent = beams[c["beam_idx"]]
-                        state = parent
-                        for k in range(kept):
-                            state = build_next_state(state, c["chain"][k], score=c["score"])
-                        next_beams.append(state)
+                    if good:
+                        good_scores = [c["score"] for c in good]
+                        def _good_text(j: int) -> str:
+                            # Diversity over what will be COMMITTED (first kept_turns of chain).
+                            kept_j = min(io_kept_turns, len(good[j]["chain"]))
+                            parts = []
+                            for t in good[j]["chain"][:kept_j]:
+                                parts.append(t.get("user_msg_clean", "") or t.get("user_msg_for_target", "") or "")
+                                parts.append(t.get("target_resp", "") or "")
+                            return " ".join(parts)
+                        sel = _mmr_select(
+                            len(good), io_num_beams, good_scores, _good_text, io_mmr_lambda,
+                        )
+                        for j in sel:
+                            c = good[j]
+                            kept = min(io_kept_turns, len(c["chain"]))
+                            parent = beams[c["beam_idx"]]
+                            state = parent
+                            for k in range(kept):
+                                state = build_next_state(state, c["chain"][k], score=c["score"])
+                            next_beams.append(state)
 
                 beams = next_beams
 
@@ -4224,6 +4296,7 @@ def run_rollout_batched_local(
                     "scored_turns_amount": io_scored_turns,
                     "kept_turns_amount":  io_kept_turns,
                     "use_pool":           io_use_pool,
+                    "mmr_lambda":         io_mmr_lambda,
                 },
                 "messages":  best_pool["messages"],
                 "judgment":  None,
@@ -6142,6 +6215,13 @@ cfg = DotDict({
         # Input mask also includes `<`, `/`, `>` so the eval can emit </message> / TRS tags.
         "input_latin_mask":    False,
         "output_latin_mask":   False,
+        # MMR (Maximal Marginal Relevance) selection. When picking the top-K next beams (or top-K
+        # eligible pool entries under use_pool=True), each pick maximizes
+        #   MMR(c) = lambda*score(c) - (1-lambda)*max_{c' in selected} jaccard_sim(c, c').
+        # lambda=1.0 (default) = pure score, diversity calc skipped entirely (zero overhead).
+        # lambda<1.0 penalizes candidates that are textually similar to already-selected ones,
+        # forcing beam diversity (counteracts prefix-collapse). Typical: 0.6-0.8.
+        "mmr_lambda":          1.0,
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
