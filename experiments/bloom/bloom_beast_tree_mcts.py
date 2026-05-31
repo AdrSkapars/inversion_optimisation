@@ -3787,7 +3787,8 @@ def _joint_io_search_one_turn(
 
 class MCTSNode:
     __slots__ = ("parent", "action", "children", "state", "depth",
-                 "visits", "value_sum", "value_estimate", "ended")
+                 "visits", "value_sum", "value_estimate", "ended",
+                 "chain_end_transcript")
     def __init__(self, parent, action, state, depth, ended: bool = False):
         self.parent: Optional["MCTSNode"] = parent
         self.action: Optional[Dict[str, Any]] = action  # the turn dict that led here
@@ -3796,8 +3797,13 @@ class MCTSNode:
         self.depth: int = depth
         self.visits: int = 0
         self.value_sum: float = 0.0
-        self.value_estimate: Optional[float] = None     # judge score for THIS node's partial transcript
+        self.value_estimate: Optional[float] = None     # judge score (partial transcript OR chain-end with lookahead)
         self.ended: bool = ended
+        # Populated only when mcts.value_via_lookahead=True. Holds the greedily-extended
+        # chain-end transcript that was judged to produce value_estimate. Used by
+        # final transcript saving so we get the deeper conversation, not just the
+        # partial state at this node's depth.
+        self.chain_end_transcript: Optional[List[Dict]] = None
 
     def q(self) -> float:
         return (self.value_sum / self.visits) if self.visits > 0 else 0.0
@@ -3866,6 +3872,7 @@ def _mcts_expand_same_parent_batch(
     target_allowed_token_ids: Optional[List[int]],
     lm_jail, jail_runtime_cfg,
     build_next_state,
+    value_via_lookahead: bool = False,
 ) -> List["MCTSNode"]:
     """Spawn `children_per_expansion` new children of `parent`, all in batched LM calls.
 
@@ -3922,17 +3929,69 @@ def _mcts_expand_same_parent_batch(
         child_states.append(build_next_state(parent.state, turn))
         child_turns.append(turn)
 
-    # Step 4: judge each partial transcript.
-    partial_transcripts = [s["transcript_prior"] for s in child_states]
+    # Step 4: judge — partial transcript OR chain-end (greedy lookahead) ──
+    max_turns_cfg = cfg.rollout.get("max_turns", 3)
+    chain_end_transcripts_per_child: List[Optional[List[Dict]]] = [None] * N
+    if value_via_lookahead:
+        # Greedy rollout from each child to max_turns. Same loop structure as
+        # io_search's lookahead Step 2 (no branching, batched per remaining step).
+        rollout_states = list(child_states)
+        for _ in range(max(0, max_turns_cfg)):  # at most max_turns extra steps; loop breaks early when no active
+            active = [
+                i for i in range(N)
+                if (rollout_states[i].get("depth", 0) < max_turns_cfg
+                    and rollout_states[i].get("eval_ctx")
+                    and "<END>" not in (child_turns[i]["user_msg_clean"] if rollout_states[i] is child_states[i] else ""))
+            ]
+            if not active:
+                break
+            eval_prompts_la = [list(rollout_states[i]["eval_ctx"]) for i in active]
+            eval_raw_la = batch_generate_local(
+                lm_eval, eval_prompts_la, eval_max_tokens, temperature,
+                no_think=no_think_eval, allowed_token_ids=eval_allowed_token_ids,
+            )
+            extracted_la = [_extract_message_tags(r) for r in eval_raw_la]
+            target_msg_lists_la = [
+                list(rollout_states[i]["target_msgs_prior"]) + [{"role": "user", "content": extracted_la[j][0]}]
+                for j, i in enumerate(active)
+            ]
+            if (lm_jail is not None and jail_runtime_cfg is not None
+                    and jail_runtime_cfg.get("use_during_rollout", False)):
+                target_raw_la = batch_generate_contrastive_local(
+                    lm_target, lm_jail, jail_runtime_cfg,
+                    target_msg_lists_la, target_max_tokens, temperature, no_think_target,
+                )
+            else:
+                target_raw_la = batch_generate_local(
+                    lm_target, target_msg_lists_la, target_max_tokens, temperature,
+                    no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
+                )
+            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
+            for j, i in enumerate(active):
+                turn_la = {
+                    "user_msg_for_target": extracted_la[j][0],
+                    "user_msg_clean":      extracted_la[j][0],
+                    "target_resp":         target_resps_la[j],
+                    "trs":                 extracted_la[j][1],
+                    "strategy":            extracted_la[j][2],
+                }
+                rollout_states[i] = build_next_state(rollout_states[i], turn_la)
+        # Capture chain-end transcripts; these are what gets judged AND stored on the child.
+        for i in range(N):
+            chain_end_transcripts_per_child[i] = rollout_states[i]["transcript_prior"]
+        transcripts_to_judge = chain_end_transcripts_per_child
+    else:
+        transcripts_to_judge = [s["transcript_prior"] for s in child_states]
+
     judge_scores = _judge_partial_transcripts(
-        partial_transcripts, lm_judge, cfg, prompts_yaml,
+        transcripts_to_judge, lm_judge, cfg, prompts_yaml,
         behavior_understanding, scientific_motivation, behavior_name, target_model_name,
     )
 
     # Step 5: attach children.
     new_children: List["MCTSNode"] = []
     for i in range(N):
-        ended = "<END>" in child_turns[i]["user_msg_clean"] or child_states[i].get("depth", 0) >= cfg.rollout.get("max_turns", 3)
+        ended = "<END>" in child_turns[i]["user_msg_clean"] or child_states[i].get("depth", 0) >= max_turns_cfg
         child = MCTSNode(
             parent=parent, action=child_turns[i],
             state=child_states[i],
@@ -3940,6 +3999,8 @@ def _mcts_expand_same_parent_batch(
             ended=ended,
         )
         child.value_estimate = float(judge_scores[i]) if judge_scores[i] is not None else 0.0
+        if value_via_lookahead:
+            child.chain_end_transcript = chain_end_transcripts_per_child[i]
         parent.children.append(child)
         new_children.append(child)
     return new_children
@@ -4096,6 +4157,7 @@ def run_rollout_batched_local(
     mcts_pw_alpha    = float(mcts_cfg_dict.get("pw_alpha", 0.5))
     mcts_sim_budget  = int(mcts_cfg_dict.get("simulations_budget", 30))
     mcts_batch_size  = int(mcts_cfg_dict.get("batch_size", 10))
+    mcts_value_via_lookahead = bool(mcts_cfg_dict.get("value_via_lookahead", False))
     if mcts_on and io_search_on:
         raise RuntimeError("mcts.enabled=True is mutually exclusive with input_and_output_search.enabled=True")
     io_num_beams           = int(io_search_cfg.get("num_beams", 1))
@@ -4613,6 +4675,7 @@ def run_rollout_batched_local(
                     None, None,  # no latin masks for MCTS (could add as cfg)
                     lm_jail, jail_runtime_cfg,
                     build_next_state_mcts,
+                    value_via_lookahead=mcts_value_via_lookahead,
                 )
                 ancestor_path = _mcts_path_from_root(parent)
                 for child in new_children:
@@ -4623,6 +4686,9 @@ def run_rollout_batched_local(
 
             best = _mcts_best_leaf_in_tree(root)
             best_score = float(best.value_estimate) if best.value_estimate is not None else 0.0
+            # With lookahead, save the chain-end transcript that was actually judged;
+            # otherwise save the node's own partial transcript.
+            best_messages = best.chain_end_transcript if best.chain_end_transcript is not None else best.state["transcript_prior"]
             transcript_data = {
                 "metadata": {
                     "evaluator_model": evaluator_model_id,
@@ -4639,8 +4705,9 @@ def run_rollout_batched_local(
                     "mcts_pw_alpha":      mcts_pw_alpha,
                     "mcts_simulations_budget": mcts_sim_budget,
                     "mcts_batch_size":    mcts_batch_size,
+                    "mcts_value_via_lookahead": mcts_value_via_lookahead,
                 },
-                "messages":  best.state["transcript_prior"],
+                "messages":  best_messages,
                 "judgment":  None,
             }
             filename = f"transcript_v{var_idx}r1.json"
@@ -6576,6 +6643,11 @@ cfg = DotDict({
         "pw_alpha":            0.5,    # PW exponent (0.5 = sqrt growth).
         "simulations_budget":  60,     # total children expanded per scenario. With batch_size=10 → 6 outer iterations, enough for UCB to actually re-explore.
         "batch_size":          10,     # children per outer iteration (= children_per_expansion at G=1).
+        # Lookahead: when True, each expanded child is greedily rolled out to max_turns
+        # and the chain-end transcript is judged (instead of judging the child's depth-d
+        # partial transcript). More expensive per expansion but gives a cleaner value
+        # signal — analogous to AlphaZero's "use value network on a deeper state".
+        "value_via_lookahead": False,
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
