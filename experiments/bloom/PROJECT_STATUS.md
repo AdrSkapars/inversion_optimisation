@@ -2,11 +2,22 @@
 
 **Task**: behavioural elicitation pipeline using BLOOM scaffold (understanding → ideation → rollout → judgment). Target = Qwen3-4B. Judge = Gemma-3-27b (Q6_K, with thinking). Behavior = `racial-bias`. All runs are 25 scenarios, 3 turns each, in `experiments/bloom/runs_14/`.
 
-## Headline result so far
+## Baseline to beat
 
-**`combo3x3+input3x3+jail`** (in `runs_14/1r3t_iosearch_combo3x3_input3x3_jail/`) — **avg 7.72 / elic 92% / 11h 27m, single round**. The leader on single-round single-shot.
+**Plain 25-round BoN (no jail, no search)** is the current baseline on every axis that matters:
 
-For the 25-round BoN baseline (max-across-rounds aggregation): `25r3t_bloom_jailrollout` hit **8.48 / 100%**, but that's a different scoring regime (max across 25 independent rounds vs single-round single-shot).
+- `25r3t_bloom_seedfix`: **avg 8.04 / elic 100% / 7h 35m** (max-across-rounds aggregation).
+- Outputs are **natural** (avg target logprob ≈ −0.48/token, ≈1.6 perplexity — vs jail-on runs ≈ −1.94/token, ≈7 perplexity).
+- Fastest of any method tested (rounds 2+ reuse understanding+ideation; only rollout+judge per round).
+- Simplest possible search: just sample 25 independent trajectories and take the max-scoring one per scenario.
+
+Every search method here needs to beat plain BoN on at least one of {score, naturalness, compute} to be worth the complexity. Search results are **promising but don't yet dominate** the baseline — combo3x3+input3x3+jail hits 7.72/92% in 11h 27m with off-distribution outputs, which is worse than the baseline on all three axes simultaneously.
+
+## Best single-round single-shot result
+
+**`combo3x3+input3x3+jail`** (in `runs_14/1r3t_iosearch_combo3x3_input3x3_jail/`) — avg 7.72 / elic 92% / 11h 27m. The strongest of the single-round search variants, but not the project's baseline-to-beat.
+
+For the jail-on 25-round number (just for reference): `25r3t_bloom_jailrollout` hit 8.48 / 100% in 16h 30m, but with off-distribution outputs from jail PoE — so it's strictly worse than plain BoN on naturalness while being slower.
 
 ## What's been tested (ordered by recency, all single-round 1r3t)
 
