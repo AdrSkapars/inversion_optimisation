@@ -71,12 +71,6 @@ User has indicated **moving away from MCTS and back to input/output sampling** â
 - **Cfg helper**: `/tmp/apply_mcts_edits.py` (one-shot text edits for MCTS runners). Not in repo; reconstruct if needed.
 - **Procedure**: `experiments/bloom/EXPERIMENT_PROCEDURE.md`.
 
-## Open questions worth investigating
-
-- Does combo3x3+input3x3+jail's 7.72 hold up under judge variance? (rejudge variance was only run on the vanilla 25-round, not the combo).
-- Does combo3x3+input3x3+jail beat 25-round BoN+jail (8.48/100%) on a per-compute basis? 25-round took 16.5h vs combo 11.5h, so combo is more compute-efficient per scenario, but BoN-25 reuses understanding+ideation across rounds.
-- Cross-model transfer: does the same combo cfg work as well on a different target?
-
 ## Hardware
 
 4Ã— RTX A6000 (48GB each). Eval GPU is the bottleneck (Gemma-27b judge with thinking).
