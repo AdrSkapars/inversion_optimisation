@@ -52,14 +52,43 @@ Also relevant earlier results (in `runs_14/`):
 
 ## Where the project is going next
 
-User has indicated **moving away from MCTS and back to input/output sampling** — i.e. the combo file direction (token-level input search inside turn-level beam) plus exploring output_search. Open avenues:
+### Reframed goal
 
-1. **Implement output_search delegation in `bloom_beast_tree_combo.py`** — currently logs "NOT IMPLEMENTED YET" if `output_search.enabled` is set alongside io_search. Would mirror the input_search delegation: `output_search_target_responses_batched` taking M (target_msgs, baseline_response) contexts and batching the token-level beam across them.
-2. **Combo variations not yet tested**:
-   - 5×5 turn-beam × 3×3 token-beam (compute-heavy, ~30h).
-   - 3×3 turn-beam × variations on input_search params (different `max_prefix_length`, etc.).
-   - Combo + post-hoc judge variance check (rejudge the best combo run with 3 seeds).
-3. **Multi-behaviour evaluation** — all current results are racial-bias only. Generalizing requires `prompts.yaml` updates (other behavior prompts already exist in the file).
+**Find natural, highly-elicitatious, high-probability (input, output) examples.** Three Pareto objectives:
+
+1. **Elicitation** — input causes target to exhibit the behaviour (judge score high).
+2. **Natural input** — input is on-distribution / plausibly something a user would write.
+3. **High-probability output** — target's response is what it would naturally produce given the input, not something pulled off-distribution by jail PoE.
+
+Current best (combo3x3+input3x3+jail, 7.72/92%) wins on (1) but sacrifices (3) — jail PoE makes outputs ~5× less probable per token. Going forward, the work is about jointly optimising all three, **not just maximising elicitation**.
+
+This also re-grounds the work against the rare-events forecasting literature: those methods *estimate* failure rates without surfacing examples; this tool *produces concrete examples* with rate-conditional naturalness, which is a complementary product.
+
+### Three planned directions (in priority order)
+
+1. **Alternating input ↔ output coordinate ascent.** Hold output fixed, search the input to maximise `P(output | input)`; then hold input fixed, sample outputs, pick the borderline-bad one (still hits judge threshold but lowest probability); repeat. EM-flavoured: each iteration monotonically improves the joint score on either input or output side. Initialise from any low-probability seed example already found by the combo+jail pipeline. Theoretical-ish: this is the core methodological contribution.
+
+2. **Rephrasing for naturalness.** Once a high-elicitation transcript is found, paraphrase it (LLM-rewriter) into something similarly-bad but more probable, optionally guided by the direction of previous successful rephrases. Sentence-level / semantic; complementary to the token-level coordinate ascent. Don't need BEAST for this — BEAST's natural samples are already reasonably on-distribution; rephrasing is the sentence-level analogue.
+
+3. **Annealing jailbreak interpolation.** Currently jail PoE is on for the whole target generation. Try "jail only for the first K tokens of the response, then let the target continue naturally" — should preserve most of the elicitation gain (direction-setting) while leaving the bulk of the output on-distribution. Also worth annealing β over search iterations (start with strong jail, fade out as good examples accumulate). Cheap experiments, ablation-shaped.
+
+### Background: still-relevant practical avenues
+
+- **Multi-behaviour evaluation.** All current results are racial-bias only. Generalizing to 3-5 behaviours from `prompts.yaml` (sycophancy, deception, refusal-bypass, etc.) is straightforward and rebuts "racial-bias-overfit" reviewer concerns.
+- **Output_search delegation in `bloom_beast_tree_combo.py`** — still flagged "NOT IMPLEMENTED YET". Mirror of input_search delegation. Would let token-level output search stack with combo+jail; could be a separate naturalness lever but is now lower priority vs the three directions above.
+
+### Why not MCTS
+
+MCTS got tested (variants A-D + lookahead + jail). Best MCTS variant (MCTS+jail at 7.20/84%) was beaten by combo3x3+input3x3+jail (7.72/92%) at lower compute. More importantly, the MCTS-for-multi-turn-jailbreak literature is now crowded (MTJ-MCTS, MUSE, GS-MCTS, Tempest, COLING 2025 prompt-autogen MCTS, Dialogue-Aware MCTS EMNLP 2025, MTSA, M2S) — competing on tree-search algorithm is a research dead end. Input/output sampling/search has more headroom and a smaller related-work footprint.
+
+### Relevant new literature for this direction
+
+- **Goodfire diff amplification** ("Discovering Undesired Rare Behaviors via Model Diff Amplification") formalises the contrastive-logits recipe `logits = logits_post + α(logits_post − logits_pre)` — essentially the jail PoE setup. Natural cite for the mechanism.
+- **"Predicting Rare LLM Failures with 30× Fewer Rollouts"** (LessWrong) + the two papers it cites (arXiv 2604.22167, 2410.13211) — rate-forecasting approaches using contrastive logits + interpolation/extrapolation. These motivate the rare-events framing but DO NOT produce examples; complementary to this work.
+- **arXiv 2604.22167** specifically: shows that **the same harm can be achieved with much more natural (higher-probability) inputs and outputs** via paraphrasing / averaging across queries. Direct evidence that the three-objective framing is achievable; supports the rephrasing direction.
+- **AuditBench (Sheshadri et al. 2026)** — benchmark of 56 model organisms with hidden behaviours, where scaffolded black-box tools outperform white-box auditing. Natural eval target: drop this method against AuditBench's open models as a structured behaviour-parametric audit protocol (vs their open-ended User Sampling / Text Completion baseline).
+- **Petri 3 / Inspect framework** (AISI). Possible infra switch for distribution within the alignment-eval community; supports local models. Engineering tradeoff, not algorithmic.
+- **Eval-awareness counter-direction** (Tim Hua's `steering-eval-awareness-public`, arXiv 2509.00591 realism probes, the safe-to-dangerous shift discussion). This is a *follow-up paper* — your tool could be re-cast as "produce realistic inputs that elicit hidden behaviours even with eval-awareness defenses" — but folding it into the current direction adds substantial scope.
 
 ## Key files (paths from repo root)
 
