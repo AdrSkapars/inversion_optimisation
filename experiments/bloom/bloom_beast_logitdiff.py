@@ -6599,9 +6599,13 @@ def run_message_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]
 
 async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
-    global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID, _DEFAULT_SEED
+    global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID, _DEFAULT_SEED, DEFAULT_GPU_MEMORY_UTIL
     DEBUG_MODE = cfg.get("debug", True)
     _DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
+    # Override module-level default so understanding/ideation/judgment stages
+    # (which call _get_local_model without explicit util) match cfg's eval util.
+    # Otherwise eval grabs DEFAULT_GPU_MEMORY_UTIL=0.85 of GPU 0, leaving target with too little.
+    DEFAULT_GPU_MEMORY_UTIL = cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
     _DEFAULT_SEED = cfg.get("seed")
     if _DEFAULT_SEED is not None:
         random.seed(_DEFAULT_SEED)
