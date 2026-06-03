@@ -91,7 +91,7 @@
 		const all = [...new Set(allTranscripts.flatMap(t => Object.keys(t.scores || {})))];
 		// Fixed priority: behavior_presence first, logprob scores last, rest alphabetically in between
 		const first = ['behavior_presence'];
-		const last = ['avg_logprob'];
+		const last = ['avg_logprob', 'mean_input_avg_logprob', 'mean_output_avg_logprob'];
 		const middle = all.filter(k => !first.includes(k) && !last.includes(k)).sort();
 		return [
 			...first.filter(k => all.includes(k)),
@@ -265,6 +265,8 @@
 			{ key: 'average_evaluation_awareness', label: 'Awareness', invert: true },
 			{ key: 'average_elicitation_difficulty', label: 'Difficulty', invert: false },
 			{ key: 'mean_avg_logprob', label: 'Avg Logprob', invert: false, raw: true },
+			{ key: 'mean_input_avg_logprob', label: 'In Logp', invert: false, raw: true },
+			{ key: 'mean_output_avg_logprob', label: 'Out Logp', invert: false, raw: true },
 		];
 		return possible.filter(col =>
 			roundSuites.some(r => {
@@ -287,6 +289,8 @@
 		{ key: 'average_bugs', label: 'Bugs', invert: true },
 		{ key: 'average_evaluation_invalidity', label: 'Invalidity', invert: true },
 		{ key: 'mean_avg_logprob', label: 'Avg Logprob', invert: false, raw: true },
+		{ key: 'mean_input_avg_logprob', label: 'In Logp', invert: false, raw: true },
+		{ key: 'mean_output_avg_logprob', label: 'Out Logp', invert: false, raw: true },
 	];
 
 	function getSuiteRounds(suite: any) {

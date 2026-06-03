@@ -602,6 +602,40 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
                             results[orig_i] = sum(target_lps) / len(target_lps)
                 res_q.put(("ok", results))
 
+            elif op == "compute_multi_range_logprobs":
+                # items: List[Tuple[full_token_ids, List[(start, length)]]]
+                # Returns per-item list of per-range avg logprobs (one float|None per range).
+                # Same forward-pass cost as compute_target_logprobs; pulls multiple slices
+                # from a single prompt_logprobs payload.
+                items = msg[1]
+                results: List[List[Optional[float]]] = [
+                    [None] * len(ranges) for (_, ranges) in items
+                ]
+                real = [(i, t) for i, t in enumerate(items)
+                        if t[0] and any(L > 0 for _, L in t[1])]
+                if real:
+                    prompts = [TokensPrompt(prompt_token_ids=t[0]) for _, t in real]
+                    sp = SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=1)
+                    outs = llm.generate(prompts, sp, use_tqdm=False)
+                    for (orig_i, (full_ids, ranges)), out in zip(real, outs):
+                        plp = out.prompt_logprobs
+                        if plp is None:
+                            continue
+                        for ri, (start, length) in enumerate(ranges):
+                            if length <= 0:
+                                continue
+                            lps: List[float] = []
+                            for pos in range(start, start + length):
+                                d = plp[pos] if pos < len(plp) else None
+                                if d is None:
+                                    continue
+                                actual_tok = full_ids[pos] if pos < len(full_ids) else None
+                                if actual_tok is not None and actual_tok in d:
+                                    lps.append(d[actual_tok].logprob)
+                            if lps:
+                                results[orig_i][ri] = sum(lps) / len(lps)
+                res_q.put(("ok", results))
+
             else:
                 res_q.put(("error", f"unknown op: {op}"))
         except Exception:
@@ -710,6 +744,14 @@ class VLLMWorker:
         self, items: List[Tuple[List[int], int, int]]
     ) -> List[Optional[float]]:
         return self._call("compute_target_logprobs", items)
+
+    def compute_multi_range_logprobs(
+        self, items: List[Tuple[List[int], List[Tuple[int, int]]]]
+    ) -> List[List[Optional[float]]]:
+        """Single forward pass per item; returns per-range avg logprob for each (start, length).
+        Use when you need multiple non-overlapping logprob slices from the same prompt
+        (e.g. user msg + assistant msg in the same chat-templated context)."""
+        return self._call("compute_multi_range_logprobs", items)
 
     def shutdown(self) -> None:
         """Polite → SIGTERM → SIGKILL escalation. vLLM spawns its own internal
@@ -953,6 +995,95 @@ def batch_logprob_local(
             payload.append((context_ids + target_ids, len(context_ids), len(target_ids)))
 
     return lm.worker.compute_target_logprobs(payload)
+
+
+# Qwen3 chat-template role markers. Update if the target model family changes.
+_QWEN_USER_OPEN = "<|im_start|>user\n"
+_QWEN_NO_THINK_SUFFIX = "<think>\n\n</think>\n"
+
+
+def score_transcript_messages_local(
+    lm: "LocalModel",
+    transcripts: List[List[Dict[str, Any]]],
+    no_think_target: bool = True,
+    batch_size: int = 8,
+) -> List[List[Dict[str, Any]]]:
+    """For each transcript, score per-token avg log P(user_content) and avg log P(asst_content)
+    under the target's distribution, via ONE teacher-forced forward pass per (user, asst) pair.
+    Both ranges come from the same prompt_logprobs payload — input scoring is free.
+
+    Role-marker strings are Qwen3-specific. Token positions are computed by tokenizing
+    progressively-longer chat-template prefixes; relies on BPE being prefix-preserving at
+    structural boundaries (true for Qwen3).
+
+    Returns one inner list per transcript, one entry per assistant turn:
+      {turn_index, user_avg_logprob, user_n_tokens, asst_avg_logprob, asst_n_tokens}
+    user_* refers to the IMMEDIATELY PRECEDING user message.
+    """
+    tok = lm.tokenizer
+    payload_items: List[Tuple[List[int], List[Tuple[int, int]]]] = []
+    payload_provenance: List[Tuple[int, int]] = []  # (transcript_idx, asst_msg_idx)
+
+    for tr_idx, msgs in enumerate(transcripts):
+        for mi, msg in enumerate(msgs):
+            if msg.get("role") != "assistant":
+                continue
+            if mi == 0 or msgs[mi - 1].get("role") != "user":
+                continue  # Skip orphan assistant turns
+            user_text = msgs[mi - 1].get("content") or ""
+            asst_text = msg.get("content") or ""
+            if not user_text and not asst_text:
+                continue
+
+            ctx_before_user = [{"role": x["role"], "content": (x.get("content") or "")}
+                               for x in msgs[:mi - 1]]
+            ctx_through_user = ctx_before_user + [{"role": "user", "content": user_text}]
+
+            prefix_no_user        = tok.apply_chat_template(
+                ctx_before_user, tokenize=False, add_generation_prompt=False)
+            prefix_user_open      = prefix_no_user + _QWEN_USER_OPEN
+            prefix_user_content   = prefix_user_open + user_text
+            prefix_asst_open      = tok.apply_chat_template(
+                ctx_through_user, tokenize=False, add_generation_prompt=True)
+            prefix_asst_nothink   = prefix_asst_open + (_QWEN_NO_THINK_SUFFIX if no_think_target else "")
+            full_text             = prefix_asst_nothink + asst_text
+
+            L_user_start = len(tok.encode(prefix_user_open,    add_special_tokens=False))
+            L_user_end   = len(tok.encode(prefix_user_content, add_special_tokens=False))
+            L_asst_start = len(tok.encode(prefix_asst_nothink, add_special_tokens=False))
+            full_ids     = tok.encode(full_text, add_special_tokens=False)
+            L_asst_end   = len(full_ids)
+
+            user_range = (L_user_start, max(0, L_user_end - L_user_start))
+            asst_range = (L_asst_start, max(0, L_asst_end - L_asst_start))
+            payload_items.append((full_ids, [user_range, asst_range]))
+            payload_provenance.append((tr_idx, mi))
+
+    if not payload_items:
+        return [[] for _ in transcripts]
+
+    # prompt_logprobs=1 materializes a (prompt_tokens × vocab_size) float32 grid — keep
+    # batch small to avoid OOM. 8 ≈ 14GB peak at ~3K-token prompts (analyze_output_logprobs.py).
+    results_per_item: List[List[Optional[float]]] = []
+    for start in range(0, len(payload_items), batch_size):
+        chunk = payload_items[start:start + batch_size]
+        results_per_item.extend(lm.worker.compute_multi_range_logprobs(chunk))
+
+    out: List[List[Dict[str, Any]]] = [[] for _ in transcripts]
+    for (tr_idx, asst_mi), ranges_res, item in zip(
+        payload_provenance, results_per_item, payload_items
+    ):
+        ranges_res = (ranges_res + [None, None])[:2]
+        user_lp, asst_lp = ranges_res
+        _, ranges = item
+        out[tr_idx].append({
+            "turn_index": asst_mi,
+            "user_avg_logprob": round(user_lp, 4) if user_lp is not None else None,
+            "user_n_tokens":    ranges[0][1],
+            "asst_avg_logprob": round(asst_lp, 4) if asst_lp is not None else None,
+            "asst_n_tokens":    ranges[1][1],
+        })
+    return out
 
 
 # =============================================================================
@@ -6342,6 +6473,126 @@ async def run_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
     return summary
 
 
+def run_message_logprob_scoring(round_dir: Path, cfg: DotDict) -> Optional[Dict]:
+    """For each transcript in round_dir/transcripts/, score per-token avg log P(input)
+    and avg log P(output) under the target model. Writes per-message fields into
+    transcripts and per-transcript / summary fields into judgment.json. Gated by
+    cfg.judgment.score_message_logprobs.
+
+    Both metrics come from a single forward pass per (user, asst) pair — input scoring
+    is essentially free given we're already running the forward pass for output.
+    """
+    if not cfg.judgment.get("score_message_logprobs", False):
+        return None
+
+    target_model_id = cfg.rollout.target
+    if not target_model_id.startswith("local/"):
+        print("  score_message_logprobs requires a local/ target model, skipping", flush=True)
+        return None
+
+    transcripts_dir = round_dir / "transcripts"
+    if not transcripts_dir.is_dir():
+        print(f"  No transcripts dir in {round_dir}", flush=True)
+        return None
+
+    print(f"\n{'=' * 60}", flush=True)
+    print("MESSAGE LOGPROB SCORING STAGE", flush=True)
+    print(f"{'=' * 60}", flush=True)
+    print(f"  Target model: {target_model_id}", flush=True)
+
+    hf_name        = target_model_id[len("local/"):]
+    target_gpu_id  = cfg.get("target_gpu_id", 1)
+    target_gpu_util = cfg.get("target_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
+    target_max_len = cfg.rollout.get("target_max_model_len", 8192)
+    lm = _get_local_model(
+        hf_name, gpu_id=target_gpu_id,
+        gpu_memory_utilization=target_gpu_util, max_model_len=target_max_len,
+    )
+    no_think_target = not cfg.rollout.get("target_thinking", False)
+
+    transcript_files = sorted(transcripts_dir.glob("transcript_v*r*.json"))
+    if not transcript_files:
+        print("  No transcript files found", flush=True)
+        return None
+
+    print(f"  Scoring {len(transcript_files)} transcripts", flush=True)
+
+    transcripts_data: List[Optional[Dict]] = []
+    msgs_per_tr: List[List[Dict]] = []
+    for tf in transcript_files:
+        try:
+            with open(tf, "r", encoding="utf-8") as f:
+                td = json.load(f)
+        except Exception as e:
+            print(f"  Could not read {tf.name}: {e}", flush=True)
+            transcripts_data.append(None)
+            msgs_per_tr.append([])
+            continue
+        transcripts_data.append(td)
+        msgs_per_tr.append(td.get("messages", []))
+
+    per_tr_results = score_transcript_messages_local(
+        lm, msgs_per_tr, no_think_target=no_think_target,
+    )
+
+    per_transcript_avgs: Dict[str, Dict[str, Any]] = {}
+    for tf, td, msgs, scored_turns in zip(
+        transcript_files, transcripts_data, msgs_per_tr, per_tr_results,
+    ):
+        if td is None:
+            continue
+        user_lps, asst_lps = [], []
+        for turn in scored_turns:
+            ti = turn["turn_index"]
+            user_lp = turn["user_avg_logprob"]
+            asst_lp = turn["asst_avg_logprob"]
+            if user_lp is not None and ti - 1 < len(msgs):
+                msgs[ti - 1]["input_avg_logprob"] = user_lp
+                msgs[ti - 1]["input_n_tokens"]   = turn["user_n_tokens"]
+                user_lps.append(user_lp)
+            if asst_lp is not None and ti < len(msgs):
+                msgs[ti]["output_avg_logprob"] = asst_lp
+                msgs[ti]["output_n_tokens"]   = turn["asst_n_tokens"]
+                asst_lps.append(asst_lp)
+        save_json(td, tf)
+        per_transcript_avgs[tf.name] = {
+            "mean_input_avg_logprob":  round(sum(user_lps) / len(user_lps), 4) if user_lps else None,
+            "mean_output_avg_logprob": round(sum(asst_lps) / len(asst_lps), 4) if asst_lps else None,
+            "num_turns_scored":        min(len(user_lps), len(asst_lps)),
+        }
+        print(f"  {tf.name}: in={per_transcript_avgs[tf.name]['mean_input_avg_logprob']} "
+              f"out={per_transcript_avgs[tf.name]['mean_output_avg_logprob']}", flush=True)
+
+    # Merge into judgment.json.
+    judgment_path = round_dir / "judgment.json"
+    if judgment_path.exists() and per_transcript_avgs:
+        try:
+            with open(judgment_path, "r", encoding="utf-8") as f:
+                judgment_data = json.load(f)
+            for j in judgment_data.get("judgments", []):
+                v = j.get("variation_number", 0)
+                r_num = j.get("repetition_number", 1)
+                fname = f"transcript_v{v}r{r_num}.json"
+                if fname in per_transcript_avgs:
+                    j["mean_input_avg_logprob"]  = per_transcript_avgs[fname]["mean_input_avg_logprob"]
+                    j["mean_output_avg_logprob"] = per_transcript_avgs[fname]["mean_output_avg_logprob"]
+            in_means  = [v["mean_input_avg_logprob"]  for v in per_transcript_avgs.values()
+                         if v["mean_input_avg_logprob"]  is not None]
+            out_means = [v["mean_output_avg_logprob"] for v in per_transcript_avgs.values()
+                         if v["mean_output_avg_logprob"] is not None]
+            ss = judgment_data.setdefault("summary_statistics", {})
+            if in_means:
+                ss["mean_input_avg_logprob"]  = round(sum(in_means) / len(in_means), 4)
+            if out_means:
+                ss["mean_output_avg_logprob"] = round(sum(out_means) / len(out_means), 4)
+            save_json(judgment_data, judgment_path)
+            print(f"  Merged into judgment.json", flush=True)
+        except Exception as e:
+            print(f"  WARNING: Could not merge into judgment.json: {e}", flush=True)
+
+    return {"per_transcript_avgs": per_transcript_avgs}
+
+
 async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
     global DEBUG_MODE, _DEFAULT_LOCAL_GPU_ID, _DEFAULT_SEED
@@ -6417,6 +6668,15 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
         if DEBUG_MODE:
             traceback.print_exc()
         return None
+
+    # Stage 5: Message logprob scoring (input + output naturalness, gated by cfg.judgment.score_message_logprobs)
+    try:
+        run_message_logprob_scoring(output_dir, cfg)
+    except Exception as e:
+        print(f"\nWARNING: Message logprob scoring failed: {e}", flush=True)
+        if DEBUG_MODE:
+            traceback.print_exc()
+        # Non-fatal — pipeline still succeeds; just no input/output logprobs.
 
     print("\n" + "=" * 60, flush=True)
     print("PIPELINE COMPLETED SUCCESSFULLY!", flush=True)
@@ -6519,6 +6779,7 @@ cfg = DotDict({
         "additional_qualities": [], #["unrealism", "bugs"],  # extra qualities to score; each needs a description in prompts.yaml
         "metajudgment_qualities": ["diversity"],             # qualities assessed across all transcripts in the metajudge step
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
+        "score_message_logprobs": True,      # post-judgment: target-model per-token avg log P(input) and avg log P(output) per message. Free (same forward pass) and key for naturalness metric.
     },
     "refinement": {
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)

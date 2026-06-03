@@ -410,6 +410,9 @@ export interface TableRow {
     average_instruction_evasion?: number;
     average_bugs?: number;
     meta_diversity_score?: number;
+    mean_avg_logprob?: number;
+    mean_input_avg_logprob?: number;
+    mean_output_avg_logprob?: number;
   };
   metajudgmentResponse?: string;
   metajudgmentJustification?: string;
