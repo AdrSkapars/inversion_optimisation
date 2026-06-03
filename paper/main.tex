@@ -210,6 +210,8 @@ Both are evidence that multi-turn dynamics are where behavioural failures actual
 
 \paragraph{Contrastive decoding.}
 Contrastive decoding~\citep{li2023contrastive} improves generation quality by subtracting amateur-model logits from expert-model logits; DExperts~\citep{liu2021dexperts} extends this for controllable generation with expert and anti-expert log-probability contributions.
+Classifier-free guidance over text~\citep{sanchez2023cfg} and context-aware decoding~\citep{shi2024trusting} apply the same logit-interpolation principle to \emph{prompts} rather than models, amplifying the influence of an instruction or retrieved context at decoding time.
+Closest to our use, \citet{aranguri2025diffamp} amplify the logit difference between post- and pre-training checkpoints --- $\text{logits}_{\text{after}} + \alpha(\text{logits}_{\text{after}} - \text{logits}_{\text{before}})$ --- to surface rare misaligned behaviours $10$--$300\times$ more frequently, and \citet{angell2026tail} use a closely related logit-interpolation scheme between a safety-tuned target and an unsafe variant as an importance-sampling proposal for efficiently estimating tail-risk probabilities of harmful outputs.
 We adapt the same principle as an \emph{output-side} red-teaming mechanism: the logit gap between a behaviour-eliciting copy of the target and the safety-tuned target serves as a proposal that steers sampling toward regions where undesirable continuations are concentrated.
 Scores are reported under the target's own distribution, so the result is more efficient propensity estimation, not capability inflation.
 
