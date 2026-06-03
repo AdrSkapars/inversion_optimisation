@@ -6742,9 +6742,9 @@ cfg = DotDict({
     # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
     # worker can grab most of the memory; the small reserve covers framework overhead.
     "evaluator_gpu_id": 0,
-    "target_gpu_id":    1,
-    "evaluator_gpu_memory_utilization": 0.85,
-    "target_gpu_memory_utilization":    0.85,
+    "target_gpu_id":    0,           # both on GPU 0 (single ~96GB card)
+    "evaluator_gpu_memory_utilization": 0.5,   # ~48GB → Gemma-27b GGUF + thinking KV
+    "target_gpu_memory_utilization":    0.4,   # ~38GB → Qwen-4B + plenty of KV. Sum=0.9 leaves ~10% headroom.
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
