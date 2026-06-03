@@ -2806,6 +2806,7 @@ def batch_generate_contrastive_local(
             temperature=temperature, top_p=1.0,
             allowed_token_ids=allowed_token_ids,
             eos_token_id=lm_target.tokenizer.eos_token_id,
+            token_schedule=jail_runtime_cfg.get("token_schedule"),
         )[0][0]
         text = lm_target.tokenizer.decode(ext, skip_special_tokens=True)
         results.append(text)
@@ -2826,9 +2827,19 @@ def _contrastive_sample_extensions(
     allowed_token_ids: Optional[List[int]] = None,
     ignore_eos: bool = False,
     eos_token_id: Optional[int] = None,
+    token_schedule: Optional[Dict] = None,
 ) -> List[List[List[int]]]:
     """Sample `n` extensions of `max_tokens` tokens via weighted PoE:
     softmax(log p_target + beta · log p_jailbroken).
+
+    `token_schedule` gates jail's contribution per step. Defaults to "all" (jail
+    active at every token = original PoE behavior). Other modes turn jail OFF at
+    selected steps — when off, target samples from its own unbiased distribution
+    AND we skip the jail forward pass for those steps (real compute saving):
+      - {"mode": "all"}                  jail every step
+      - {"mode": "prefix",  "n": N}      jail for steps 0..N-1, target alone after
+      - {"mode": "suffix",  "n": N}      target alone for steps 0..N-1, jail after
+      - {"mode": "alternate"}            jail on even steps (0,2,4…), target on odd
 
     Implementation: at each step, jail proposes its top-K next-token logprobs;
     those are passed as logit_bias to target's sampler. Target samples from
@@ -2874,6 +2885,19 @@ def _contrastive_sample_extensions(
     )
     # Don't restrict jail's allowed_token_ids — we want its distribution honest.
 
+    # Decode schedule once. _jail_on(step) returns True when jail's proposal
+    # should be mixed into target's logits at that step. When False we skip the
+    # jail forward pass entirely AND drop logit_bias from target's sampler so it
+    # samples from its own distribution.
+    _sched = token_schedule or {"mode": "all"}
+    _sched_mode = _sched.get("mode", "all")
+    _sched_n    = int(_sched.get("n", 0))
+    def _jail_on(step: int) -> bool:
+        if _sched_mode == "prefix":    return step < _sched_n
+        if _sched_mode == "suffix":    return step >= _sched_n
+        if _sched_mode == "alternate": return (step % 2) == 0
+        return True  # "all" or unknown → never gate
+
     for step in range(max_tokens):
         active = [i for i, d in enumerate(done) if not d]
         if not active:
@@ -2881,15 +2905,17 @@ def _contrastive_sample_extensions(
 
         active_t_prompts = [t_states[i] for i in active]
         active_j_prompts = [j_states[i] for i in active]
+        jail_step_on = _jail_on(step)
 
-        # 1) Jail step → top-K logprobs per active slot.
-        jail_out = lm_jail.worker.step_with_logprobs(active_j_prompts, jail_step_kwargs)
+        # 1) Jail step → top-K logprobs per active slot. Skipped when scheduled off.
+        jail_out = (lm_jail.worker.step_with_logprobs(active_j_prompts, jail_step_kwargs)
+                    if jail_step_on else None)
 
         # 2) Build per-prompt logit_bias and issue one batched target call.
         # vLLM accepts list[SamplingParams] in the same generate() call, one per
         # prompt — so we get per-prompt biases without IPC overhead per slot.
         per_prompt_kwargs: List[Dict] = []
-        for (_tok, _slp, jail_topk) in jail_out:
+        for idx_in_active in range(len(active)):
             kwargs = dict(
                 max_tokens=1,
                 temperature=max(temperature, 1e-6),
@@ -2897,8 +2923,10 @@ def _contrastive_sample_extensions(
                 logprobs=1,
                 skip_special_tokens=False,
                 ignore_eos=ignore_eos,
-                logit_bias={tid: beta * lp for tid, lp in jail_topk.items()},
             )
+            if jail_step_on:
+                _tok, _slp, jail_topk = jail_out[idx_in_active]
+                kwargs["logit_bias"] = {tid: beta * lp for tid, lp in jail_topk.items()}
             if allowed_token_ids is not None:
                 kwargs["allowed_token_ids"] = allowed_token_ids
             per_prompt_kwargs.append(kwargs)
@@ -3801,6 +3829,7 @@ def output_search_target_response(
             allowed_token_ids=latin_token_ids,
             ignore_eos=(eos_token_id is not None),
             eos_token_id=eos_token_id,
+            token_schedule=jail_runtime_cfg.get("token_schedule"),
         )[0]
         candidates = [prefix_tokens + ext for ext in extensions]
         global_pool_seqs = candidates
@@ -4376,6 +4405,7 @@ def run_rollout_batched_local(
             "beta":        float(jail_cfg.get("beta", 2.0)),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
+            "token_schedule": dict(jail_cfg.get("token_schedule") or {"mode": "all"}),
         }
         print(f"  [jailbroken_output] loaded {jail_model_id} on GPU {target_gpu_id}", flush=True)
 
@@ -6860,11 +6890,20 @@ cfg = DotDict({
         "beta": 2.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
+        # Per-token gating for jail's role in the PoE sampler. Only used when use_during_rollout=True.
+        #   {"mode": "all"}              — jail every step (current behavior)
+        #   {"mode": "prefix",  "n": N}  — jail for first N tokens of each candidate, target alone after
+        #   {"mode": "suffix",  "n": N}  — target alone for first N tokens, jail after
+        #   {"mode": "alternate"}        — jail on even steps (0,2,4…), target on odd
+        "token_schedule": {"mode": "all"},
     },
 })
 
 
-if __name__ == "__main__":
+def main():
+    """Entrypoint used by both `python bloom_beast_logitdiff.py` and the thin
+    launcher scripts (bloom_beast_logitdiff_<variant>.py). Launchers mutate the
+    module-level `cfg` dict, then call `main()` — no other setup required."""
     # Load behavior description and prompt preset from prompts.yaml
     _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
     _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
@@ -6957,3 +6996,7 @@ if __name__ == "__main__":
     # forever). All useful output is already on disk. Exit code propagates to the
     # shell so `&&` chaining works correctly.
     os._exit(1 if had_error else 0)
+
+
+if __name__ == "__main__":
+    main()
