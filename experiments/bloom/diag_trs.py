@@ -34,9 +34,10 @@ OUT_PATH    = SCRIPT_DIR / "diag_trs_results.json"
 N_INPUTS    = 8                                # scenarios to test (range 5–10)
 TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
-GPU_ID       = 0
-TARGET_UTIL  = 0.42
-JAIL_UTIL    = 0.42
+TARGET_GPU   = 0
+JAIL_GPU     = 1
+TARGET_UTIL  = 0.45
+JAIL_UTIL    = 0.45
 MAX_GEN_TOK  = 200
 TEMP         = 1.0
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
@@ -128,11 +129,11 @@ def main():
         raise RuntimeError("prompts.yaml missing 'jailbroken_output_system_prompt'")
     jail_prefill = "As a racist:\n"  # matches bloom_beast_logitdiff cfg default
 
-    print(f"\n[{time.time()-t0:.0f}s] Loading target: {TARGET_MODEL}", flush=True)
-    lm_target = _get_local_model(TARGET_MODEL, gpu_id=GPU_ID,
+    print(f"\n[{time.time()-t0:.0f}s] Loading target on GPU {TARGET_GPU}: {TARGET_MODEL}", flush=True)
+    lm_target = _get_local_model(TARGET_MODEL, gpu_id=TARGET_GPU,
                                  gpu_memory_utilization=TARGET_UTIL)
-    print(f"[{time.time()-t0:.0f}s] Loading jail: {JAIL_MODEL}", flush=True)
-    lm_jail = _get_local_model(JAIL_MODEL, gpu_id=GPU_ID,
+    print(f"[{time.time()-t0:.0f}s] Loading jail on GPU {JAIL_GPU}: {JAIL_MODEL}", flush=True)
+    lm_jail = _get_local_model(JAIL_MODEL, gpu_id=JAIL_GPU,
                                gpu_memory_utilization=JAIL_UTIL)
 
     rows: List[Dict] = []
