@@ -139,11 +139,10 @@ def eval_generate(
     kickoff = KICKOFF_FIXED + _TAG_INSTRUCTIONS_MSG_FIRST
     if committed_trs:
         kickoff += (
-            "\n\nIMPORTANT: A specific target response has already been committed to for "
-            "this scenario — your message MUST be designed to naturally elicit exactly the "
-            "following response from the target. Inside the <targeted_response_start> tag, "
-            "output this committed response verbatim.\n\n"
-            "<committed_target_response>\n" + committed_trs + "\n</committed_target_response>"
+            "\n\nNote: The target response you should design your message to elicit will "
+            "begin with the following text. Make sure your message naturally leads the "
+            "target to produce a response that starts this way.\n\n"
+            f"Target response will start with: \"{committed_trs}\""
         )
     msgs = [
         {"role": "system", "content": eval_sys},
