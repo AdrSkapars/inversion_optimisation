@@ -137,16 +137,15 @@ def target_rephrase(
     s = lm_target.tokenizer.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_SUFFIX
     prefix_ids = lm_target.tokenizer.encode(s, add_special_tokens=False)
-    out_texts: List[str] = []
-    for i in range(n):
-        out_lists = lm_target.worker.generate_n_tokens(
-            [prefix_ids],
-            dict(max_tokens=MAX_TOK_REPHRASE, temperature=TEMP, top_p=1.0,
-                 skip_special_tokens=False, n=1),
-        )[0]
-        text = lm_target.tokenizer.decode(out_lists[0], skip_special_tokens=True)
-        out_texts.append(text)
-    return out_texts
+    # Batched (n=N in one call) — target/Qwen is fast and didn't show the
+    # Gemma-style hang. If this stalls, fall back to per-sample loop.
+    out_lists = lm_target.worker.generate_n_tokens(
+        [prefix_ids],
+        dict(max_tokens=MAX_TOK_REPHRASE, temperature=TEMP, top_p=1.0,
+             skip_special_tokens=False, n=n),
+    )[0]
+    return [lm_target.tokenizer.decode(ids, skip_special_tokens=True)
+            for ids in out_lists]
 
 
 def score_under_target(lm_target, sys_prompt: str, user_msg: str, output: str) -> Optional[float]:
