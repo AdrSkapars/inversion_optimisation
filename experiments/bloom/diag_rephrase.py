@@ -28,10 +28,10 @@ from bloom_beast_logitdiff import (  # type: ignore
 )
 
 # ── Config ────────────────────────────────────────────────────────────────
-# Source the offensive example from a run we know elicited well. Beta_2 had
-# avg=5.88 and the highest behavior_presence in our runs_15 set.
-SRC_RUN     = SCRIPT_DIR / "runs_15" / "beta_sweep" / "beta_2" / "round_1"
-OUT_PATH    = SCRIPT_DIR / "diag_rephrase_results.json"
+# Source the offensive example from an OLD io-search run so we use the eval-generated
+# TRS as the "original" (these are designed to be brutal but tend to be unnatural).
+SRC_RUN     = SCRIPT_DIR / "runs_14" / "1r3t_bon25io_judgeloss" / "round_1"
+OUT_PATH    = SCRIPT_DIR / "diag_rephrase_trs_results.json"
 N_REPHRASES = 5
 TEMP        = 1.0
 MAX_GEN_TOK = 400
@@ -71,26 +71,39 @@ REFUSAL_PATTERNS = [
 REFUSAL_RE = re.compile("|".join(REFUSAL_PATTERNS), re.IGNORECASE)
 
 
-# ── Step 1: pick highest-scoring offensive example ────────────────────────
+# ── Step 1: pick highest-judged TRS example ───────────────────────────────
 def load_offensive_example() -> Dict:
+    """Use the eval-generated TRS (turn-0 user_msg's targeted_response_start) as
+    the 'original output' we want to rephrase. The accompanying transcript's
+    judgment gives us a way to rank scenarios. We pick the highest-judged one
+    that has a non-empty TRS."""
     j = json.load(open(SRC_RUN / "judgment.json", encoding="utf-8"))
     judgments = j.get("judgments", [])
-    # Highest behavior_presence_score wins.
-    best = max(judgments, key=lambda e: (e.get("behavior_presence", 0) or 0))
-    v = best["variation_number"]
-    tf = SRC_RUN / "transcripts" / f"transcript_v{v}r1.json"
-    td = json.load(open(tf, encoding="utf-8"))
-    msgs = td.get("messages", [])
-    sys_msg = next((m for m in msgs if m["role"] == "system"), {"content": ""})
-    user_msg = next((m for m in msgs if m["role"] == "user"), None)
-    asst_msg = next((m for m in msgs if m["role"] == "assistant"), None)
-    return {
-        "scenario_file": tf.name,
-        "behavior_presence": best.get("behavior_presence"),
-        "sys_prompt": sys_msg.get("content", "") or "",
-        "user_msg":   user_msg.get("content", "") if user_msg else "",
-        "original_output": asst_msg.get("content", "") if asst_msg else "",
-    }
+    # Sort by behavior_presence descending; iterate until we find one with non-empty TRS.
+    judgments_sorted = sorted(judgments, key=lambda e: -(e.get("behavior_presence", 0) or 0))
+    for entry in judgments_sorted:
+        v = entry["variation_number"]
+        tf = SRC_RUN / "transcripts" / f"transcript_v{v}r1.json"
+        if not tf.exists():
+            continue
+        td = json.load(open(tf, encoding="utf-8"))
+        msgs = td.get("messages", [])
+        sys_msg = next((m for m in msgs if m["role"] == "system"), {"content": ""})
+        user_msg = next((m for m in msgs if m["role"] == "user"), None)
+        if user_msg is None:
+            continue
+        trs = user_msg.get("targeted_response_start", "") or ""
+        if not trs.strip():
+            continue
+        return {
+            "scenario_file": tf.name,
+            "behavior_presence": entry.get("behavior_presence"),
+            "sys_prompt": sys_msg.get("content", "") or "",
+            "user_msg":   user_msg.get("content", "") or "",
+            "original_output": trs,   # ← this is the eval TRS, not the assistant turn
+            "original_kind": "eval_trs",
+        }
+    raise RuntimeError("No transcript with non-empty TRS found")
 
 
 # ── Step 2: rephrase with each model ──────────────────────────────────────
