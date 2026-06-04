@@ -245,19 +245,10 @@ def main():
             rows_A.append({"idx": idx, "raw_output": raw, "extracted_message": msg,
                            "lp_TRS_under_extracted": lp})
 
-        # 3. Condition B: jail TRS injected via user prompt as "committed target response".
-        # (Originally we tried assistant-side prefill but Gemma hangs on that format.)
-        print(f"\n[{time.time()-t0:.0f}s] Condition B: sampling {N_PER_CONDITION} eval generations (jail TRS injected in user prompt)...", flush=True)
-        raw_B = eval_generate(lm_eval, eval_sys, rollout_prompt,
-                              target_before_input=False, n=N_PER_CONDITION, committed_trs=jail_TRS)
+        # Condition B disabled — Gemma hangs on the TRS-injected user prompt regardless
+        # of phrasing (CPU-bound stall at 0% GPU). Just record empty for now.
+        print(f"\n[{time.time()-t0:.0f}s] Condition B: SKIPPED (Gemma hangs on TRS-injected prompt)", flush=True)
         rows_B = []
-        for idx, raw in enumerate(raw_B):
-            msg, _trs_eval, _strat = _extract_message_tags(raw)
-            lp = score_under_target(lm_target, ex["sys_prompt"], msg, jail_TRS) if msg else None
-            print(f"  [B #{idx}] lp={lp}  msg_len={len(msg)}", flush=True)
-            print(f"    extracted_msg: {msg[:240]}", flush=True)
-            rows_B.append({"idx": idx, "raw_output": raw, "extracted_message": msg,
-                           "lp_TRS_under_extracted": lp})
 
         all_results.append({
             "example": ex, "scenario_description": scenario_desc,
