@@ -42,9 +42,9 @@ EVAL_MODEL   = "lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-27b-i
 
 # Single Blackwell GPU; eval is the heavy one.
 GPU_ID       = 0
-EVAL_UTIL    = 0.55
-TARGET_UTIL  = 0.15
-JAIL_UTIL    = 0.15
+EVAL_UTIL    = 0.40
+TARGET_UTIL  = 0.22
+JAIL_UTIL    = 0.22
 
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
