@@ -22,11 +22,15 @@ import yaml
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 from bloom_beast_logitdiff import (  # type: ignore
-    _get_local_model, _contrastive_sample_extensions,
+    _get_local_model, _contrastive_sample_extensions, _get_or_build_latin_mask,
 )
 
 SRC_RUN     = SCRIPT_DIR / "runs_14" / "1r3t_bon25io_judgeloss" / "round_1"
-OUT_PATH    = SCRIPT_DIR / "diag_rephrase_filtered_trs_poe_results.json"
+USE_LATIN_MASK = True
+OUT_PATH    = SCRIPT_DIR / (
+    "diag_rephrase_filtered_trs_poe_mask_results.json" if USE_LATIN_MASK
+    else "diag_rephrase_filtered_trs_poe_results.json"
+)
 
 TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
@@ -197,6 +201,12 @@ def main():
     rephrase_prefix = build_rephrase_prefix(lm_target, ex["user_msg"], chosen["text"])
 
     eos = lm_target.tokenizer.eos_token_id
+    latin_token_ids = _get_or_build_latin_mask(
+        lm_target, enabled=USE_LATIN_MASK, eos_token_id=eos,
+        extra_chars="", cache_tag="diag_filtered", label="(diag_filtered)",
+    )
+    print(f"\n[{time.time()-t0:.0f}s] latin_mask: {'ON' if USE_LATIN_MASK else 'OFF'}"
+          + (f"  ({len(latin_token_ids)} tokens)" if latin_token_ids else ""), flush=True)
     rows: List[Dict] = []
     for beta in BETAS:
         print(f"\n[{time.time()-t0:.0f}s] === β={beta} — PoE sampling {N_PER_BETA} ===", flush=True)
@@ -207,7 +217,7 @@ def main():
             n=N_PER_BETA, max_tokens=MAX_TOK_POE,
             beta=beta, top_k_logprobs=TOP_K_LP,
             temperature=TEMP, top_p=1.0,
-            allowed_token_ids=None, ignore_eos=False, eos_token_id=eos,
+            allowed_token_ids=latin_token_ids, ignore_eos=False, eos_token_id=eos,
         )[0]
         for idx, ids in enumerate(out_lists):
             text = lm_target.tokenizer.decode(ids, skip_special_tokens=True).strip()
