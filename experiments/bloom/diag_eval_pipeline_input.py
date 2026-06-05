@@ -41,10 +41,11 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 EVAL_MODEL   = "lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-27b-it"
 TARGET_MODEL_NAME_FOR_PROMPT = "Qwen/Qwen3-4B"
 
-GPU_ID       = 0
-EVAL_UTIL    = 0.40
-TARGET_UTIL  = 0.22
-JAIL_UTIL    = 0.22
+GPU_ID       = 0       # target + jail
+EVAL_GPU_ID  = 1       # eval on its own GPU (Gemma 27B is huge)
+EVAL_UTIL    = 0.70
+TARGET_UTIL  = 0.35
+JAIL_UTIL    = 0.35
 
 N_JAIL_TRS_SAMPLES = 6
 N_PER_CONDITION    = 3
@@ -195,7 +196,7 @@ def main():
     print(f"\n[{time.time()-t0:.0f}s] Loading target + jail + eval...", flush=True)
     lm_target = _get_local_model(TARGET_MODEL, gpu_id=GPU_ID, gpu_memory_utilization=TARGET_UTIL)
     lm_jail   = _get_local_model(JAIL_MODEL,   gpu_id=GPU_ID, gpu_memory_utilization=JAIL_UTIL)
-    lm_eval   = _get_local_model(EVAL_MODEL,   gpu_id=GPU_ID, gpu_memory_utilization=EVAL_UTIL)
+    lm_eval   = _get_local_model(EVAL_MODEL,   gpu_id=EVAL_GPU_ID, gpu_memory_utilization=EVAL_UTIL)
 
     all_results = []
     for v in SCENARIO_VS:
