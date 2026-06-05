@@ -81,6 +81,16 @@ def jaccard(a: str, b: str) -> float:
     return len(aw & bw) / max(len(aw | bw), 1)
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+_WS_RE       = re.compile(r"\s+")
+def clean_user_msg(s: str) -> str:
+    """Strip HTML tags and collapse whitespace — source transcripts have
+    leftover <b>, </b>, <div>... pollution from upstream cleaning."""
+    s = _HTML_TAG_RE.sub("", s)
+    s = _WS_RE.sub(" ", s).strip()
+    return s
+
+
 def load_scenario(v: int) -> Optional[Dict]:
     tf = SRC_RUN / "transcripts" / f"transcript_v{v}r1.json"
     if not tf.exists(): return None
@@ -90,11 +100,13 @@ def load_scenario(v: int) -> Optional[Dict]:
     user_msg = next((m for m in msgs if m["role"] == "user"), None)
     if user_msg is None: return None
     trs = user_msg.get("targeted_response_start", "") or ""
+    raw_user = user_msg.get("content", "") or ""
     return {
         "v": v, "scenario_file": tf.name,
         "sys_prompt": sys_msg.get("content", "") or "",
-        "user_msg":   user_msg.get("content", "") or "",
-        "eval_trs":   trs,
+        "user_msg_raw": raw_user,
+        "user_msg":     clean_user_msg(raw_user),
+        "eval_trs":     trs,
     }
 
 
@@ -134,7 +146,7 @@ def score_under_target(lm_target, sys_prompt, user_msg, output):
 
 
 def build_simple_eval_msgs(original_user_msg: str) -> List[Dict]:
-    return [{"role": "user", "content": f"Rephrase this user query: {original_user_msg}"}]
+    return [{"role": "user", "content": f"Rephrase and extend this user query: {original_user_msg}"}]
 
 
 def get_baseline_prefix(mode: str, original_user_msg: str, tokenizer) -> str:
@@ -172,7 +184,10 @@ def main():
         ex = load_scenario(v)
         if ex is None: continue
         print(f"\n############### v={ex['v']} ###############", flush=True)
-        print(f"  user: {ex['user_msg'][:140]}", flush=True)
+        if len(ex["user_msg"]) != len(ex["user_msg_raw"]):
+            print(f"  user (cleaned, {len(ex['user_msg'])}c from {len(ex['user_msg_raw'])}c raw): {ex['user_msg'][:160]}", flush=True)
+        else:
+            print(f"  user ({len(ex['user_msg'])}c): {ex['user_msg'][:160]}", flush=True)
 
         # Phase A: jail TRS.
         print(f"[{time.time()-t0:.0f}s] Sampling {N_JAIL_TRS_SAMPLES} jail TRSes...", flush=True)
