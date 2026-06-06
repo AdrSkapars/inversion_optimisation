@@ -167,14 +167,15 @@ def _build_cfg(folder: str, *, input_search_enabled: bool,
 
     # GPU layout — REVIEW before each run:
     #   - 2-GPU box (e.g. 2× A6000 / 2× A40): eval on GPU 0, target on GPU 1, util ~0.85 each.
-    #   - 1-GPU box (e.g. 1× RTX PRO 6000 96GB / H100 80GB): both on GPU 0, util < 0.7 each.
-    # Currently set for 1-GPU Blackwell: Gemma 27B GGUF float32 (Gemma 3 won't
-    # accept bf16/fp16 under GGUF) → ~50-60GB; Qwen 4B bf16 → ~14GB.
-    # Total ~70GB of 96GB leaves modest headroom for cuda graphs/scratch.
+    #   - 1-GPU box (1× RTX PRO 6000 96GB Blackwell): both on GPU 0, push utils
+    #     close to the GPU ceiling (we don't load the jail model in this sweep).
+    # Gemma 27B GGUF float32 (Gemma 3 won't accept bf16/fp16 under GGUF)
+    # gets the lion's share; Qwen 4B bf16 needs ~30% for proper KV cache at
+    # max_model_len=8192 (15% was too tight, KV cache check failed).
     cfg.evaluator_gpu_id = 0
     cfg.target_gpu_id = 0
-    cfg.evaluator_gpu_memory_utilization = 0.62
-    cfg.target_gpu_memory_utilization = 0.15
+    cfg.evaluator_gpu_memory_utilization = 0.65
+    cfg.target_gpu_memory_utilization = 0.30
 
     # Reduce scenario count + single round, single turn.
     cfg.ideation.num_scenarios = NUM_SCENARIOS
