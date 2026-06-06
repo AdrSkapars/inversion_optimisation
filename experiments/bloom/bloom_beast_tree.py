@@ -477,8 +477,13 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
         from huggingface_hub import hf_hub_download, list_repo_files
 
         spec = _parse_local_spec(hf_name)
+        # GGUF quantization in vLLM requires float16 or float32 (NOT bfloat16) —
+        # this is enforced by vLLM on all GPUs but most painful on Blackwell where
+        # the bfloat16 default would otherwise be silently accepted on Ampere.
+        # HF bf16 models keep their bfloat16 dtype.
+        _dtype = "float16" if spec["kind"] == "gguf" else "bfloat16"
         kwargs: Dict[str, Any] = dict(
-            dtype="bfloat16",
+            dtype=_dtype,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             enforce_eager=False,
