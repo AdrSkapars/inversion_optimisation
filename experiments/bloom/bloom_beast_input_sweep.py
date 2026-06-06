@@ -165,6 +165,16 @@ def _build_cfg(folder: str, *, input_search_enabled: bool,
 
     cfg.folder_name = folder
 
+    # GPU layout — REVIEW before each run:
+    #   - 2-GPU box (e.g. 2× A6000 / 2× A40): eval on GPU 0, target on GPU 1, util ~0.85 each.
+    #   - 1-GPU box (e.g. 1× RTX PRO 6000 96GB / H100 80GB): both on GPU 0, util < 0.55 each.
+    # Currently set for 1-GPU: Gemma 27B GGUF ~24GB weights + KV → 0.42 of 96GB ≈ 40GB,
+    # Qwen 4B bf16 ~9GB + KV → 0.15 ≈ 14GB. Total ~55GB leaves headroom for graphs/scratch.
+    cfg.evaluator_gpu_id = 0
+    cfg.target_gpu_id = 0
+    cfg.evaluator_gpu_memory_utilization = 0.42
+    cfg.target_gpu_memory_utilization = 0.15
+
     # Reduce scenario count + single round, single turn.
     cfg.ideation.num_scenarios = NUM_SCENARIOS
     cfg.refinement.num_rounds = 1
