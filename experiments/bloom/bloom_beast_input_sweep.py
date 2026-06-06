@@ -143,7 +143,11 @@ PREFILL_MODES: Dict[str, Optional[int]] = {
 # sequences (200 tokens), keep the whole pool (top-1 = winner). Different
 # truncate_at_eos behaviour than the BEAST cells — BoN lets candidates
 # terminate naturally at EOS so we get variable-length completions.
-BON_N           = 250
+#
+# N=25 matches BEAST's per-iteration batch (num_beams=5 × candidates_per_beam=5).
+# So this cell tests whether BEAST's 20 iterations of refinement actually beat
+# a single one-shot sample of the same per-iter budget.
+BON_N           = 25
 BON_SEQ_LEN     = 200
 BON_PREFILL_MODES: Dict[str, Optional[int]] = {
     "half": 50,
