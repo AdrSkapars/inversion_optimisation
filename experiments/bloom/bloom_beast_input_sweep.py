@@ -229,7 +229,9 @@ def _patched_vllm_sample_extensions(
         allowed_token_ids=allowed_token_ids,
         ignore_eos=ignore_eos,
         eos_token_id=eos,
-        token_schedule={"mode": "all"},
+        # NOTE: bloom_beast_tree's _contrastive_sample_extensions doesn't accept
+        # `token_schedule` (it's a logitdiff-fork-only param). The default
+        # behavior is "jail active at every step", which is what we want.
     )
 
 bbt._vllm_sample_extensions = _patched_vllm_sample_extensions
