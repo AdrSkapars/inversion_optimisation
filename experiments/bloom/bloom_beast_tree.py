@@ -477,11 +477,12 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
         from huggingface_hub import hf_hub_download, list_repo_files
 
         spec = _parse_local_spec(hf_name)
-        # GGUF quantization in vLLM requires float16 or float32 (NOT bfloat16) —
-        # this is enforced by vLLM on all GPUs but most painful on Blackwell where
-        # the bfloat16 default would otherwise be silently accepted on Ampere.
-        # HF bf16 models keep their bfloat16 dtype.
-        _dtype = "float16" if spec["kind"] == "gguf" else "bfloat16"
+        # GGUF quantization in vLLM requires float16 or float32 (NOT bfloat16).
+        # Gemma 3 additionally rejects float16 ("numerical instability"), so we
+        # need float32 for any GGUF-quantized Gemma 3 path. Defaulting GGUF to
+        # float32 is the safe option — it ~2× the activation/KV memory footprint
+        # but works for all GGUF model families. HF bf16 models keep bfloat16.
+        _dtype = "float32" if spec["kind"] == "gguf" else "bfloat16"
         kwargs: Dict[str, Any] = dict(
             dtype=_dtype,
             gpu_memory_utilization=gpu_memory_utilization,
