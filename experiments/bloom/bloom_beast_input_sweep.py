@@ -138,6 +138,18 @@ PREFILL_MODES: Dict[str, Optional[int]] = {
     "none": 0,      # cursor right after <message>; BEAST writes whole body
 }
 
+# Best-of-N cells (appended after the BEAST sweep).
+# Pure BoN: num_beams=1, candidates_per_beam=N, 1 iteration, full-message
+# sequences (200 tokens), keep the whole pool (top-1 = winner). Different
+# truncate_at_eos behaviour than the BEAST cells — BoN lets candidates
+# terminate naturally at EOS so we get variable-length completions.
+BON_N           = 250
+BON_SEQ_LEN     = 200
+BON_PREFILL_MODES: Dict[str, Optional[int]] = {
+    "half": 50,
+    "none": 0,
+}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _share_understanding_ideation(base_dir: Path, dest_dir: Path) -> None:
     """Symlink (or copy) understanding.json + ideation.json from base run.
@@ -209,6 +221,28 @@ def _build_cfg(folder: str, *, input_search_enabled: bool,
         cfg.input_search.suffixes_per_scenario = 1
         cfg.input_search.beast_temperature = 0.0
 
+    return cfg
+
+
+def _build_bon_cfg(folder: str, *, max_prefix_length: Optional[int]) -> "bbt.DotDict":
+    """Build a cfg for the Best-of-N cells. Differs from the BEAST cfg in:
+       - num_beams=1, candidates_per_beam=BON_N → BON_N independent draws
+       - max_num_iterations=1                    → pure BoN, no iteration
+       - scored=kept=BON_SEQ_LEN                 → full-message sequences
+       - max_pool_size=BON_N                     → keep them all
+       - truncate_at_eos=True                    → candidates terminate naturally
+                                                   (user requested; reopens the
+                                                    <|im_end|> exploit risk we
+                                                    saw in earlier diags)
+    """
+    cfg = _build_cfg(folder, input_search_enabled=True,
+                     scored_len=BON_SEQ_LEN, kept_len=BON_SEQ_LEN,
+                     max_prefix_length=max_prefix_length)
+    cfg.input_search.num_beams = 1
+    cfg.input_search.candidates_per_beam = BON_N
+    cfg.input_search.max_num_iterations = 1
+    cfg.input_search.max_pool_size = BON_N
+    cfg.input_search.truncate_at_eos = True
     return cfg
 
 
@@ -303,6 +337,15 @@ async def main():
             )
             await _run_one(cfg, label=label)
 
+    # 2b) BEST-OF-N RUNS (appended baseline-comparison cells).
+    for mode, max_pre in BON_PREFILL_MODES.items():
+        label = f"BoN n={BON_N} mode={mode}"
+        folder = f"{BASE_FOLDER}/bon_{mode}_n{BON_N}/round_1"
+        dest_dir = SCRIPT_DIR / folder
+        _share_understanding_ideation(base_round_dir, dest_dir)
+        cfg = _build_bon_cfg(folder=folder, max_prefix_length=max_pre)
+        await _run_one(cfg, label=label)
+
     # 3) AGGREGATE — read all transcripts and build a per-(mode, scored, kept) table.
     print("\n" + "=" * 70, flush=True)
     print(f"AGGREGATE  (elapsed {time.time()-t0:.0f}s)", flush=True)
@@ -321,28 +364,40 @@ async def main():
         print(f"  v={v}  lp_before={lp}  per_token_p={p_pct:.3f}%" if p_pct is not None
               else f"  v={v}  lp_before=None")
 
+    def _print_cell(label, rows):
+        deltas = []
+        for r in rows:
+            v = r["variation_number"]
+            lp_after = r["targeted_response_start_logprob"]
+            lp_before = base_by_v.get(v)
+            if lp_after is None or lp_before is None: continue
+            pct = (math.exp(lp_after) / math.exp(lp_before) - 1) * 100
+            deltas.append(pct)
+        mean_d = sum(deltas)/len(deltas) if deltas else None
+        best_d = max(deltas) if deltas else None
+        line = f"  {label:<24}  n={len(deltas)}"
+        if mean_d is not None:
+            line += f"  mean Δp={mean_d:+6.1f}%  best Δp={best_d:+6.1f}%"
+        print(line)
+        return deltas
+
     sweep_results: Dict[str, Dict[Tuple[int, int], List[Dict]]] = {}
-    print(f"\nPer-cell results (lp_after = BEAST best score per scenario):")
+    print(f"\nPer-cell results (lp_after = best score per scenario):")
     for mode in PREFILL_MODES:
         sweep_results[mode] = {}
         for scored_len, kept_len in LADDER:
             folder = f"{BASE_FOLDER}/{mode}_s{scored_len}_k{kept_len}/round_1"
             rows = _read_trs_lps(SCRIPT_DIR / folder)
             sweep_results[mode][(scored_len, kept_len)] = rows
-            deltas = []
-            for r in rows:
-                v = r["variation_number"]
-                lp_after = r["targeted_response_start_logprob"]
-                lp_before = base_by_v.get(v)
-                if lp_after is None or lp_before is None: continue
-                pct = (math.exp(lp_after) / math.exp(lp_before) - 1) * 100
-                deltas.append(pct)
-            mean_d = sum(deltas)/len(deltas) if deltas else None
-            best_d = max(deltas) if deltas else None
-            line = f"  {mode:<5} ({scored_len:>2},{kept_len:>2})  n={len(deltas)}"
-            if mean_d is not None:
-                line += f"  mean Δp={mean_d:+6.1f}%  best Δp={best_d:+6.1f}%"
-            print(line)
+            _print_cell(f"{mode} (s={scored_len},k={kept_len})", rows)
+
+    bon_results: Dict[str, List[Dict]] = {}
+    print(f"\nBest-of-N cells (n={BON_N}, seq_len={BON_SEQ_LEN}):")
+    for mode in BON_PREFILL_MODES:
+        folder = f"{BASE_FOLDER}/bon_{mode}_n{BON_N}/round_1"
+        rows = _read_trs_lps(SCRIPT_DIR / folder)
+        bon_results[mode] = rows
+        _print_cell(f"bon {mode} n={BON_N}", rows)
 
     # Save aggregate JSON.
     out_path = SCRIPT_DIR / f"{BASE_FOLDER}/aggregate.json"
@@ -351,8 +406,12 @@ async def main():
         "baseline": base_lps,
         "sweep": {mode: {f"{s}_{k}": rows for (s, k), rows in cells.items()}
                   for mode, cells in sweep_results.items()},
+        "bon": bon_results,
         "ladder": LADDER,
         "prefill_modes": PREFILL_MODES,
+        "bon_prefill_modes": BON_PREFILL_MODES,
+        "bon_n": BON_N,
+        "bon_seq_len": BON_SEQ_LEN,
     }, open(out_path, "w", encoding="utf-8"), indent=2)
     print(f"\nSaved aggregate → {out_path}")
 
