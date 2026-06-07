@@ -30,12 +30,10 @@ N_SAMPLES       = 5
 MAX_TOKENS      = 250
 TEMPERATURE     = 1.0
 TOP_P           = 1.0
-# β=2 fixed, sweep T_target. Already have (β=2, T_t=1) = 32.8% P, 4/15 bias
-# and (β=2, T_t=5) = 14.4% P, 9/15 bias from the proper-sys run.
-# Fill in T_t = 2 and 3 to complete the asym-T sweep at β=2.
+# Fill in β=3 and β=4 (T_t=1) — missing cells for the proper-sys β sweep.
 PAIRS = [
-    (2.0, 2.0),
-    (2.0, 3.0),
+    (3.0, 1.0),
+    (4.0, 1.0),
 ]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"

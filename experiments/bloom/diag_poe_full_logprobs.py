@@ -30,7 +30,7 @@ N_SAMPLES    = 5
 MAX_TOKENS   = 250
 TEMPERATURE  = 1.0
 TOP_P        = 1.0
-BETAS        = [1.0, 2.0, 3.0]
+BETAS        = [4.0]  # filling in missing cell; β=1/2/3 already in results.json
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
