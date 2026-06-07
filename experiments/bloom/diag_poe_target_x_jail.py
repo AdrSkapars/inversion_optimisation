@@ -30,12 +30,12 @@ N_SAMPLES       = 5
 MAX_TOKENS      = 250
 TEMPERATURE     = 1.0
 TOP_P           = 1.0
-# (beta, T_target) cells covering the previously-interesting points.
+# β=2 fixed, sweep T_target. Already have (β=2, T_t=1) = 32.8% P, 4/15 bias
+# and (β=2, T_t=5) = 14.4% P, 9/15 bias from the proper-sys run.
+# Fill in T_t = 2 and 3 to complete the asym-T sweep at β=2.
 PAIRS = [
-    (1.0, 1.0),   # baseline (was: target × jail β=1, 75.6% P / 1/15 bias)
-    (2.0, 1.0),   # was: 63.2% P / 1-2/15 bias
-    (5.0, 1.0),   # was: 47.0% P / 4-5/15 bias
-    (2.0, 5.0),   # was: 43.1% P / 5/15 bias (best asym-T point)
+    (2.0, 2.0),
+    (2.0, 3.0),
 ]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
