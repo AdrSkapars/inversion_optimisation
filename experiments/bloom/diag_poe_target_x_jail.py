@@ -28,7 +28,9 @@ N_SAMPLES    = 5
 MAX_TOKENS   = 250
 TEMPERATURE  = 1.0
 TOP_P        = 1.0
-BETAS        = [7.0, 8.0, 9.0]
+# (beta, T_target) cells. T_target > 1 flattens target's "refuse" logits so jail
+# can win biased tokens target would otherwise veto. T_jail stays = 1.
+PAIRS        = [(2.0, 2.0), (2.0, 3.0), (2.0, 5.0)]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
@@ -64,8 +66,14 @@ def full_poe_sample_two_models(
     model_t, model_j, target_seqs, jail_seqs, beta: float, max_tokens: int,
     temperature: float, top_p: float, allowed_inf: torch.Tensor,
     eos_id: int, pad_id: int, device,
+    target_temp: float = 1.0,
 ):
-    """Token-by-token PoE generation with two separate models."""
+    """Token-by-token PoE generation with two separate models.
+
+    target_temp > 1 flattens target's distribution (its strong refusal logits
+    become less negative), letting jail's preferences win tokens that target's
+    veto would otherwise block.
+    """
     B = len(target_seqs)
     t_ids, t_attn = left_pad_batch(target_seqs, pad_id, device)
     j_ids, j_attn = left_pad_batch(jail_seqs, pad_id, device)
@@ -81,7 +89,7 @@ def full_poe_sample_two_models(
     for step in range(max_tokens):
         t_logits = t_out.logits[:, -1, :].float() + allowed_inf
         j_logits = j_out.logits[:, -1, :].float()
-        t_lp = torch.log_softmax(t_logits, dim=-1)
+        t_lp = torch.log_softmax(t_logits / max(target_temp, 1e-6), dim=-1)
         j_lp = torch.log_softmax(j_logits, dim=-1)
         combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
 
@@ -212,17 +220,18 @@ def main():
     B = len(expanded_t)
     print(f"[{time.time()-t0:.0f}s] Batch = {B} streams ({P} scenarios × n={N_SAMPLES})", flush=True)
 
-    for beta in BETAS:
-        print(f"\n[{time.time()-t0:.0f}s] === target × jail β={beta} ===", flush=True)
+    for (beta, T_t) in PAIRS:
+        print(f"\n[{time.time()-t0:.0f}s] === target × jail β={beta} T_t={T_t} ===", flush=True)
         sampled = full_poe_sample_two_models(
             model_t, model_j, expanded_t, expanded_j,
             beta=beta, max_tokens=MAX_TOKENS,
             temperature=TEMPERATURE, top_p=TOP_P,
             allowed_inf=allowed_inf, eos_id=eos_id,
             pad_id=pad_id, device=DEVICE,
+            target_temp=T_t,
         )
         torch.cuda.empty_cache()
-        print(f"  [{time.time()-t0:.0f}s] β={beta} sampling done.", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t} sampling done.", flush=True)
 
         decoded_per_scen: List[List[str]] = []
         score_items: List[tuple] = []
@@ -246,9 +255,9 @@ def main():
                 score_items.append((full_seq, len(prefix_ids)))
             decoded_per_scen.append(scen_texts)
 
-        print(f"  [{time.time()-t0:.0f}s] β={beta} scoring {len(score_items)} items under target...", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t} scoring {len(score_items)} items under target...", flush=True)
         scores = batch_score(model_t, score_items, DEVICE, pad_id, batch_size=4)
-        print(f"  [{time.time()-t0:.0f}s] β={beta} scoring done.", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t} scoring done.", flush=True)
 
         cell_best = []
         for s_idx, sc in enumerate(scenarios):
@@ -267,16 +276,17 @@ def main():
                 "all_samples":        texts,
             })
 
+        cell_key = f"beta{beta}_Tt{T_t}"
         for s_idx, sc in enumerate(scenarios):
-            sweep = sc.setdefault("poe_target_x_jail_sweep", {})
-            sweep[f"beta{beta}"] = cell_best[s_idx]
+            sweep = sc.setdefault("poe_target_x_jail_asym_temp", {})
+            sweep[cell_key] = cell_best[s_idx]
         json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-        print(f"  [{time.time()-t0:.0f}s] β={beta} saved → results.json", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] {cell_key} saved → results.json", flush=True)
 
         ps = [b["best_per_token_p"] for b in cell_best if b.get("best_per_token_p") is not None]
         if ps:
             mean = sum(ps)/len(ps); med = sorted(ps)[len(ps)//2]
-            print(f"    β={beta}  n={len(ps)}  mean P={mean:.3f}%  median P={med:.3f}%  "
+            print(f"    β={beta} T_t={T_t}  n={len(ps)}  mean P={mean:.3f}%  median P={med:.3f}%  "
                   f"min={min(ps):.3f}%  max={max(ps):.3f}%", flush=True)
 
     print(f"\n[{time.time()-t0:.0f}s] === SUMMARY ===")
@@ -295,12 +305,18 @@ def main():
               for sc in scenarios]
         ps = [p for p in ps if p is not None]
         stats(f"  full t×reph β={beta}", ps)
-    print("\nFull target × jail-direct (this run):")
-    for beta in BETAS:
-        ps = [sc["poe_target_x_jail_sweep"].get(f"beta{beta}", {}).get("best_per_token_p")
+    print("\nSymmetric t × jail (prior, T_t=1):")
+    for b in (1.0, 2.0, 3.0, 5.0, 7.0, 9.0):
+        ps = [sc.get("poe_target_x_jail_sweep", {}).get(f"beta{b}", {}).get("best_per_token_p")
               for sc in scenarios]
         ps = [p for p in ps if p is not None]
-        stats(f"  full t×jail β={beta}", ps)
+        stats(f"  symmetric β={b}", ps)
+    print("\nAsymmetric T_target (this run, T_jail=1):")
+    for (beta, T_t) in PAIRS:
+        ps = [sc["poe_target_x_jail_asym_temp"].get(f"beta{beta}_Tt{T_t}", {}).get("best_per_token_p")
+              for sc in scenarios]
+        ps = [p for p in ps if p is not None]
+        stats(f"  β={beta}, T_t={T_t}", ps)
 
     import os; os._exit(0)
 
