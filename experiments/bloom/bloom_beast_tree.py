@@ -2697,6 +2697,8 @@ def _contrastive_sample_extensions(
     allowed_token_ids: Optional[List[int]] = None,
     ignore_eos: bool = False,
     eos_token_id: Optional[int] = None,
+    per_prompt_temperature: Optional[List[float]] = None,
+    per_prompt_beta: Optional[List[float]] = None,
 ) -> List[List[List[int]]]:
     """Sample `n` extensions of `max_tokens` tokens via weighted PoE:
     softmax(log p_target + beta · log p_jailbroken).
@@ -2718,16 +2720,26 @@ def _contrastive_sample_extensions(
     P = len(target_prefixes)
     if P != len(jail_prefixes):
         raise ValueError(f"target_prefixes ({P}) and jail_prefixes ({len(jail_prefixes)}) must align")
+    if per_prompt_temperature is not None and len(per_prompt_temperature) != P:
+        raise ValueError(f"per_prompt_temperature must have length P={P}")
+    if per_prompt_beta is not None and len(per_prompt_beta) != P:
+        raise ValueError(f"per_prompt_beta must have length P={P}")
     if P == 0 or n < 1 or max_tokens < 1:
         return [[[] for _ in range(n)] for _ in range(P)]
 
     # Materialise n*P parallel slots.
     t_states: List[List[int]] = []
     j_states: List[List[int]] = []
+    slot_temperature: List[float] = []
+    slot_beta: List[float] = []
     for i in range(P):
+        t_i = per_prompt_temperature[i] if per_prompt_temperature is not None else temperature
+        b_i = per_prompt_beta[i]        if per_prompt_beta        is not None else beta
         for _ in range(n):
             t_states.append(list(target_prefixes[i]))
             j_states.append(list(jail_prefixes[i]))
+            slot_temperature.append(t_i)
+            slot_beta.append(b_i)
     sampled_tokens: List[List[int]] = [[] for _ in t_states]
     done: List[bool] = [False] * len(t_states)
 
@@ -2760,15 +2772,18 @@ def _contrastive_sample_extensions(
         # vLLM accepts list[SamplingParams] in the same generate() call, one per
         # prompt — so we get per-prompt biases without IPC overhead per slot.
         per_prompt_kwargs: List[Dict] = []
-        for (_tok, _slp, jail_topk) in jail_out:
+        for idx_in_active, (_tok, _slp, jail_topk) in enumerate(jail_out):
+            slot_idx = active[idx_in_active]
+            t_slot = slot_temperature[slot_idx]
+            b_slot = slot_beta[slot_idx]
             kwargs = dict(
                 max_tokens=1,
-                temperature=max(temperature, 1e-6),
+                temperature=max(t_slot, 1e-6),
                 top_p=top_p,
                 logprobs=1,
                 skip_special_tokens=False,
                 ignore_eos=ignore_eos,
-                logit_bias={tid: beta * lp for tid, lp in jail_topk.items()},
+                logit_bias={tid: b_slot * lp for tid, lp in jail_topk.items()},
             )
             if allowed_token_ids is not None:
                 kwargs["allowed_token_ids"] = allowed_token_ids
