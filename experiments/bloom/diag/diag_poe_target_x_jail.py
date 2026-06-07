@@ -35,9 +35,8 @@ TOP_P           = 1.0
 # Sweep cells are now (beta, T_t, target_lp_threshold). β=6, T_t=1 baseline matched
 # the analyzed cell in token_analysis_beta6_Tt1.
 PAIRS = [
-    (6.0, 1.0, -10.0),
-    (6.0, 1.0, -15.0),
-    (6.0, 1.0, -20.0),
+    (7.0, 1.0, -15.0),
+    (8.0, 1.0, -15.0),
 ]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
