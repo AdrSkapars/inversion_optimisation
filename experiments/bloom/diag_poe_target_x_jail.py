@@ -30,10 +30,16 @@ N_SAMPLES       = 5
 MAX_TOKENS      = 250
 TEMPERATURE     = 1.0
 TOP_P           = 1.0
-# Fill in β=3 and β=4 (T_t=1) — missing cells for the proper-sys β sweep.
+# Push both levers further to find asymptotes.
 PAIRS = [
-    (3.0, 1.0),
-    (4.0, 1.0),
+    # High β at T_t=1
+    (6.0, 1.0),
+    (8.0, 1.0),
+    (10.0, 1.0),
+    # High T_t at β=2
+    (2.0, 7.0),
+    (2.0, 10.0),
+    (2.0, 15.0),
 ]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
