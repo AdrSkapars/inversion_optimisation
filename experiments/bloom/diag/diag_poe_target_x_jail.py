@@ -34,18 +34,19 @@ TOP_P           = 1.0
 # before adding β · jail). None = no extra mask. Use float values like -10, -15, -20.
 # Sweep cells are now (beta, T_t, target_lp_threshold). β=6, T_t=1 baseline matched
 # the analyzed cell in token_analysis_beta6_Tt1.
-# Hard-constraint mode: target's role is reduced to a binary gate.
-# For each token: if target_lp >= threshold, allow (logit += 0); else forbid (-inf).
-# The distribution we sample from is essentially jail, restricted to target-permitted tokens.
-# Sweep thresholds; β is irrelevant in this mode (set to 1).
+# Hard-constraint mode: one side acts as binary gate, the other is the sample distribution.
+# GATE_SIDE = "target" (default, prev experiment): jail samples, target gates → jail-restricted
+# GATE_SIDE = "jail" (this experiment): target samples, jail gates → target-restricted-to-jail-acceptable
+# Sweep thresholds; β is irrelevant in either mode.
 PAIRS = [
+    (1.0, 1.0, -3.0),
     (1.0, 1.0, -5.0),
     (1.0, 1.0, -8.0),
     (1.0, 1.0, -10.0),
     (1.0, 1.0, -15.0),
-    (1.0, 1.0, -20.0),
 ]
-HARD_CONSTRAINT_MODE = True   # if True, target_lp is binarized (mask only, no soft contribution)
+HARD_CONSTRAINT_MODE = True
+GATE_SIDE = "jail"   # which side does the gating: "target" or "jail"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
@@ -84,6 +85,7 @@ def full_poe_sample_two_models(
     target_temp: float = 1.0,
     target_lp_threshold: float = None,
     hard_constraint: bool = False,
+    gate_side: str = "target",   # "target": jail-sampled, target-gated. "jail": target-sampled, jail-gated.
 ):
     """Token-by-token PoE generation with two separate models.
 
@@ -115,16 +117,24 @@ def full_poe_sample_two_models(
         j_lp = torch.log_softmax(j_logits, dim=-1)
 
         if hard_constraint:
-            # Target acts only as a binary gate, no soft contribution.
-            # Sample from jail's distribution restricted to target-permitted tokens.
             if target_lp_threshold is None:
                 raise ValueError("hard_constraint=True requires target_lp_threshold")
+            if gate_side == "target":
+                # Sample from jail, gate by target. Restricted-to-target-permitted.
+                gate_lp = t_lp
+                sample_lp = j_lp
+            elif gate_side == "jail":
+                # Sample from target, gate by jail. Restricted-to-jail-acceptable.
+                gate_lp = j_lp
+                sample_lp = t_lp
+            else:
+                raise ValueError(f"unknown gate_side: {gate_side}")
             mask_inf = torch.where(
-                t_lp < target_lp_threshold,
-                torch.full_like(t_lp, float('-inf')),
-                torch.zeros_like(t_lp),
+                gate_lp < target_lp_threshold,
+                torch.full_like(gate_lp, float('-inf')),
+                torch.zeros_like(gate_lp),
             )
-            combined = (j_lp + mask_inf) / max(temperature, 1e-6)
+            combined = (sample_lp + mask_inf) / max(temperature, 1e-6)
         else:
             combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
             # Soft-PoE with optional outlier mask
@@ -278,6 +288,7 @@ def main():
             target_temp=T_t,
             target_lp_threshold=thr,
             hard_constraint=HARD_CONSTRAINT_MODE,
+            gate_side=GATE_SIDE,
         )
         torch.cuda.empty_cache()
         print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t}{thr_tag} sampling done.", flush=True)
@@ -330,7 +341,7 @@ def main():
             store_key = "poe_target_x_jail_proper_sys"
         elif HARD_CONSTRAINT_MODE:
             cell_key = f"th{thr}"
-            store_key = "poe_target_x_jail_hard_constraint"
+            store_key = f"poe_target_x_jail_hard_constraint_{GATE_SIDE}gate"
         else:
             cell_key = f"beta{beta}_Tt{T_t}_th{thr}"
             store_key = "poe_target_x_jail_lp_masked"
