@@ -34,10 +34,18 @@ TOP_P           = 1.0
 # before adding β · jail). None = no extra mask. Use float values like -10, -15, -20.
 # Sweep cells are now (beta, T_t, target_lp_threshold). β=6, T_t=1 baseline matched
 # the analyzed cell in token_analysis_beta6_Tt1.
+# Hard-constraint mode: target's role is reduced to a binary gate.
+# For each token: if target_lp >= threshold, allow (logit += 0); else forbid (-inf).
+# The distribution we sample from is essentially jail, restricted to target-permitted tokens.
+# Sweep thresholds; β is irrelevant in this mode (set to 1).
 PAIRS = [
-    (7.0, 1.0, -15.0),
-    (8.0, 1.0, -15.0),
+    (1.0, 1.0, -5.0),
+    (1.0, 1.0, -8.0),
+    (1.0, 1.0, -10.0),
+    (1.0, 1.0, -15.0),
+    (1.0, 1.0, -20.0),
 ]
+HARD_CONSTRAINT_MODE = True   # if True, target_lp is binarized (mask only, no soft contribution)
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
@@ -75,6 +83,7 @@ def full_poe_sample_two_models(
     eos_id: int, pad_id: int, device,
     target_temp: float = 1.0,
     target_lp_threshold: float = None,
+    hard_constraint: bool = False,
 ):
     """Token-by-token PoE generation with two separate models.
 
@@ -104,16 +113,28 @@ def full_poe_sample_two_models(
         j_logits = j_out.logits[:, -1, :].float()
         t_lp = torch.log_softmax(t_logits / max(target_temp, 1e-6), dim=-1)
         j_lp = torch.log_softmax(j_logits, dim=-1)
-        combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
 
-        # Hard mask: forbid tokens that target finds extremely unlikely.
-        if target_lp_threshold is not None:
+        if hard_constraint:
+            # Target acts only as a binary gate, no soft contribution.
+            # Sample from jail's distribution restricted to target-permitted tokens.
+            if target_lp_threshold is None:
+                raise ValueError("hard_constraint=True requires target_lp_threshold")
             mask_inf = torch.where(
                 t_lp < target_lp_threshold,
                 torch.full_like(t_lp, float('-inf')),
                 torch.zeros_like(t_lp),
             )
-            combined = combined + mask_inf
+            combined = (j_lp + mask_inf) / max(temperature, 1e-6)
+        else:
+            combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
+            # Soft-PoE with optional outlier mask
+            if target_lp_threshold is not None:
+                mask_inf = torch.where(
+                    t_lp < target_lp_threshold,
+                    torch.full_like(t_lp, float('-inf')),
+                    torch.zeros_like(t_lp),
+                )
+                combined = combined + mask_inf
 
         if top_p < 1.0:
             sorted_lp, sorted_idx = torch.sort(combined, descending=True, dim=-1)
@@ -256,6 +277,7 @@ def main():
             pad_id=pad_id, device=DEVICE,
             target_temp=T_t,
             target_lp_threshold=thr,
+            hard_constraint=HARD_CONSTRAINT_MODE,
         )
         torch.cuda.empty_cache()
         print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t}{thr_tag} sampling done.", flush=True)
@@ -306,6 +328,9 @@ def main():
         if thr is None:
             cell_key = f"beta{beta}_Tt{T_t}"
             store_key = "poe_target_x_jail_proper_sys"
+        elif HARD_CONSTRAINT_MODE:
+            cell_key = f"th{thr}"
+            store_key = "poe_target_x_jail_hard_constraint"
         else:
             cell_key = f"beta{beta}_Tt{T_t}_th{thr}"
             store_key = "poe_target_x_jail_lp_masked"
