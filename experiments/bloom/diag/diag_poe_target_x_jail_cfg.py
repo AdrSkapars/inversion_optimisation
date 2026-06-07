@@ -29,7 +29,15 @@ MAX_TOKENS   = 250
 TEMPERATURE  = 1.0
 TOP_P        = 1.0
 CFG_W        = 0.5
-BETAS        = [1.0, 2.0, 3.0, 5.0]
+# (β, target_lp_threshold) cells. threshold=None means no mask.
+# Sweeping CFG-PoE + outlier mask to see if we can push past current best.
+SWEEP = [
+    (2.0, -15.0),
+    (3.0, -15.0),
+    (3.0, -20.0),
+    (5.0, -15.0),
+    (5.0, -20.0),
+]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
@@ -66,6 +74,7 @@ def poe_cfg_sample(
     beta: float, cfg_w: float, max_tokens: int,
     temperature: float, top_p: float, allowed_inf: torch.Tensor,
     eos_id: int, pad_id: int, device,
+    target_lp_threshold: float = None,
 ):
     B = len(target_seqs)
     t_ids, t_attn = left_pad_batch(target_seqs, pad_id, device)
@@ -93,6 +102,14 @@ def poe_cfg_sample(
         j_lp_cfg = (1.0 + cfg_w) * c_lp - cfg_w * u_lp
         # PoE
         combined = (t_lp + beta * j_lp_cfg) / max(temperature, 1e-6)
+        # Outlier mask: forbid tokens target finds extremely unlikely
+        if target_lp_threshold is not None:
+            mask_inf = torch.where(
+                t_lp < target_lp_threshold,
+                torch.full_like(t_lp, float('-inf')),
+                torch.zeros_like(t_lp),
+            )
+            combined = combined + mask_inf
 
         if top_p < 1.0:
             sorted_lp, sorted_idx = torch.sort(combined, descending=True, dim=-1)
@@ -232,17 +249,19 @@ def main():
     B = len(expanded_t)
     print(f"[{time.time()-t0:.0f}s] Batch = {B} streams ({P} scenarios × n={N_SAMPLES})", flush=True)
 
-    for beta in BETAS:
-        print(f"\n[{time.time()-t0:.0f}s] === target × jail-CFG β={beta} w={CFG_W} ===", flush=True)
+    for (beta, thr) in SWEEP:
+        thr_tag = f" thr={thr}" if thr is not None else ""
+        print(f"\n[{time.time()-t0:.0f}s] === target × jail-CFG β={beta} w={CFG_W}{thr_tag} ===", flush=True)
         sampled = poe_cfg_sample(
             model_t, model_j, expanded_t, expanded_c, expanded_u,
             beta=beta, cfg_w=CFG_W, max_tokens=MAX_TOKENS,
             temperature=TEMPERATURE, top_p=TOP_P,
             allowed_inf=allowed_inf, eos_id=eos_id,
             pad_id=pad_id, device=DEVICE,
+            target_lp_threshold=thr,
         )
         torch.cuda.empty_cache()
-        print(f"  [{time.time()-t0:.0f}s] β={beta} sampling done.", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] β={beta} thr={thr} sampling done.", flush=True)
 
         decoded_per_scen: List[List[str]] = []
         score_items: List[tuple] = []
@@ -287,16 +306,22 @@ def main():
                 "all_samples":        texts,
             })
 
+        if thr is None:
+            cell_key = f"beta{beta}_w{CFG_W}"
+            store_key = "poe_target_x_jail_cfg_sweep"
+        else:
+            cell_key = f"beta{beta}_w{CFG_W}_th{thr}"
+            store_key = "poe_target_x_jail_cfg_masked"
         for s_idx, sc in enumerate(scenarios):
-            sweep = sc.setdefault("poe_target_x_jail_cfg_sweep", {})
-            sweep[f"beta{beta}_w{CFG_W}"] = cell_best[s_idx]
+            sweep = sc.setdefault(store_key, {})
+            sweep[cell_key] = cell_best[s_idx]
         json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-        print(f"  [{time.time()-t0:.0f}s] β={beta} saved → results.json[poe_target_x_jail_cfg_sweep]", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] {cell_key} saved -> results.json[{store_key}]", flush=True)
 
         ps = [b["best_per_token_p"] for b in cell_best if b.get("best_per_token_p") is not None]
         if ps:
             mean = sum(ps)/len(ps); med = sorted(ps)[len(ps)//2]
-            print(f"    β={beta} w={CFG_W}  n={len(ps)}  mean P={mean:.3f}%  median P={med:.3f}%  "
+            print(f"    β={beta} w={CFG_W} thr={thr}  n={len(ps)}  mean P={mean:.3f}%  median P={med:.3f}%  "
                   f"min={min(ps):.3f}%  max={max(ps):.3f}%", flush=True)
 
     import os; os._exit(0)
