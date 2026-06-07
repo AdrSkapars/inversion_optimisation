@@ -39,11 +39,11 @@ TOP_P           = 1.0
 # GATE_SIDE = "jail" (this experiment): target samples, jail gates → target-restricted-to-jail-acceptable
 # Sweep thresholds; β is irrelevant in either mode.
 PAIRS = [
-    (1.0, 1.0, -3.0),
     (1.0, 1.0, -5.0),
     (1.0, 1.0, -8.0),
     (1.0, 1.0, -10.0),
     (1.0, 1.0, -15.0),
+    (1.0, 1.0, -20.0),
 ]
 HARD_CONSTRAINT_MODE = True
 GATE_SIDE = "jail"   # which side does the gating: "target" or "jail"
@@ -135,6 +135,11 @@ def full_poe_sample_two_models(
                 torch.zeros_like(gate_lp),
             )
             combined = (sample_lp + mask_inf) / max(temperature, 1e-6)
+            # Safety: if a row has no surviving tokens, force EOS so the stream
+            # terminates cleanly instead of triggering a softmax-of-all-inf NaN.
+            all_masked = torch.isinf(combined).all(dim=-1)
+            if all_masked.any():
+                combined[all_masked, eos_id] = 0.0
         else:
             combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
             # Soft-PoE with optional outlier mask
