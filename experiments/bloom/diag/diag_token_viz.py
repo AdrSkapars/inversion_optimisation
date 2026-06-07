@@ -62,7 +62,9 @@ def render_tokens(tokens, lps, title):
         spans.append(
             f'<span class="tok" style="background:{color}" title="{tooltip}">{display}</span>'
         )
-    return f'<h3>{html.escape(title)}</h3><div class="line">{"".join(spans)}</div>'
+    # Join with <wbr> (zero-width word-break opportunity) so the browser can
+    # wrap between tokens even though leading spaces are &nbsp; inside each span.
+    return f'<h3>{html.escape(title)}</h3><div class="line">{"<wbr>".join(spans)}</div>'
 
 
 def main():
@@ -92,7 +94,7 @@ h1 {{ font-size: 18px; }}
 h3 {{ font-size: 14px; margin-top: 24px; margin-bottom: 8px; color: #444; }}
 .meta {{ background: #f4f4f4; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }}
 .meta b {{ color: #222; }}
-.line {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; line-height: 1.9; }}
+.line {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; }}
 .tok {{ padding: 2px 0; border-radius: 2px; color: #111; }}
 .legend {{ display: flex; gap: 0; margin: 8px 0 24px; font-family: monospace; font-size: 11px; }}
 .legend .swatch {{ padding: 3px 8px; }}
