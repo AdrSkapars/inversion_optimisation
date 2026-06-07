@@ -44,13 +44,13 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 TEMP_PAIRS: List[Tuple[float, float]] = [
     # forward: more rephrase pressure
     (1.5, 0.7),   # mild flatten + mild sharpen   (β_eff≈2.14)
-    (2.0, 1.0),   # flatten target only           (β_eff=2)
-    (2.0, 0.5),   # flatten + sharpen rephrase    (β_eff=4)
-    (3.0, 0.5),   # heavy flatten + sharpen       (β_eff=6)
-    # reverse: more target pressure
-    (1.0, 2.0),   # flatten rephrase only         (β_eff=0.5)
-    (0.7, 1.5),   # mild sharpen + mild flatten   (β_eff≈0.47)
-    (0.5, 2.0),   # sharpen target + flatten reph (β_eff=0.25)
+    # (2.0, 1.0),   # flatten target only           (β_eff=2)
+    # (2.0, 0.5),   # flatten + sharpen rephrase    (β_eff=4)
+    # (3.0, 0.5),   # heavy flatten + sharpen       (β_eff=6)
+    # # reverse: more target pressure
+    # (1.0, 2.0),   # flatten rephrase only         (β_eff=0.5)
+    # (0.7, 1.5),   # mild sharpen + mild flatten   (β_eff≈0.47)
+    # (0.5, 2.0),   # sharpen target + flatten reph (β_eff=0.25)
 ]
 
 
@@ -90,58 +90,27 @@ def main():
     jail_reph_prefixes  = [build_rephrase_prefix(sc["outputs"][JAIL_KEY]) for sc in scenarios]
     print(f"[{time.time()-t0:.0f}s] Built {P} prefixes per side", flush=True)
 
-    # ── Stack all cells into one batched call ──────────────────────────────
-    # Stacked prompt list has length P * len(TEMP_PAIRS); each gets its own
-    # (temperature, beta) via per_prompt_*. This gives much better GPU util
-    # than running cells sequentially (each was ~15 min on A6000 due to small
-    # per-step batch).
-    stacked_target_prefixes: List[List[int]] = []
-    stacked_jail_prefixes:   List[List[int]] = []
-    stacked_temperatures:    List[float] = []
-    stacked_betas:           List[float] = []
-    # prompt index `i` in stacked layout → (cell_idx, scenario_idx)
-    cell_of:     List[int] = []
-    scen_of:     List[int] = []
-    for cell_idx, (T_t, T_r) in enumerate(TEMP_PAIRS):
+    # ── Per-cell loop: generate → score → save after each cell ──────────────
+    best_per_cell: Dict[Tuple[float, float], List[Dict]] = {}
+    for (T_t, T_r) in TEMP_PAIRS:
         beta_eff = T_t / T_r
-        for s_idx in range(P):
-            stacked_target_prefixes.append(output_gen_prefixes[s_idx])
-            stacked_jail_prefixes.append(jail_reph_prefixes[s_idx])
-            stacked_temperatures.append(T_t)
-            stacked_betas.append(beta_eff)
-            cell_of.append(cell_idx)
-            scen_of.append(s_idx)
-    P_stacked = len(stacked_target_prefixes)
-    print(f"\n[{time.time()-t0:.0f}s] Stacked {P_stacked} prompts ({len(TEMP_PAIRS)} cells × "
-          f"{P} scenarios) × n={N_SAMPLES} = {P_stacked * N_SAMPLES} streams", flush=True)
+        print(f"\n[{time.time()-t0:.0f}s] PoE T_t={T_t} T_r={T_r} (β_eff={beta_eff:.3f}) "
+              f"({P}×{N_SAMPLES} streams)...", flush=True)
+        out_3d = _contrastive_sample_extensions(
+            lm_target=lm_target, lm_jail=lm_target,
+            target_prefixes=output_gen_prefixes,
+            jail_prefixes=jail_reph_prefixes,
+            n=N_SAMPLES, max_tokens=MAX_TOKENS,
+            beta=beta_eff, top_k_logprobs=POE_TOP_K,
+            temperature=T_t, top_p=TOP_P,
+            allowed_token_ids=latin_ids,
+            ignore_eos=False, eos_token_id=eos,
+        )
+        print(f"[{time.time()-t0:.0f}s] T_t={T_t} T_r={T_r} sampling done.", flush=True)
 
-    stacked_out_3d = _contrastive_sample_extensions(
-        lm_target=lm_target, lm_jail=lm_target,
-        target_prefixes=stacked_target_prefixes,
-        jail_prefixes=stacked_jail_prefixes,
-        n=N_SAMPLES, max_tokens=MAX_TOKENS,
-        beta=1.0, top_k_logprobs=POE_TOP_K,   # overridden per-prompt
-        temperature=1.0, top_p=TOP_P,         # overridden per-prompt
-        allowed_token_ids=latin_ids,
-        ignore_eos=False, eos_token_id=eos,
-        per_prompt_temperature=stacked_temperatures,
-        per_prompt_beta=stacked_betas,
-    )
-    print(f"[{time.time()-t0:.0f}s] stacked PoE done.", flush=True)
-
-    # Unstack back into all_outs[(T_t, T_r)][s_idx] = list of n token_id lists
-    all_outs: Dict[Tuple[float, float], List[List[List[int]]]] = {pair: [None]*P for pair in TEMP_PAIRS}  # type: ignore[assignment]
-    for i in range(P_stacked):
-        pair = TEMP_PAIRS[cell_of[i]]
-        all_outs[pair][scen_of[i]] = stacked_out_3d[i]
-
-    # ── Score under (sys, user_input) ───────────────────────────────────────
-    items = []
-    idx = []  # (T_t, T_r, s_idx, r_idx)
-    decoded: Dict[Tuple[float, float], List[List[str]]] = {pair: [] for pair in TEMP_PAIRS}
-
-    for pair in TEMP_PAIRS:
-        out_3d = all_outs[pair]
+        # Decode + score this cell only
+        items = []
+        decoded_cell: List[List[str]] = []
         for s_idx, sc in enumerate(scenarios):
             sys_prompt = sc["sys_prompt"]; user_input = sc["input"]
             base_msgs = []
@@ -149,33 +118,31 @@ def main():
                 base_msgs.append({"role": "system", "content": sys_prompt})
             base_msgs.append({"role": "user", "content": user_input})
             sample_texts = []
-            for r_idx, token_ids in enumerate(out_3d[s_idx]):
+            for token_ids in out_3d[s_idx]:
                 text = lm_target.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
                 sample_texts.append(text)
                 items.append((list(base_msgs), text))
-                idx.append((pair[0], pair[1], s_idx, r_idx))
-            decoded[pair].append(sample_texts)
+            decoded_cell.append(sample_texts)
 
-    print(f"\n[{time.time()-t0:.0f}s] Scoring {len(items)} items...", flush=True)
-    scores: List = []
-    for b in range(0, len(items), 16):
-        scores.extend(batch_logprob_local(lm_target, items[b:b+16]))
-    print(f"[{time.time()-t0:.0f}s] scoring done.", flush=True)
+        print(f"[{time.time()-t0:.0f}s] Scoring {len(items)} items for this cell...", flush=True)
+        scores: List = []
+        for b in range(0, len(items), 16):
+            scores.extend(batch_logprob_local(lm_target, items[b:b+16]))
+        print(f"[{time.time()-t0:.0f}s] scoring done.", flush=True)
 
-    # ── Pick best-of-5 per cell ─────────────────────────────────────────────
-    best_per_cell: Dict[Tuple[float, float], List[Dict]] = {pair: [] for pair in TEMP_PAIRS}
-    for pair in TEMP_PAIRS:
-        T_t, T_r = pair
+        # Best-of-N per scenario
+        cell_best: List[Dict] = []
+        score_cursor = 0
         for s_idx, sc in enumerate(scenarios):
-            lps = [scores[i] for i, (tt, tr, ss, _) in enumerate(idx)
-                   if tt == T_t and tr == T_r and ss == s_idx]
-            texts = decoded[pair][s_idx]
+            lps = scores[score_cursor:score_cursor + N_SAMPLES]
+            score_cursor += N_SAMPLES
+            texts = decoded_cell[s_idx]
             valid = [(lp, t) for lp, t in zip(lps, texts) if lp is not None]
             if not valid:
-                best_per_cell[pair].append({"variation_number": sc["variation_number"], "best_lp": None})
+                cell_best.append({"variation_number": sc["variation_number"], "best_lp": None})
                 continue
             best_lp, best_text = max(valid, key=lambda x: x[0])
-            best_per_cell[pair].append({
+            cell_best.append({
                 "variation_number":   sc["variation_number"],
                 "best_lp":            best_lp,
                 "best_per_token_p":   math.exp(best_lp) * 100,
@@ -183,15 +150,15 @@ def main():
                 "all_lps":            [lp for lp in lps if lp is not None],
                 "all_samples":        texts,
             })
+        best_per_cell[(T_t, T_r)] = cell_best
 
-    # ── Save into results.json ──────────────────────────────────────────────
-    for s_idx, sc in enumerate(scenarios):
-        sc["poe_rephrasal_jail_variant_asym_temp_sweep"] = {
-            f"Tt{T_t}_Tr{T_r}": best_per_cell[(T_t, T_r)][s_idx]
-            for (T_t, T_r) in TEMP_PAIRS
-        }
-    json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-    print(f"\n[{time.time()-t0:.0f}s] Saved → {RESULTS_PATH}", flush=True)
+        # Intermediate save — merge into existing sweep dict if present
+        cell_key = f"Tt{T_t}_Tr{T_r}"
+        for s_idx, sc in enumerate(scenarios):
+            sweep = sc.setdefault("poe_rephrasal_jail_variant_asym_temp_sweep", {})
+            sweep[cell_key] = cell_best[s_idx]
+        json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
+        print(f"[{time.time()-t0:.0f}s] Saved cell {cell_key} → {RESULTS_PATH}", flush=True)
 
     # ── Stats ───────────────────────────────────────────────────────────────
     def stats(name, ps):
