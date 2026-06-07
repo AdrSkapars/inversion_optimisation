@@ -30,8 +30,9 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 N_TOTAL    = 50  # total paraphrase samples per scenario per method
 N_ROUND1   = 25  # for iterative
 N_ROUND2   = 25  # for iterative
-MAX_TOKENS = 300
+MAX_TOKENS = 250
 TEMPERATURE = 1.0
+GEN_CHUNK_SCEN = 3  # process this many scenarios per generation chunk to bound memory
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
@@ -97,22 +98,26 @@ def jail_paraphrase_prompts(tokenizer, texts: List[str]) -> List[List[int]]:
 
 @torch.no_grad()
 def sample_n(model_j, prefixes: List[List[int]], pad_id: int, eos_id: int,
-             tokenizer, max_tokens: int, temperature: float, device) -> List[str]:
-    """Sample one continuation per prefix. Returns decoded text list."""
-    input_ids, attn = left_pad_batch(prefixes, pad_id, device)
-    gen = model_j.generate(
-        input_ids=input_ids, attention_mask=attn,
-        max_new_tokens=max_tokens, do_sample=True, temperature=temperature,
-        top_p=1.0, pad_token_id=pad_id, eos_token_id=eos_id,
-    )
-    prefix_len = input_ids.shape[1]
-    new_tokens = gen[:, prefix_len:].tolist()
-    out = []
-    for row in new_tokens:
-        cleaned = [tk for tk in row if tk != pad_id]
-        if eos_id in cleaned:
-            cleaned = cleaned[:cleaned.index(eos_id)]
-        out.append(tokenizer.decode(cleaned, skip_special_tokens=True).strip())
+             tokenizer, max_tokens: int, temperature: float, device,
+             batch_size: int = 150) -> List[str]:
+    """Sample one continuation per prefix. Chunked to bound memory."""
+    out: List[str] = []
+    for s in range(0, len(prefixes), batch_size):
+        chunk = prefixes[s:s+batch_size]
+        input_ids, attn = left_pad_batch(chunk, pad_id, device)
+        gen = model_j.generate(
+            input_ids=input_ids, attention_mask=attn,
+            max_new_tokens=max_tokens, do_sample=True, temperature=temperature,
+            top_p=1.0, pad_token_id=pad_id, eos_token_id=eos_id,
+        )
+        prefix_len = input_ids.shape[1]
+        new_tokens = gen[:, prefix_len:].tolist()
+        for row in new_tokens:
+            cleaned = [tk for tk in row if tk != pad_id]
+            if eos_id in cleaned:
+                cleaned = cleaned[:cleaned.index(eos_id)]
+            out.append(tokenizer.decode(cleaned, skip_special_tokens=True).strip())
+        torch.cuda.empty_cache()
     return out
 
 

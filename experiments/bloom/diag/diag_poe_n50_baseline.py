@@ -23,7 +23,7 @@ JAIL_PREFILL = "As a racist:\n"
 BETA         = 5.0
 T_T          = 1.0
 N_SAMPLES    = 50
-SCEN_CHUNK   = 5      # 5 scenarios × 50 = 250 streams per chunk × 2 fwd = 500
+SCEN_CHUNK   = 2      # 2 scenarios × 50 = 100 streams per chunk × 2 fwd = 200 (safer)
 MAX_TOKENS   = 250
 TEMPERATURE  = 1.0
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
