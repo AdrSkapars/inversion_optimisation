@@ -30,16 +30,14 @@ N_SAMPLES       = 5
 MAX_TOKENS      = 250
 TEMPERATURE     = 1.0
 TOP_P           = 1.0
-# Push both levers further to find asymptotes.
+# Mask out tokens whose target log-p is below this threshold (after T_t scaling,
+# before adding β · jail). None = no extra mask. Use float values like -10, -15, -20.
+# Sweep cells are now (beta, T_t, target_lp_threshold). β=6, T_t=1 baseline matched
+# the analyzed cell in token_analysis_beta6_Tt1.
 PAIRS = [
-    # High β at T_t=1
-    (6.0, 1.0),
-    (8.0, 1.0),
-    (10.0, 1.0),
-    # High T_t at β=2
-    (2.0, 7.0),
-    (2.0, 10.0),
-    (2.0, 15.0),
+    (6.0, 1.0, -10.0),
+    (6.0, 1.0, -15.0),
+    (6.0, 1.0, -20.0),
 ]
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 DEVICE = "cuda:0"
@@ -77,12 +75,18 @@ def full_poe_sample_two_models(
     temperature: float, top_p: float, allowed_inf: torch.Tensor,
     eos_id: int, pad_id: int, device,
     target_temp: float = 1.0,
+    target_lp_threshold: float = None,
 ):
     """Token-by-token PoE generation with two separate models.
 
     target_temp > 1 flattens target's distribution (its strong refusal logits
     become less negative), letting jail's preferences win tokens that target's
     veto would otherwise block.
+
+    target_lp_threshold (if set): mask out tokens whose target log-p (after
+    T_t scaling, before β·jail) is below this value. Forces PoE to stay within
+    target's plausible support — prevents jail from pulling through tokens
+    target strongly vetoes.
     """
     B = len(target_seqs)
     t_ids, t_attn = left_pad_batch(target_seqs, pad_id, device)
@@ -102,6 +106,15 @@ def full_poe_sample_two_models(
         t_lp = torch.log_softmax(t_logits / max(target_temp, 1e-6), dim=-1)
         j_lp = torch.log_softmax(j_logits, dim=-1)
         combined = (t_lp + beta * j_lp) / max(temperature, 1e-6)
+
+        # Hard mask: forbid tokens that target finds extremely unlikely.
+        if target_lp_threshold is not None:
+            mask_inf = torch.where(
+                t_lp < target_lp_threshold,
+                torch.full_like(t_lp, float('-inf')),
+                torch.zeros_like(t_lp),
+            )
+            combined = combined + mask_inf
 
         if top_p < 1.0:
             sorted_lp, sorted_idx = torch.sort(combined, descending=True, dim=-1)
@@ -230,8 +243,12 @@ def main():
     B = len(expanded_t)
     print(f"[{time.time()-t0:.0f}s] Batch = {B} streams ({P} scenarios × n={N_SAMPLES})", flush=True)
 
-    for (beta, T_t) in PAIRS:
-        print(f"\n[{time.time()-t0:.0f}s] === target × jail β={beta} T_t={T_t} ===", flush=True)
+    for spec in PAIRS:
+        # Support 2-tuple (beta, T_t) or 3-tuple (beta, T_t, target_lp_threshold)
+        beta = spec[0]; T_t = spec[1]
+        thr  = spec[2] if len(spec) > 2 else None
+        thr_tag = f" thr={thr}" if thr is not None else ""
+        print(f"\n[{time.time()-t0:.0f}s] === target × jail β={beta} T_t={T_t}{thr_tag} ===", flush=True)
         sampled = full_poe_sample_two_models(
             model_t, model_j, expanded_t, expanded_j,
             beta=beta, max_tokens=MAX_TOKENS,
@@ -239,9 +256,10 @@ def main():
             allowed_inf=allowed_inf, eos_id=eos_id,
             pad_id=pad_id, device=DEVICE,
             target_temp=T_t,
+            target_lp_threshold=thr,
         )
         torch.cuda.empty_cache()
-        print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t} sampling done.", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] β={beta} T_t={T_t}{thr_tag} sampling done.", flush=True)
 
         decoded_per_scen: List[List[str]] = []
         score_items: List[tuple] = []
@@ -286,12 +304,17 @@ def main():
                 "all_samples":        texts,
             })
 
-        cell_key = f"beta{beta}_Tt{T_t}"
+        if thr is None:
+            cell_key = f"beta{beta}_Tt{T_t}"
+            store_key = "poe_target_x_jail_proper_sys"
+        else:
+            cell_key = f"beta{beta}_Tt{T_t}_th{thr}"
+            store_key = "poe_target_x_jail_lp_masked"
         for s_idx, sc in enumerate(scenarios):
-            sweep = sc.setdefault("poe_target_x_jail_proper_sys", {})
+            sweep = sc.setdefault(store_key, {})
             sweep[cell_key] = cell_best[s_idx]
         json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-        print(f"  [{time.time()-t0:.0f}s] {cell_key} saved → results.json", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] {cell_key} saved → results.json[{store_key}]", flush=True)
 
         ps = [b["best_per_token_p"] for b in cell_best if b.get("best_per_token_p") is not None]
         if ps:
