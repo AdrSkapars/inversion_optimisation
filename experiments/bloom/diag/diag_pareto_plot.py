@@ -106,14 +106,15 @@ def main():
     curves["X3 best-of-N — JAIL-filter (NEW)"] = pts
 
     # 8) Jail rewrite — vary prompt intensity (NEW)
-    # The clean intensity sweep from the original prompt-design exploration:
-    # very_subtle → subtle → strong → extreme (no X-variations, no anti-copy)
+    # Intensity sweep extended into the higher-bias regime with stronger-tone variants.
     pts = []
     for variant, label, bias in [
-        ("1_very_subtle", "very subtle", 0),
-        ("2_subtle",      "subtle",      0),
-        ("3_strong",      "strong",      2),
-        ("4_extreme",     "extreme",     8),
+        ("2_subtle",        "subtle",        0),
+        ("3_strong",        "strong",        2),
+        ("4_extreme",       "extreme",       8),
+        ("X1_vicious",      "vicious",       12),
+        ("X5_authoritative","authoritative", 12),
+        ("X3_aggrieved",    "aggrieved",     13),
     ]:
         p = mean_field(data, [f"jail_biased_rewrite_prompt_{variant}"], "target_p_pct")
         if p is not None: pts.append((label, p, bias))
