@@ -18,7 +18,7 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA = 5.0
-THRESHOLDS = [-5.0, -10.0, -15.0, -20.0, -40.0]
+THRESHOLDS = [-16.0, -17.0, -18.0, -19.0]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
