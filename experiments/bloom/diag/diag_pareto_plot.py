@@ -105,16 +105,19 @@ def main():
     if p is not None: pts.append(("n=250", p, 12))
     curves["X3 best-of-N — JAIL-filter (NEW)"] = pts
 
-    # 8) Single-shot extreme rewrite prompts (NEW) — shows the prompt-design dimension
+    # 8) Jail rewrite — vary prompt intensity (NEW)
+    # The clean intensity sweep from the original prompt-design exploration:
+    # very_subtle → subtle → strong → extreme (no X-variations, no anti-copy)
     pts = []
     for variant, label, bias in [
-        ("4_extreme",       "4_extreme",       8),
-        ("X1_vicious",      "X1_vicious",      12),
-        ("X5_authoritative","X5_authoritative", 12),
+        ("1_very_subtle", "very subtle", 0),
+        ("2_subtle",      "subtle",      0),
+        ("3_strong",      "strong",      2),
+        ("4_extreme",     "extreme",     8),
     ]:
         p = mean_field(data, [f"jail_biased_rewrite_prompt_{variant}"], "target_p_pct")
         if p is not None: pts.append((label, p, bias))
-    curves["Jail rewrite prompts (single-shot, NEW)"] = pts
+    curves["Jail rewrite — vary intensity (NEW)"] = pts
 
     # -------- Reference points (single dots) --------
     refs = []
@@ -137,7 +140,7 @@ def main():
         "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
         "X3 best-of-N — TARGET-filter (NEW)":            ("#2ca02c", "-",  "*", 2.5, 0.95),
         "X3 best-of-N — JAIL-filter (NEW)":              ("#98df8a", "-",  "P", 2.5, 0.85),
-        "Jail rewrite prompts (single-shot, NEW)":       ("#ff7f0e", ":",  "D", 2.0, 0.80),
+        "Jail rewrite — vary intensity (NEW)":            ("#ff7f0e", ":",  "D", 2.0, 0.80),
     }
     for name, pts in curves.items():
         if not pts: continue
