@@ -49,30 +49,7 @@ def main():
 
     curves = {}
 
-    # 1) Soft PoE (t × jail, proper sys, T_t=1) — sweep β
-    pts = []
-    for b, bias in [(1.0, 1.5), (2.0, 4), (3.0, 5), (4.0, 7), (5.0, 7.5),
-                    (6.0, 9), (8.0, 10), (10.0, 11)]:
-        p = mean_p(data, ["poe_target_x_jail_proper_sys"], f"beta{b}_Tt1.0")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["Soft PoE t × jail — vary β (T_t=1)"] = pts
-
-    # 2) Asymmetric T (β=2) — sweep T_t
-    pts = []
-    for tt, bias in [(1.0, 4), (2.0, 7.5), (3.0, 9), (5.0, 9.5),
-                     (7.0, 11.5), (10.0, 10.5), (15.0, 10.5)]:
-        p = mean_p(data, ["poe_target_x_jail_proper_sys"], f"beta2.0_Tt{tt}")
-        if p is not None: pts.append((f"T_t={tt:g}", p, bias))
-    curves["Soft PoE t × jail — vary T_t (β=2)"] = pts
-
-    # 3) target × jail-CFG (w=0.5) — sweep β
-    pts = []
-    for b, bias in [(1.0, 4), (2.0, 10), (3.0, 13), (5.0, 14)]:
-        p = mean_p(data, ["poe_target_x_jail_cfg_sweep"], f"beta{b}_w0.5")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["target × jail-CFG — vary β (w=0.5)"] = pts
-
-    # 4) Jail-only CFG — sweep w
+    # 1) Jail-only CFG — sweep w
     pts = []
     for w, bias in [(0.0, 11), (0.5, 15), (1.0, 15), (2.0, 15), (4.0, 15)]:
         p = mean_p(data, ["jail_cfg_sweep"], f"w{w}")
@@ -151,9 +128,6 @@ def main():
     cmap = plt.get_cmap("tab10")
     # Use distinct colors for new lines
     palette = {
-        "Soft PoE t × jail — vary β (T_t=1)":          ("#1f77b4", "-",  "o", 1.5, 0.55),
-        "Soft PoE t × jail — vary T_t (β=2)":           ("#aec7e8", "--", "o", 1.5, 0.55),
-        "target × jail-CFG — vary β (w=0.5)":            ("#9467bd", "-",  "s", 1.5, 0.65),
         "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
         "X3 best-of-N — TARGET-filter (NEW)":            ("#2ca02c", "-",  "*", 2.5, 0.95),
         "X3 best-of-N — JAIL-filter (NEW)":              ("#98df8a", "-",  "P", 2.5, 0.85),
