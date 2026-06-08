@@ -72,15 +72,7 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["target × jail-CFG — vary β (w=0.5)"] = pts
 
-    # 4) target × jail-CFG + mask
-    pts = []
-    for b, th, bias in [(2.0, -15.0, 3), (3.0, -15.0, 4), (3.0, -20.0, 8),
-                        (5.0, -15.0, 6), (5.0, -20.0, 14)]:
-        p = mean_p(data, ["poe_target_x_jail_cfg_masked"], f"beta{b}_w0.5_th{th}")
-        if p is not None: pts.append((f"β={b:g},th={th:g}", p, bias))
-    curves["target × jail-CFG + mask (w=0.5)"] = pts
-
-    # 5) Jail-only CFG — sweep w
+    # 4) Jail-only CFG — sweep w
     pts = []
     for w, bias in [(0.0, 11), (0.5, 15), (1.0, 15), (2.0, 15), (4.0, 15)]:
         p = mean_p(data, ["jail_cfg_sweep"], f"w{w}")
@@ -142,7 +134,6 @@ def main():
         "Soft PoE t × jail — vary β (T_t=1)":          ("#1f77b4", "-",  "o", 1.5, 0.55),
         "Soft PoE t × jail — vary T_t (β=2)":           ("#aec7e8", "--", "o", 1.5, 0.55),
         "target × jail-CFG — vary β (w=0.5)":            ("#9467bd", "-",  "s", 1.5, 0.65),
-        "target × jail-CFG + mask (w=0.5)":              ("#c5b0d5", "--", "s", 1.5, 0.55),
         "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
         "X3 best-of-N — TARGET-filter (NEW)":            ("#2ca02c", "-",  "*", 2.5, 0.95),
         "X3 best-of-N — JAIL-filter (NEW)":              ("#98df8a", "-",  "P", 2.5, 0.85),
