@@ -24,7 +24,7 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
-W_VALUES = [0.0, 0.5, 1.0, 2.0, 4.0]
+W_VALUES = [0.5, 1.0, 2.0]
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
 
