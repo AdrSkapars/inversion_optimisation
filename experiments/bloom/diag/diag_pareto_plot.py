@@ -97,15 +97,7 @@ def main():
         if p is not None: pts.append((label, p, bias))
     curves["Jail rewrite — vary intensity (NEW)"] = pts
 
-    # 9) Target × corruption (X3 jail-rewriter) PoE — vary β, n=1 single-shot (NEW)
-    pts = []
-    for b, bias in [(0.5, 0), (1.0, 0), (2.0, 3), (3.0, 5),
-                    (4.0, 8), (5.0, 10), (6.0, 7), (7.0, 8), (8.0, 8)]:
-        p = mean_field(data, ["poe_target_x_corruption_sweep", f"b{b}", "n1"], "target_p_pct")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["target × corruption PoE — vary β (n=1, NEW)"] = pts
-
-    # 10) Target × corruption PoE — vary β, n=10 best-of-N target-filter (NEW)
+    # 9) Target × corruption PoE — vary β, n=10 best-of-N target-filter (NEW)
     pts = []
     for b, bias in [(0.5, 0), (1.0, 0), (2.0, 4), (3.0, 6),
                     (4.0, 8), (5.0, 10), (6.0, 8), (7.0, 9), (8.0, 9)]:
@@ -113,19 +105,20 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["target × corruption PoE — vary β (n=10 target-filter, NEW)"] = pts
 
-    # 11) target × corruption-CFG PoE — β=5 fixed, vary w, n=1 (NEW)
-    pts = []
-    for w, bias in [(0.0, 7), (0.5, 14), (1.0, 15), (2.0, 15)]:
-        p = mean_field(data, ["poe_target_x_corruption_cfg_sweep", f"w{w}", "n1"], "target_p_pct")
-        if p is not None: pts.append((f"w={w:g}", p, bias))
-    curves["target × corruption-CFG PoE — vary w (β=5, n=1, NEW)"] = pts
-
-    # 12) target × corruption-CFG PoE — β=5 fixed, vary w, n=10 target-filter (NEW)
+    # 10) target × corruption-CFG PoE — β=5 fixed, vary w, n=10 target-filter (NEW)
     pts = []
     for w, bias in [(0.0, 8), (0.5, 14), (1.0, 15), (2.0, 15)]:
         p = mean_field(data, ["poe_target_x_corruption_cfg_sweep", f"w{w}", "n10_target_pick"], "best_target_p_pct")
         if p is not None: pts.append((f"w={w:g}", p, bias))
     curves["target × corruption-CFG PoE — vary w (β=5, n=10 target-filter, NEW)"] = pts
+
+    # 11) target × corruption-CFG PoE — w=0.5 fixed, vary β, n=10 target-filter (NEW)
+    pts = []
+    for b, bias in [(1.0, 4), (2.0, 13), (3.0, 13),
+                    (4.0, 14), (5.0, 14), (6.0, 14)]:
+        p = mean_field(data, ["poe_target_x_corruption_cfg_beta_sweep", f"b{b}"], "best_target_p_pct")
+        if p is not None: pts.append((f"β={b:g}", p, bias))
+    curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter, NEW)"] = pts
 
     # -------- Reference points (single dots) --------
     refs = []
@@ -146,10 +139,9 @@ def main():
         "X3 best-of-N — TARGET-filter (NEW)":            ("#2ca02c", "-",  "*", 2.5, 0.95),
         "X3 best-of-N — JAIL-filter (NEW)":              ("#98df8a", "-",  "P", 2.5, 0.85),
         "Jail rewrite — vary intensity (NEW)":            ("#ff7f0e", ":",  "D", 2.0, 0.80),
-        "target × corruption PoE — vary β (n=1, NEW)":   ("#e377c2", "-",  "v", 2.0, 0.85),
         "target × corruption PoE — vary β (n=10 target-filter, NEW)":   ("#8c564b", "-",  "h", 2.5, 0.90),
-        "target × corruption-CFG PoE — vary w (β=5, n=1, NEW)":   ("#17becf", "-",  "X", 2.0, 0.85),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter, NEW)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
+        "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter, NEW)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
     }
     for name, pts in curves.items():
         if not pts: continue
