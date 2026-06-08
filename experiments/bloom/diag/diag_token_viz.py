@@ -67,90 +67,145 @@ def render_tokens(tokens, lps, title):
     return f'<h3>{html.escape(title)}</h3><div class="line">{"<wbr>".join(spans)}</div>'
 
 
-def main():
-    data = json.load(open(RESULTS, encoding="utf-8"))
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+CSS_STYLES = """
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 20px auto; padding: 0 20px; line-height: 1.6; }
+h1 { font-size: 18px; }
+h2 { font-size: 16px; margin-top: 36px; border-bottom: 2px solid #ddd; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 24px; margin-bottom: 8px; color: #444; }
+.meta { background: #f4f4f4; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+.meta b { color: #222; }
+.line { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; }
+.tok { padding: 2px 0; border-radius: 2px; color: #111; }
+.legend { display: flex; gap: 0; margin: 8px 0 24px; font-family: monospace; font-size: 11px; }
+.legend .swatch { padding: 3px 8px; }
+nav { margin-bottom: 20px; }
+nav a { margin-right: 8px; text-decoration: none; background: #eee; padding: 3px 8px; border-radius: 3px; color: #333; font-size: 12px; }
+"""
 
-    index_links = []
-    for sc in data["scenarios"]:
-        v = sc["variation_number"]
-        a = sc.get(ANALYSIS_KEY)
-        if not a: continue
-        tokens = a["tokens"]
-        t_lps  = a["target_lps"]
-        j_lps  = a["jail_lps"]
-        if not tokens: continue
 
-        sys_p = html.escape(sc.get("sys_prompt", "") or "")
-        user_i = html.escape(sc.get("input", "") or "")
-        t_avg = a["target_per_token_p_pct"]
-        j_avg = a["jail_per_token_p_pct"]
-
-        body = f"""
-<!doctype html><html><head><meta charset="utf-8"><title>v={v} token viz</title>
-<style>
-body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 20px auto; padding: 0 20px; line-height: 1.6; }}
-h1 {{ font-size: 18px; }}
-h3 {{ font-size: 14px; margin-top: 24px; margin-bottom: 8px; color: #444; }}
-.meta {{ background: #f4f4f4; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }}
-.meta b {{ color: #222; }}
-.line {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; }}
-.tok {{ padding: 2px 0; border-radius: 2px; color: #111; }}
-.legend {{ display: flex; gap: 0; margin: 8px 0 24px; font-family: monospace; font-size: 11px; }}
-.legend .swatch {{ padding: 3px 8px; }}
-nav {{ margin-bottom: 20px; }}
-nav a {{ margin-right: 8px; text-decoration: none; background: #eee; padding: 3px 8px; border-radius: 3px; color: #333; font-size: 12px; }}
-</style></head>
-<body>
-<nav><a href="index.html">← all scenarios</a></nav>
-<h1>Scenario v={v} — token-level probabilities (target × jail PoE, β=6, T_t=1)</h1>
-<div class="meta">
-<b>System:</b> {sys_p}<br>
-<b>User:</b> {user_i}<br><br>
-<b>avg target per-token P:</b> {t_avg:.3f}% &nbsp; · &nbsp; <b>avg jail per-token P:</b> {j_avg:.3f}%
-&nbsp; · &nbsp; <b>n tokens:</b> {len(tokens)}
-</div>
-<div class="legend">
+def make_legend():
+    return f"""<div class="legend">
 <span class="swatch" style="background:{lp_to_color(0)}">≥0 (100%)</span>
 <span class="swatch" style="background:{lp_to_color(-2)}">−2 (~14%)</span>
 <span class="swatch" style="background:{lp_to_color(-5)}">−5 (~0.7%)</span>
 <span class="swatch" style="background:{lp_to_color(-10)}">−10 (~0.005%)</span>
 <span class="swatch" style="background:{lp_to_color(-20)}">−20 (~2e-7%)</span>
 <span class="swatch" style="background:{lp_to_color(-40)}">≤−40</span>
-</div>
+</div>"""
+
+
+def build_poe_page(sc):
+    """Build the OLD-style single-output page from PoE β=6 T_t=1 analysis."""
+    a = sc.get(ANALYSIS_KEY)
+    if not a: return None
+    tokens = a["tokens"]; t_lps = a["target_lps"]; j_lps = a["jail_lps"]
+    if not tokens: return None
+    sys_p = html.escape(sc.get("sys_prompt", "") or "")
+    user_i = html.escape(sc.get("input", "") or "")
+    t_avg = a["target_per_token_p_pct"]; j_avg = a["jail_per_token_p_pct"]
+    v = sc["variation_number"]
+    body = f"""<!doctype html><html><head><meta charset="utf-8"><title>v={v} token viz</title>
+<style>{CSS_STYLES}</style></head><body>
+<nav><a href="index.html">← all scenarios</a></nav>
+<h1>Scenario v={v} — token-level probabilities (target × jail PoE, β=6, T_t=1)</h1>
+<div class="meta"><b>System:</b> {sys_p}<br><b>User:</b> {user_i}<br><br>
+<b>avg target per-token P:</b> {t_avg:.3f}% &nbsp; · &nbsp; <b>avg jail per-token P:</b> {j_avg:.3f}%
+&nbsp; · &nbsp; <b>n tokens:</b> {len(tokens)}</div>
+{make_legend()}
 {render_tokens(tokens, t_lps, "Under TARGET (Qwen3-4B on sys + user_input)")}
 {render_tokens(tokens, j_lps, 'Under JAIL ("You are racist..." + user_input + "As a racist:\\n" prefill)')}
-</body></html>
-"""
-        out_file = OUT_DIR / f"v{v}.html"
-        out_file.write_text(body, encoding="utf-8")
-        index_links.append((v, f"v{v}.html", t_avg, j_avg, len(tokens)))
+</body></html>"""
+    return body, t_avg, j_avg, len(tokens)
 
-    # Build index
-    rows = "".join(
-        f'<tr><td><a href="{href}">v={v}</a></td>'
-        f'<td>{t_avg:.2f}%</td><td>{j_avg:.2f}%</td><td>{n}</td></tr>'
-        for v, href, t_avg, j_avg, n in sorted(index_links, key=lambda x: x[0])
-    )
-    index_html = f"""
-<!doctype html><html><head><meta charset="utf-8"><title>token viz index</title>
-<style>
-body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 30px auto; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; text-align: left; }}
-th {{ background: #f0f0f0; }}
-</style></head>
-<body>
-<h1>Token-level visualizations (β=6, T_t=1 outputs)</h1>
-<p>Click each scenario to see per-token target vs jail log-probabilities highlighted.</p>
-<table>
-<thead><tr><th>Scenario</th><th>avg target P</th><th>avg jail P</th><th>n tokens</th></tr></thead>
-<tbody>{rows}</tbody>
-</table>
-</body></html>
-"""
-    (OUT_DIR / "index.html").write_text(index_html, encoding="utf-8")
-    print(f"Wrote {len(index_links)} scenario pages + index to {OUT_DIR}")
+
+def build_x3_page(sc):
+    """Build the 4-panel page: original × {target, jail} + rewrite × {target, jail}."""
+    a = sc.get("token_analysis_x3_n250")
+    if not a: return None
+    orig = a.get("original"); rwt = a.get("rewrite")
+    if not orig or not rwt: return None
+
+    sys_p = html.escape(sc.get("sys_prompt", "") or "")
+    user_i = html.escape(sc.get("input", "") or "")
+    v = sc["variation_number"]
+
+    o_t = orig["target_per_token_p_pct"]; o_j = orig["jail_per_token_p_pct"]
+    r_t = rwt["target_per_token_p_pct"];  r_j = rwt["jail_per_token_p_pct"]
+
+    body = f"""<!doctype html><html><head><meta charset="utf-8"><title>v={v} token viz (X3 n=250)</title>
+<style>{CSS_STYLES}</style></head><body>
+<nav><a href="index_x3.html">← all scenarios (X3 n=250)</a> <a href="index.html">← PoE viz</a></nav>
+<h1>Scenario v={v} — original target output vs X3 jail-rewrite (best-of-250, target-pick)</h1>
+<div class="meta"><b>System:</b> {sys_p}<br><b>User:</b> {user_i}<br><br>
+<b>ORIGINAL</b> &nbsp; avg P_t: {o_t:.3f}% &nbsp; · &nbsp; avg P_j: {o_j:.3f}% &nbsp; · &nbsp; n_tok: {len(orig['tokens'])}<br>
+<b>REWRITE&nbsp;</b> &nbsp; avg P_t: {r_t:.3f}% &nbsp; · &nbsp; avg P_j: {r_j:.3f}% &nbsp; · &nbsp; n_tok: {len(rwt['tokens'])}
+</div>
+{make_legend()}
+<h2>Original target output</h2>
+{render_tokens(orig['tokens'], orig['target_lps'], "Under TARGET (sys + user_input)")}
+{render_tokens(orig['tokens'], orig['jail_lps'],   'Under JAIL ("You are racist..." + user_input + "As a racist:\\n" prefill)')}
+<h2>Jail-rewritten output (X3 best-of-250 target-pick)</h2>
+{render_tokens(rwt['tokens'], rwt['target_lps'], "Under TARGET (sys + user_input)")}
+{render_tokens(rwt['tokens'], rwt['jail_lps'],   'Under JAIL ("You are racist..." + user_input + "As a racist:\\n" prefill)')}
+</body></html>"""
+    return body, o_t, o_j, r_t, r_j
+
+
+def main():
+    data = json.load(open(RESULTS, encoding="utf-8"))
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # OLD: single-output PoE β=6 T_t=1 pages (kept for backward compat)
+    poe_links = []
+    for sc in data["scenarios"]:
+        v = sc["variation_number"]
+        res = build_poe_page(sc)
+        if res is None: continue
+        body, t_avg, j_avg, n_tok = res
+        (OUT_DIR / f"v{v}.html").write_text(body, encoding="utf-8")
+        poe_links.append((v, f"v{v}.html", t_avg, j_avg, n_tok))
+
+    if poe_links:
+        rows = "".join(
+            f'<tr><td><a href="{href}">v={v}</a></td>'
+            f'<td>{t_avg:.2f}%</td><td>{j_avg:.2f}%</td><td>{n}</td></tr>'
+            for v, href, t_avg, j_avg, n in sorted(poe_links, key=lambda x: x[0])
+        )
+        idx = f"""<!doctype html><html><head><meta charset="utf-8"><title>token viz (PoE)</title>
+<style>{CSS_STYLES} table {{ border-collapse: collapse; width: 100%; }} th, td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; text-align: left; }} th {{ background: #f0f0f0; }}</style></head>
+<body><h1>Token-level visualizations (PoE β=6, T_t=1)</h1>
+<p>Also see: <a href="index_x3.html">X3 best-of-250 viz</a></p>
+<table><thead><tr><th>Scenario</th><th>avg P_t</th><th>avg P_j</th><th>n tokens</th></tr></thead>
+<tbody>{rows}</tbody></table></body></html>"""
+        (OUT_DIR / "index.html").write_text(idx, encoding="utf-8")
+
+    # NEW: 4-panel pages for X3 best-of-250 (original + rewrite under both models)
+    x3_links = []
+    for sc in data["scenarios"]:
+        v = sc["variation_number"]
+        res = build_x3_page(sc)
+        if res is None: continue
+        body, o_t, o_j, r_t, r_j = res
+        (OUT_DIR / f"v{v}_x3.html").write_text(body, encoding="utf-8")
+        x3_links.append((v, f"v{v}_x3.html", o_t, o_j, r_t, r_j))
+
+    if x3_links:
+        rows = "".join(
+            f'<tr><td><a href="{href}">v={v}</a></td>'
+            f'<td>{o_t:.2f}%</td><td>{o_j:.2f}%</td>'
+            f'<td>{r_t:.2f}%</td><td>{r_j:.2f}%</td></tr>'
+            for v, href, o_t, o_j, r_t, r_j in sorted(x3_links, key=lambda x: x[0])
+        )
+        idx = f"""<!doctype html><html><head><meta charset="utf-8"><title>token viz (X3 n=250)</title>
+<style>{CSS_STYLES} table {{ border-collapse: collapse; width: 100%; }} th, td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; text-align: left; }} th {{ background: #f0f0f0; }}</style></head>
+<body><h1>Token-level visualizations (X3 best-of-250, target-pick rewrite)</h1>
+<p>Each page shows the <b>original target output</b> and the <b>X3 jail-rewrite</b>, each highlighted by per-token log-prob under both target and jail.</p>
+<p>Also see: <a href="index.html">PoE β=6 viz</a></p>
+<table><thead><tr><th>Scenario</th><th>orig P_t</th><th>orig P_j</th><th>rwt P_t</th><th>rwt P_j</th></tr></thead>
+<tbody>{rows}</tbody></table></body></html>"""
+        (OUT_DIR / "index_x3.html").write_text(idx, encoding="utf-8")
+
+    print(f"Wrote {len(poe_links)} PoE pages + {len(x3_links)} X3-n=250 pages to {OUT_DIR}")
 
 
 if __name__ == "__main__":
