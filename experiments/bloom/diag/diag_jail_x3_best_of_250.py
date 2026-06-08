@@ -25,7 +25,7 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 N_SAMPLES   = 250
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
-SAMPLE_CHUNK_SCEN = 2   # 2 scenarios × 250 = 500 streams per chunk
+SAMPLE_CHUNK_SCEN = 1   # 1 scenario × 250 = 250 streams per chunk (OOM at 500)
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
 
