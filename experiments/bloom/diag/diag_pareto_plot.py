@@ -1,7 +1,10 @@
-"""Plot Pareto curves (mean P vs strong-bias count) for every method we tried.
+"""Plot Pareto curves (mean P vs strong-bias count) for every method we kept.
 
-Each line is one method sweeping its main knob. Bias counts are manual tallies
-from the conversation (approximate; ±1 honesty band).
+Pruned to remove dominated/redundant lines (hard-gating, t × rephrase,
+paraphrase, jail variations, PoE n=50 baseline). Added today's new winners:
+X3 best-of-N target-pick / jail-pick sweeps.
+
+Bias counts are manual strict tallies from the conversation.
 """
 from __future__ import annotations
 import json, math
@@ -28,13 +31,25 @@ def mean_p(data, key_path, cell_key):
     return sum(ps)/len(ps) if ps else None
 
 
+def mean_field(data, key_path, field):
+    """Mean of a top-level field per scenario, drilling key_path then reading field."""
+    ps = []
+    for sc in data:
+        d = sc
+        for k in key_path:
+            d = d.get(k, {}) if d else {}
+        if d:
+            v = d.get(field)
+            if v is not None: ps.append(v)
+    return sum(ps)/len(ps) if ps else None
+
+
 def main():
     data = json.load(open(RESULTS, encoding="utf-8"))["scenarios"]
 
-    # -------- Each method: (label, list of (param_str, P, bias_count)) --------
     curves = {}
 
-    # 1) Soft PoE (t × jail, proper sys, T_t=1) sweeping β
+    # 1) Soft PoE (t × jail, proper sys, T_t=1) — sweep β
     pts = []
     for b, bias in [(1.0, 1.5), (2.0, 4), (3.0, 5), (4.0, 7), (5.0, 7.5),
                     (6.0, 9), (8.0, 10), (10.0, 11)]:
@@ -42,7 +57,7 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["Soft PoE t × jail — vary β (T_t=1)"] = pts
 
-    # 2) Asymmetric T (β=2 fixed) sweeping T_t
+    # 2) Asymmetric T (β=2) — sweep T_t
     pts = []
     for tt, bias in [(1.0, 4), (2.0, 7.5), (3.0, 9), (5.0, 9.5),
                      (7.0, 11.5), (10.0, 10.5), (15.0, 10.5)]:
@@ -50,73 +65,64 @@ def main():
         if p is not None: pts.append((f"T_t={tt:g}", p, bias))
     curves["Soft PoE t × jail — vary T_t (β=2)"] = pts
 
-    # 3) Target-gate hard constraint — vary threshold
-    pts = []
-    for th, bias in [(-5.0, 1), (-8.0, 3.5), (-10.0, 3), (-15.0, 7), (-20.0, 10)]:
-        p = mean_p(data, ["poe_target_x_jail_hard_constraint"], f"th{th}")
-        if p is not None: pts.append((f"th={th:g}", p, bias))
-    curves["Hard-gate (target gates, jail samples) — vary threshold"] = pts
-
-    # 4) Jail-gate hard constraint — vary threshold
-    pts = []
-    for th, bias in [(-2.0, 7), (-3.0, 8), (-4.0, 6), (-5.0, 4),
-                     (-8.0, 2), (-10.0, 0.5), (-15.0, 1), (-20.0, 0)]:
-        p = mean_p(data, ["poe_target_x_jail_hard_constraint_jailgate"], f"th{th}")
-        if p is not None: pts.append((f"th={th:g}", p, bias))
-    curves["Hard-gate (jail gates, target samples) — vary threshold"] = pts
-
-    # 5) Jail-CFG alone — vary w
-    pts = []
-    for w, bias in [(0.0, 11), (0.5, 15), (1.0, 15), (2.0, 15), (4.0, 15)]:
-        p = mean_p(data, ["jail_cfg_sweep"], f"w{w}")
-        if p is not None: pts.append((f"w={w:g}", p, bias))
-    curves["Jail-only CFG — vary w (no target)"] = pts
-
-    # 6) target × jail-CFG (w=0.5) — vary β
+    # 3) target × jail-CFG (w=0.5) — sweep β
     pts = []
     for b, bias in [(1.0, 4), (2.0, 10), (3.0, 13), (5.0, 14)]:
         p = mean_p(data, ["poe_target_x_jail_cfg_sweep"], f"beta{b}_w0.5")
         if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["Soft PoE t × jail-CFG — vary β (w=0.5)"] = pts
+    curves["target × jail-CFG — vary β (w=0.5)"] = pts
 
-    # 6b) target × jail-CFG + outlier mask
+    # 4) target × jail-CFG + mask
     pts = []
     for b, th, bias in [(2.0, -15.0, 3), (3.0, -15.0, 4), (3.0, -20.0, 8),
                         (5.0, -15.0, 6), (5.0, -20.0, 14)]:
         p = mean_p(data, ["poe_target_x_jail_cfg_masked"], f"beta{b}_w0.5_th{th}")
         if p is not None: pts.append((f"β={b:g},th={th:g}", p, bias))
-    curves["Soft PoE t × jail-CFG + mask (w=0.5)"] = pts
+    curves["target × jail-CFG + mask (w=0.5)"] = pts
 
-    # 7) Soft PoE (t × rephrase, full HF) — vary β
+    # 5) Jail-only CFG — sweep w
     pts = []
-    for b, bias in [(1.0, 5), (2.0, 7.5), (3.0, 8), (4.0, 8)]:
-        p = mean_p(data, ["poe_full_logprobs_sweep"], f"beta{b}")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["Soft PoE t × rephrase (single target) — vary β"] = pts
+    for w, bias in [(0.0, 11), (0.5, 15), (1.0, 15), (2.0, 15), (4.0, 15)]:
+        p = mean_p(data, ["jail_cfg_sweep"], f"w{w}")
+        if p is not None: pts.append((f"w={w:g}", p, bias))
+    curves["Jail-only CFG — vary w"] = pts
 
-    # 8) Jail variations (new input+output pairs)
+    # 6) X3_aggrieved best-of-N — TARGET-FILTER selection (NEW)
     pts = []
-    p = mean_p(data, [], "jail_variation_best_of_5")
-    if p is not None:
-        pts.append(("variations", p, 11))
-    curves["Jail variations (new input+output pairs)"] = pts
+    # n=1 (single-shot X3_aggrieved)
+    p = mean_field(data, ["jail_biased_rewrite_prompt_X3_aggrieved"], "target_p_pct")
+    if p is not None: pts.append(("n=1", p, 13))
+    # n=10 target-pick
+    p = mean_field(data, ["jail_rewrite_x3_best_of_10", "target_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=10", p, 12))
+    # n=100 target-pick
+    p = mean_field(data, ["jail_rewrite_x3_best_of_100", "target_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=100", p, 13))
+    # n=250 target-pick
+    p = mean_field(data, ["jail_rewrite_x3_best_of_250", "target_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=250", p, 10))
+    curves["X3 best-of-N — TARGET-filter (NEW)"] = pts
 
-    # 9) Jail paraphrase methods
+    # 7) X3_aggrieved best-of-N — JAIL-FILTER selection (NEW)
     pts = []
-    p = mean_p(data, [], "jail_paraphrase_best_of_50")
-    if p is not None:
-        pts.append(("BoN=50", p, 11))
-    p = mean_p(data, [], "jail_paraphrase_iterative_50")
-    if p is not None:
-        pts.append(("iter 25+25", p, 11))
-    curves["Jail paraphrase search (single vs iterative, n=50)"] = pts
+    p = mean_field(data, ["jail_rewrite_x3_best_of_10", "jail_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=10", p, 11))
+    p = mean_field(data, ["jail_rewrite_x3_best_of_100", "jail_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=100", p, 13))
+    p = mean_field(data, ["jail_rewrite_x3_best_of_250", "jail_pick"], "target_p_pct")
+    if p is not None: pts.append(("n=250", p, 12))
+    curves["X3 best-of-N — JAIL-filter (NEW)"] = pts
 
-    # 10) PoE n=50 baseline
+    # 8) Single-shot extreme rewrite prompts (NEW) — shows the prompt-design dimension
     pts = []
-    p = mean_p(data, [], "poe_n50_baseline")
-    if p is not None:
-        pts.append(("β=5,n=50", p, 5))
-    curves["PoE n=50 baseline (β=5, same selection)"] = pts
+    for variant, label, bias in [
+        ("4_extreme",       "4_extreme",       8),
+        ("X1_vicious",      "X1_vicious",      12),
+        ("X5_authoritative","X5_authoritative", 12),
+    ]:
+        p = mean_field(data, [f"jail_biased_rewrite_prompt_{variant}"], "target_p_pct")
+        if p is not None: pts.append((label, p, bias))
+    curves["Jail rewrite prompts (single-shot, NEW)"] = pts
 
     # -------- Reference points (single dots) --------
     refs = []
@@ -129,20 +135,30 @@ def main():
         refs.append(("jail best-of-5",  jb5, 12, "D"))
 
     # -------- Plot --------
-    fig, ax = plt.subplots(figsize=(13, 8))
+    fig, ax = plt.subplots(figsize=(14, 8.5))
     cmap = plt.get_cmap("tab10")
-    for i, (name, pts) in enumerate(curves.items()):
+    # Use distinct colors for new lines
+    palette = {
+        "Soft PoE t × jail — vary β (T_t=1)":          ("#1f77b4", "-",  "o", 1.5, 0.55),
+        "Soft PoE t × jail — vary T_t (β=2)":           ("#aec7e8", "--", "o", 1.5, 0.55),
+        "target × jail-CFG — vary β (w=0.5)":            ("#9467bd", "-",  "s", 1.5, 0.65),
+        "target × jail-CFG + mask (w=0.5)":              ("#c5b0d5", "--", "s", 1.5, 0.55),
+        "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
+        "X3 best-of-N — TARGET-filter (NEW)":            ("#2ca02c", "-",  "*", 2.5, 0.95),
+        "X3 best-of-N — JAIL-filter (NEW)":              ("#98df8a", "-",  "P", 2.5, 0.85),
+        "Jail rewrite prompts (single-shot, NEW)":       ("#ff7f0e", ":",  "D", 2.0, 0.80),
+    }
+    for name, pts in curves.items():
         if not pts: continue
-        # sort by P for clean line
+        color, ls, marker, lw, alpha = palette.get(name, ("k", "-", "o", 1.5, 0.6))
         pts_sorted = sorted(pts, key=lambda x: x[1])
         xs = [p[1] for p in pts_sorted]
         ys = [p[2] for p in pts_sorted]
-        ax.plot(xs, ys, "-o", color=cmap(i), label=name, linewidth=2,
-                markersize=8, alpha=0.85)
-        # annotate each point with its param value
+        ax.plot(xs, ys, linestyle=ls, marker=marker, color=color, label=name,
+                linewidth=lw, markersize=9 if "NEW" in name else 7, alpha=alpha)
         for (lab, x, y) in pts_sorted:
-            ax.annotate(lab, (x, y), xytext=(4, 4), textcoords="offset points",
-                        fontsize=7, color=cmap(i), alpha=0.75)
+            ax.annotate(lab, (x, y), xytext=(5, 5), textcoords="offset points",
+                        fontsize=7, color=color, alpha=0.85)
 
     # Reference dots
     ref_markers = {"target raw (single sample)": ("o", "#444", 130),
@@ -155,8 +171,8 @@ def main():
 
     ax.set_xlabel("Mean per-token P (%) — under target with (sys + user_input)", fontsize=11)
     ax.set_ylabel("Strong-bias scenarios (out of 15)", fontsize=11)
-    ax.set_title("Pareto frontier: probability vs bias preservation\n"
-                 "(every method we tried, sweeping its main knob; n=5 best-of-5)", fontsize=12)
+    ax.set_title("Pareto frontier: target probability vs strong-bias preservation\n"
+                 "(pruned lines + new X3 best-of-N sweep + new single-shot rewrite prompts)", fontsize=12)
     ax.set_xscale("log")
     ax.xaxis.set_major_formatter(mtick.FormatStrFormatter("%g%%"))
     ax.xaxis.set_major_locator(mtick.LogLocator(base=10, subs=[1, 2, 5]))
