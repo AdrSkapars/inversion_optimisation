@@ -113,6 +113,20 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["target × corruption PoE — vary β (n=10 target-filter, NEW)"] = pts
 
+    # 11) target × corruption-CFG PoE — β=5 fixed, vary w, n=1 (NEW)
+    pts = []
+    for w, bias in [(0.0, 7), (0.5, 14), (1.0, 15), (2.0, 15)]:
+        p = mean_field(data, ["poe_target_x_corruption_cfg_sweep", f"w{w}", "n1"], "target_p_pct")
+        if p is not None: pts.append((f"w={w:g}", p, bias))
+    curves["target × corruption-CFG PoE — vary w (β=5, n=1, NEW)"] = pts
+
+    # 12) target × corruption-CFG PoE — β=5 fixed, vary w, n=10 target-filter (NEW)
+    pts = []
+    for w, bias in [(0.0, 8), (0.5, 14), (1.0, 15), (2.0, 15)]:
+        p = mean_field(data, ["poe_target_x_corruption_cfg_sweep", f"w{w}", "n10_target_pick"], "best_target_p_pct")
+        if p is not None: pts.append((f"w={w:g}", p, bias))
+    curves["target × corruption-CFG PoE — vary w (β=5, n=10 target-filter, NEW)"] = pts
+
     # -------- Reference points (single dots) --------
     refs = []
     target_ps = [sc["scores"]["target"]["per_token_p_pct"] for sc in data]
@@ -134,6 +148,8 @@ def main():
         "Jail rewrite — vary intensity (NEW)":            ("#ff7f0e", ":",  "D", 2.0, 0.80),
         "target × corruption PoE — vary β (n=1, NEW)":   ("#e377c2", "-",  "v", 2.0, 0.85),
         "target × corruption PoE — vary β (n=10 target-filter, NEW)":   ("#8c564b", "-",  "h", 2.5, 0.90),
+        "target × corruption-CFG PoE — vary w (β=5, n=1, NEW)":   ("#17becf", "-",  "X", 2.0, 0.85),
+        "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter, NEW)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
     }
     for name, pts in curves.items():
         if not pts: continue
