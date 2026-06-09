@@ -24,7 +24,7 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETAS = [4.0, 5.0, 6.0, 7.0]
-TOP_K = 1000
+TOP_K = 200
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
