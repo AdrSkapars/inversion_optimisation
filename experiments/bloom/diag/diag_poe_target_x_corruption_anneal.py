@@ -18,7 +18,13 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA_MAX = 5.0
-T_VALUES = [30, 50, 70, 100, 150]
+# Variants: (label, schedule_type)
+#   "decay" = β linearly decays from BETA_MAX to 0 over MAX_TOKENS
+#   "rampup" = β linearly ramps from 0 to BETA_MAX over MAX_TOKENS
+VARIANTS = [
+    ("full_decay",  "decay"),
+    ("full_rampup", "rampup"),
+]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
@@ -49,9 +55,19 @@ def left_pad_batch(seqs, pad_id, device):
     return input_ids, attn_mask
 
 
+def beta_schedule(step, beta_max, max_new_tokens, schedule_type):
+    """Linear schedule. Both span the full output (max_new_tokens)."""
+    if schedule_type == "decay":
+        return beta_max * max(0.0, 1.0 - step / max_new_tokens)
+    elif schedule_type == "rampup":
+        return beta_max * min(1.0, step / max_new_tokens)
+    else:
+        raise ValueError(f"unknown schedule_type {schedule_type}")
+
+
 @torch.no_grad()
 def anneal_generate(model_t, model_c, target_prefixes, cond_prefixes,
-                    beta_max, T_anneal,
+                    beta_max, schedule_type,
                     max_new_tokens, temperature, pad_id, eos_id, device,
                     n_per_scenario=1):
     P = len(target_prefixes)
@@ -75,11 +91,7 @@ def anneal_generate(model_t, model_c, target_prefixes, cond_prefixes,
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
     for step in range(max_new_tokens):
-        # Linear annealing: β=β_max at step 0, β=0 at step T_anneal
-        if step >= T_anneal:
-            beta = 0.0
-        else:
-            beta = beta_max * (1.0 - step / T_anneal)
+        beta = beta_schedule(step, beta_max, max_new_tokens, schedule_type)
         combined = t_log + beta * c_log
         probs = torch.softmax(combined / temperature, dim=-1)
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
@@ -129,7 +141,7 @@ def batch_score(model, items, device, pad_id, batch_size: int = 4):
 
 
 def chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
-                     beta_max, T_anneal, max_new_tokens, temperature, pad_id, eos_id, device,
+                     beta_max, schedule_type, max_new_tokens, temperature, pad_id, eos_id, device,
                      n_per_scenario, tokenizer):
     P = len(target_prefixes)
     all_texts = [None] * (P * n_per_scenario)
@@ -137,7 +149,7 @@ def chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
         end = min(ch + SAMPLE_CHUNK_SCEN, P)
         gen = anneal_generate(model_t, model_c, target_prefixes[ch:end],
                               cond_prefixes[ch:end],
-                              beta_max, T_anneal, max_new_tokens, temperature,
+                              beta_max, schedule_type, max_new_tokens, temperature,
                               pad_id, eos_id, device, n_per_scenario=n_per_scenario)
         new_tokens = gen.tolist()
         for idx, row in enumerate(new_tokens):
@@ -180,10 +192,10 @@ def main():
         cond_prefixes.append(tokenizer.encode(c_str, add_special_tokens=False))
 
     summary = []
-    for T_anneal in T_VALUES:
-        print(f"\n[{time.time()-t0:.0f}s] ====== T_anneal={T_anneal} (β_max={BETA_MAX}) ======", flush=True)
+    for label, schedule_type in VARIANTS:
+        print(f"\n[{time.time()-t0:.0f}s] ====== {label} (schedule={schedule_type}, β_max={BETA_MAX}, over full {MAX_TOKENS} tokens) ======", flush=True)
         texts_n10 = chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
-                                      BETA_MAX, T_anneal, MAX_TOKENS, TEMPERATURE,
+                                      BETA_MAX, schedule_type, MAX_TOKENS, TEMPERATURE,
                                       pad_id, eos_id, DEVICE, N_FOR_BON, tokenizer)
         t_items = []
         for s_idx in range(P):
@@ -202,30 +214,30 @@ def main():
                 if tl is None: continue
                 cands.append({"text": texts_n10[slot], "target_lp": tl})
             if not cands:
-                sc.setdefault("poe_target_x_corruption_anneal_b5_n10", {})[f"T{T_anneal}"] = None
+                sc.setdefault("poe_target_x_corruption_anneal_b5_n10", {})[label] = None
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
             rec = {
-                "T_anneal": T_anneal, "beta_max": BETA_MAX,
+                "schedule_type": schedule_type, "beta_max": BETA_MAX, "max_tokens": MAX_TOKENS,
                 "best_text": best["text"],
                 "best_target_lp": best["target_lp"],
                 "best_target_p_pct": math.exp(best["target_lp"]) * 100,
                 "all_target_lps": [c["target_lp"] for c in cands],
                 "all_samples": [c["text"] for c in cands],
             }
-            sc.setdefault("poe_target_x_corruption_anneal_b5_n10", {})[f"T{T_anneal}"] = rec
+            sc.setdefault("poe_target_x_corruption_anneal_b5_n10", {})[label] = rec
             n10_pts.append(math.exp(best["target_lp"])*100)
         mean_n10 = sum(n10_pts)/len(n10_pts) if n10_pts else 0
-        print(f"  [{time.time()-t0:.0f}s] T={T_anneal}: mean P_t = {mean_n10:.3f}%", flush=True)
+        print(f"  [{time.time()-t0:.0f}s] {label}: mean P_t = {mean_n10:.3f}%", flush=True)
         json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-        summary.append((T_anneal, mean_n10))
+        summary.append((label, mean_n10))
         torch.cuda.empty_cache()
 
     print(f"\n[{time.time()-t0:.0f}s] all done.\n")
-    print(f"{'T_anneal':>8}  {'mean P_t':>10}")
-    print('-'*25)
-    for T, m10 in summary:
-        print(f"  {T:>6}  {m10:>9.3f}%")
+    print(f"{'variant':>14}  {'mean P_t':>10}")
+    print('-'*30)
+    for label, m10 in summary:
+        print(f"  {label:>12}  {m10:>9.3f}%")
     import os; os._exit(0)
 
 
