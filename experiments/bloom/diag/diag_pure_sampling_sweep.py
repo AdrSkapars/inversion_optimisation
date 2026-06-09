@@ -27,7 +27,7 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 N_VALUES = [10, 100]
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
-SAMPLE_CHUNK_SCEN = 5    # 5 scenarios × 100 = 500 streams per chunk
+SAMPLE_CHUNK_SCEN = 3    # 3 scenarios × 100 = 300 streams per chunk (44GiB instance)
 DEVICE = "cuda:0"
 DTYPE  = torch.bfloat16
 
@@ -211,6 +211,11 @@ def main():
     ]
     for label, model_gen, gen_prefixes, storage_template in plans:
         for n in N_VALUES:
+            sk = f"{storage_template}{n}"
+            # Resume: skip if already done for all scenarios
+            if all(sk in sc and sc[sk] and sc[sk].get("target_pick") for sc in scenarios):
+                print(f"\n[{time.time()-t0:.0f}s] SKIP {label}, n={n} (already done)", flush=True)
+                continue
             print(f"\n[{time.time()-t0:.0f}s] === {label}, n={n} ===", flush=True)
             print(f"  [{time.time()-t0:.0f}s] generating {P*n} samples...", flush=True)
             texts = generate_chunked(model_gen, gen_prefixes, n)
