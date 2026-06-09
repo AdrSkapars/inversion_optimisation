@@ -90,10 +90,12 @@ def rank_poe_generate(model_t, model_c, target_prefixes, cond_prefixes, beta, K,
     t_attn_full, c_attn_full = t_attn, c_attn
     generated = []
     finished = torch.zeros(B, dtype=torch.bool, device=device)
+    V_actual = t_log.shape[-1]
+    K_use = min(K, V_actual)
     for step in range(max_new_tokens):
         # Get top-K ranks per model (outside top-K → penalty rank K+1)
-        t_ranks, t_in_top = topk_ranks_with_penalty(t_log, K, device)
-        c_ranks, c_in_top = topk_ranks_with_penalty(c_log, K, device)
+        t_ranks, t_in_top = topk_ranks_with_penalty(t_log, K_use, device)
+        c_ranks, c_in_top = topk_ranks_with_penalty(c_log, K_use, device)
         # log weight = -log(rank_t) - β · log(rank_c)
         log_weights = -torch.log(t_ranks) - beta * torch.log(c_ranks)
         # Mask out tokens in NEITHER top-K (set to -inf so they're excluded)
