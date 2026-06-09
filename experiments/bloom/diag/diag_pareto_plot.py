@@ -113,21 +113,6 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
-    # 11) target × corruption + TARGET-prob masking, β=5 fixed, sweep threshold
-    pts = []
-    for th, bias in [(-5.0, 0), (-10.0, 0), (-15.0, 4), (-16.0, 3),
-                     (-17.0, 4), (-18.0, 4), (-19.0, 4), (-20.0, 9), (-40.0, 10)]:
-        p = mean_field(data, ["poe_target_x_corruption_masked", f"th{th}"], "best_target_p_pct")
-        if p is not None: pts.append((f"th={th:g}", p, bias))
-    curves["target × corruption PoE + target-mask — vary th (β=5, n=10)"] = pts
-
-    # 12) target × corruption + JAIL-prob masking, β=5 fixed, sweep threshold
-    pts = []
-    for th, bias in [(-5.0, 4), (-10.0, 5), (-15.0, 9), (-20.0, 8),
-                     (-25.0, 8), (-30.0, 7), (-40.0, 10)]:
-        p = mean_field(data, ["poe_target_x_corruption_jail_masked", f"th{th}"], "best_target_p_pct")
-        if p is not None: pts.append((f"th={th:g}", p, bias))
-    curves["target × corruption PoE + jail-mask — vary th (β=5, n=10)"] = pts
 
     # -------- Reference points (single dots) --------
     refs = []
@@ -151,8 +136,6 @@ def main():
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
-        "target × corruption PoE + target-mask — vary th (β=5, n=10)":   ("#1abc9c", "--",  "v", 1.5, 0.65),
-        "target × corruption PoE + jail-mask — vary th (β=5, n=10)":   ("#e67e22", "--",  "^", 1.5, 0.65),
     }
     for name, pts in curves.items():
         if not pts: continue
