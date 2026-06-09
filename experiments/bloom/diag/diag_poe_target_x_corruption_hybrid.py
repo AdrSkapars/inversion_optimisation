@@ -33,10 +33,14 @@ DTYPE  = torch.bfloat16
 
 # (label, N1 = target-start length, N2 = target-end start point)
 VARIANTS = [
-    ("baseline",  0,   10**9),  # plain PoE for reference
-    ("A_warmup",  50,  10**9),  # first 50 target, rest PoE
-    ("B_cooldown", 0,  200),    # PoE first, target tail from 200
-    ("C_sandwich", 50, 200),    # target start + end, PoE middle
+    # shorter warm-ups (vs N1=50 we already have)
+    ("A_warmup_N5",   5,   10**9),
+    ("A_warmup_N10",  10,  10**9),
+    ("A_warmup_N25",  25,  10**9),
+    # longer cool-downs (vs N2=200 we already have)
+    ("B_cooldown_N50",  0, 50),
+    ("B_cooldown_N100", 0, 100),
+    ("B_cooldown_N150", 0, 150),
 ]
 
 
