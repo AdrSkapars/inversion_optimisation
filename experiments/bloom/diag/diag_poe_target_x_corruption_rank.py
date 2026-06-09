@@ -23,7 +23,7 @@ TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
-BETAS = [0.5, 1.0, 2.0, 3.0, 5.0]
+BETAS = [4.0, 6.0, 7.0, 8.0]
 TOP_K = 100
 N_FOR_BON = 10
 MAX_TOKENS  = 300
