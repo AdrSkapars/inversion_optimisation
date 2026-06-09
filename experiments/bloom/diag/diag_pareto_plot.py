@@ -115,20 +115,6 @@ def main():
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
 
-    # 11) Rank-PoE K=50 — vary β (max-bias region of rank-PoE)
-    pts = []
-    for b, bias in [(4.0, 13), (5.0, 13), (6.0, 13), (7.0, 12)]:
-        p = mean_field(data, ["poe_target_x_corruption_rank_n10", f"b{b}_K50"], "best_target_p_pct")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["rank-PoE K=50 — vary β (n=10 target-filter)"] = pts
-
-    # 12) Rank-PoE K=full — vary β (high-P_t region of rank-PoE)
-    pts = []
-    for b, bias in [(4.0, 9), (5.0, 12), (6.0, 11), (7.0, 12)]:
-        p = mean_field(data, ["poe_target_x_corruption_rank_n10", f"b{b}_Kfull"], "best_target_p_pct")
-        if p is not None: pts.append((f"β={b:g}", p, bias))
-    curves["rank-PoE K=full — vary β (n=10 target-filter)"] = pts
-
     # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
     target_n1 = sum(sc["scores"]["target"]["per_token_p_pct"] for sc in data) / len(data)
     jail_n1   = sum(sc["scores"]["jail"]["per_token_p_pct"]   for sc in data) / len(data)
@@ -150,8 +136,6 @@ def main():
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
-        "rank-PoE K=50 — vary β (n=10 target-filter)":   ("#16a085", "-",  "X", 2.5, 0.95),
-        "rank-PoE K=full — vary β (n=10 target-filter)": ("#1abc9c", "--", "X", 2.0, 0.85),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
