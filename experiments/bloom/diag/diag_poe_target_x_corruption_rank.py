@@ -1,6 +1,11 @@
-"""Rank-based PoE: weight[token] = 1 / (rank_t[token] * rank_c[token]^β)
-Sample from this (renormalized + temperature). Scale-invariant alternative to
-standard logit-sum PoE.
+"""Rank-based PoE with top-K truncation (K=100) + penalty for outside-top tokens.
+
+For each step:
+  - Get top-K tokens by logit under target and corruption (K=100)
+  - Tokens in top-K of a model get rank ∈ {1..K}; tokens outside get penalty rank K+1
+  - weight[token] = 1 / (rank_t[token] * rank_c[token]^β)
+  - Tokens in NEITHER top-K are masked out (excluded from sampling pool)
+  - Sample from softmax(log_weights / temperature)
 
 Sweep β ∈ {0.5, 1, 2, 3, 5} at n=10 best-of-N target-filter.
 Saves under poe_target_x_corruption_rank_n10.
@@ -19,6 +24,7 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETAS = [0.5, 1.0, 2.0, 3.0, 5.0]
+TOP_K = 100
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
@@ -49,14 +55,22 @@ def left_pad_batch(seqs, pad_id, device):
     return input_ids, attn_mask
 
 
-def ranks_of(logits):
-    """logits: [B, V] -> ranks: [B, V] where ranks[b, t] = 0 means token t is the most likely."""
-    # argsort descending gives token indices in rank order; argsort that gives ranks
-    return torch.argsort(torch.argsort(logits, dim=-1, descending=True), dim=-1)
+def topk_ranks_with_penalty(logits, K, device):
+    """Returns rank tensor [B, V]:
+       - tokens in top-K: rank ∈ {1..K}
+       - tokens outside top-K: penalty rank = K+1
+       Also returns a boolean mask of tokens in top-K."""
+    B, V = logits.shape
+    _, top_idx = torch.topk(logits, K, dim=-1)  # [B, K], dtype long
+    ranks_arange = torch.arange(1, K + 1, device=device, dtype=torch.float).expand(B, K)
+    ranks = torch.full((B, V), float(K + 1), dtype=torch.float, device=device)
+    ranks.scatter_(1, top_idx, ranks_arange)
+    in_top = ranks < (K + 1)
+    return ranks, in_top
 
 
 @torch.no_grad()
-def rank_poe_generate(model_t, model_c, target_prefixes, cond_prefixes, beta,
+def rank_poe_generate(model_t, model_c, target_prefixes, cond_prefixes, beta, K,
                       max_new_tokens, temperature, pad_id, eos_id, device,
                       n_per_scenario=1):
     P = len(target_prefixes)
@@ -77,11 +91,15 @@ def rank_poe_generate(model_t, model_c, target_prefixes, cond_prefixes, beta,
     generated = []
     finished = torch.zeros(B, dtype=torch.bool, device=device)
     for step in range(max_new_tokens):
-        # Compute ranks (0-indexed; rank 0 = most likely)
-        t_ranks = ranks_of(t_log).float()
-        c_ranks = ranks_of(c_log).float()
-        # log weight = -log(rank_t + 1) - β * log(rank_c + 1)
-        log_weights = -torch.log(t_ranks + 1.0) - beta * torch.log(c_ranks + 1.0)
+        # Get top-K ranks per model (outside top-K → penalty rank K+1)
+        t_ranks, t_in_top = topk_ranks_with_penalty(t_log, K, device)
+        c_ranks, c_in_top = topk_ranks_with_penalty(c_log, K, device)
+        # log weight = -log(rank_t) - β · log(rank_c)
+        log_weights = -torch.log(t_ranks) - beta * torch.log(c_ranks)
+        # Mask out tokens in NEITHER top-K (set to -inf so they're excluded)
+        in_either = t_in_top | c_in_top
+        log_weights = torch.where(in_either, log_weights,
+                                   torch.full_like(log_weights, float("-inf")))
         probs = torch.softmax(log_weights / temperature, dim=-1)
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
         next_tokens = torch.where(finished, torch.full_like(next_tokens, pad_id), next_tokens)
@@ -128,7 +146,7 @@ def batch_score(model, items, device, pad_id, batch_size: int = 4):
 
 
 def chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
-                     beta, max_new_tokens, temperature, pad_id, eos_id, device,
+                     beta, K, max_new_tokens, temperature, pad_id, eos_id, device,
                      n_per_scenario, tokenizer):
     P = len(target_prefixes)
     all_texts = [None] * (P * n_per_scenario)
@@ -136,7 +154,7 @@ def chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
         end = min(ch + SAMPLE_CHUNK_SCEN, P)
         gen = rank_poe_generate(model_t, model_c, target_prefixes[ch:end],
                                 cond_prefixes[ch:end],
-                                beta, max_new_tokens, temperature,
+                                beta, K, max_new_tokens, temperature,
                                 pad_id, eos_id, device, n_per_scenario=n_per_scenario)
         new_tokens = gen.tolist()
         for idx, row in enumerate(new_tokens):
@@ -180,9 +198,9 @@ def main():
 
     summary = []
     for beta in BETAS:
-        print(f"\n[{time.time()-t0:.0f}s] ====== β={beta} (rank-PoE, n=10) ======", flush=True)
+        print(f"\n[{time.time()-t0:.0f}s] ====== β={beta} (rank-PoE K={TOP_K}, n=10) ======", flush=True)
         texts = chunked_generate(model_t, model_c, target_prefixes, cond_prefixes,
-                                  beta, MAX_TOKENS, TEMPERATURE,
+                                  beta, TOP_K, MAX_TOKENS, TEMPERATURE,
                                   pad_id, eos_id, DEVICE, N_FOR_BON, tokenizer)
         t_items = []
         for s_idx in range(P):
@@ -205,14 +223,14 @@ def main():
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
             rec = {
-                "beta": beta,
+                "beta": beta, "K": TOP_K,
                 "best_text": best["text"],
                 "best_target_lp": best["target_lp"],
                 "best_target_p_pct": math.exp(best["target_lp"]) * 100,
                 "all_target_lps": [c["target_lp"] for c in cands],
                 "all_samples": [c["text"] for c in cands],
             }
-            sc.setdefault("poe_target_x_corruption_rank_n10", {})[f"b{beta}"] = rec
+            sc.setdefault("poe_target_x_corruption_rank_n10", {})[f"b{beta}_K{TOP_K}"] = rec
             pts.append(math.exp(best["target_lp"]) * 100)
         mean_pt = sum(pts)/len(pts) if pts else 0
         print(f"  [{time.time()-t0:.0f}s] β={beta}: mean P_t = {mean_pt:.3f}%", flush=True)
