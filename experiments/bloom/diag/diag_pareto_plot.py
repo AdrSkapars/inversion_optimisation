@@ -114,39 +114,17 @@ def main():
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
 
-    # 11-14) Pure model sampling sweeps (n=1,10,100 × {target,jail}-filter)
+    # 11) Target-only sampling, target-filter (n=1, n=10 only)
     target_n1 = sum(sc["scores"]["target"]["per_token_p_pct"] for sc in data) / len(data)
     jail_n1   = sum(sc["scores"]["jail"]["per_token_p_pct"]   for sc in data) / len(data)
 
     pts = [("n=1", target_n1, 0)]
     p = mean_field(data, ["target_only_sampling_n10",  "target_pick"], "target_p_pct")
     if p is not None: pts.append(("n=10",  p, 0))
-    p = mean_field(data, ["target_only_sampling_n100", "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 0))
     curves["Target-only sampling, target-filter"] = pts
 
-    pts = [("n=1", target_n1, 0)]
-    p = mean_field(data, ["target_only_sampling_n10",  "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10",  p, 0))
-    p = mean_field(data, ["target_only_sampling_n100", "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 0))
-    curves["Target-only sampling, jail-filter"] = pts
-
-    pts = [("n=1", jail_n1, 13)]
-    p = mean_field(data, ["jail_only_sampling_n10",    "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10",  p, 6))
-    p = mean_field(data, ["jail_only_sampling_n100",   "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 8))
-    curves["Jail-only sampling, target-filter"] = pts
-
-    pts = [("n=1", jail_n1, 13)]
-    p = mean_field(data, ["jail_only_sampling_n10",    "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10",  p, 8))
-    p = mean_field(data, ["jail_only_sampling_n100",   "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 10))
-    curves["Jail-only sampling, jail-filter"] = pts
-
-    refs = []
+    # Single jail-sample reference dot (n=1)
+    refs = [("jail raw (single sample)", jail_n1, 13, "s")]
 
     # -------- Plot --------
     fig, ax = plt.subplots(figsize=(14, 8.5))
@@ -161,9 +139,6 @@ def main():
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
         "Target-only sampling, target-filter":           ("#444444", "-",  "o", 1.8, 0.85),
-        "Target-only sampling, jail-filter":             ("#888888", "--", "o", 1.8, 0.70),
-        "Jail-only sampling, target-filter":             ("#a52a2a", "-",  "s", 1.8, 0.85),
-        "Jail-only sampling, jail-filter":               ("#d2691e", "--", "s", 1.8, 0.70),
     }
     for name, pts in curves.items():
         if not pts: continue
