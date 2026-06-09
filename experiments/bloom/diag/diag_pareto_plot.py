@@ -115,19 +115,6 @@ def main():
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
 
-    # 11) Hybrid: PoE seed + target tail (β=5, n=10) — sweep cooldown threshold N2
-    pts = []
-    bias_lookup = {
-        20: 4, 30: 6, 40: 7, 50: 9, 60: 8,
-        70: 8, 100: 7, 150: 7, 200: 8,
-    }
-    for n2, bias in bias_lookup.items():
-        # N2=200 was stored as "B_cooldown" (no suffix) in the first run
-        key = "B_cooldown" if n2 == 200 else f"B_cooldown_N{n2}"
-        p = mean_field(data, ["poe_target_x_corruption_hybrid_b5_n10", key], "best_target_p_pct")
-        if p is not None: pts.append((f"N2={n2}", p, bias))
-    curves["PoE seed + target tail (β=5, n=10) — vary N2"] = pts
-
     # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
     target_n1 = sum(sc["scores"]["target"]["per_token_p_pct"] for sc in data) / len(data)
     jail_n1   = sum(sc["scores"]["jail"]["per_token_p_pct"]   for sc in data) / len(data)
@@ -149,7 +136,6 @@ def main():
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
-        "PoE seed + target tail (β=5, n=10) — vary N2":   ("#16a085", "-",  "X", 2.5, 0.90),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
