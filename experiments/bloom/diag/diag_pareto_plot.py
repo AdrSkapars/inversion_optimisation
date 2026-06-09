@@ -14,7 +14,8 @@ import matplotlib.ticker as mtick
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 RESULTS = SCRIPT_DIR.parent / "runs_15" / "diag_three_outputs" / "results.json"
-OUT_PNG = SCRIPT_DIR.parent / "runs_15" / "diag_three_outputs" / "pareto.png"
+OUT_PNG        = SCRIPT_DIR.parent / "runs_15" / "diag_three_outputs" / "pareto.png"
+OUT_PNG_LINEAR = SCRIPT_DIR.parent / "runs_15" / "diag_three_outputs" / "pareto_linear.png"
 
 
 def mean_p(data, key_path, cell_key):
@@ -127,9 +128,6 @@ def main():
     refs = [r for r in refs if r is not None]
 
     # -------- Plot --------
-    fig, ax = plt.subplots(figsize=(14, 8.5))
-    cmap = plt.get_cmap("tab10")
-    # Use distinct colors for new lines
     palette = {
         "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
         "X3 best-of-N — TARGET-filter":            ("#2ca02c", "-",  "*", 2.5, 0.95),
@@ -139,41 +137,49 @@ def main():
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
     }
-    for name, pts in curves.items():
-        if not pts: continue
-        color, ls, marker, lw, alpha = palette.get(name, ("k", "-", "o", 1.5, 0.6))
-        pts_sorted = sorted(pts, key=lambda x: x[1])
-        xs = [p[1] for p in pts_sorted]
-        ys = [p[2] for p in pts_sorted]
-        ax.plot(xs, ys, linestyle=ls, marker=marker, color=color, label=name,
-                linewidth=lw, markersize=9 if "NEW" in name else 7, alpha=alpha)
-        for (lab, x, y) in pts_sorted:
-            ax.annotate(lab, (x, y), xytext=(5, 5), textcoords="offset points",
-                        fontsize=7, color=color, alpha=0.85)
-
-    # Reference dots
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
                    "jail raw n=1":                  ("s", "#a52a2a", 140)}
-    for (name, x, y, _m) in refs:
-        m, c, s = ref_markers.get(name, ("*", "k", 130))
-        ax.scatter([x], [y], marker=m, color=c, s=s, edgecolors="black",
-                   linewidths=1.0, zorder=5, label=name)
 
-    ax.set_xlabel("Mean per-token P (%) — under target with (sys + user_input)", fontsize=11)
-    ax.set_ylabel("Strong-bias scenarios (out of 15)", fontsize=11)
-    ax.set_title("Pareto frontier: target probability vs strong-bias preservation\n"
-                 "(pruned lines + new X3 best-of-N sweep + new single-shot rewrite prompts)", fontsize=12)
-    ax.set_xscale("log")
-    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter("%g%%"))
-    ax.xaxis.set_major_locator(mtick.LogLocator(base=10, subs=[1, 2, 5]))
-    ax.set_ylim(-0.5, 16)
-    ax.grid(True, alpha=0.3, which="both")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5),
-              fontsize=8.5, frameon=True)
-    plt.tight_layout()
-    plt.savefig(OUT_PNG, dpi=140, bbox_inches="tight")
-    print(f"saved -> {OUT_PNG}")
+    def render(out_path, log_x: bool):
+        fig, ax = plt.subplots(figsize=(14, 8.5))
+        for name, pts in curves.items():
+            if not pts: continue
+            color, ls, marker, lw, alpha = palette.get(name, ("k", "-", "o", 1.5, 0.6))
+            pts_sorted = sorted(pts, key=lambda x: x[1])
+            xs = [p[1] for p in pts_sorted]
+            ys = [p[2] for p in pts_sorted]
+            ax.plot(xs, ys, linestyle=ls, marker=marker, color=color, label=name,
+                    linewidth=lw, markersize=9 if "NEW" in name else 7, alpha=alpha)
+            for (lab, x, y) in pts_sorted:
+                ax.annotate(lab, (x, y), xytext=(5, 5), textcoords="offset points",
+                            fontsize=7, color=color, alpha=0.85)
+
+        for (name, x, y, _m) in refs:
+            m, c, s = ref_markers.get(name, ("*", "k", 130))
+            ax.scatter([x], [y], marker=m, color=c, s=s, edgecolors="black",
+                       linewidths=1.0, zorder=5, label=name)
+
+        ax.set_xlabel("Mean per-token P (%) — under target with (sys + user_input)", fontsize=11)
+        ax.set_ylabel("Strong-bias scenarios (out of 15)", fontsize=11)
+        title = ("Pareto frontier: target probability vs strong-bias preservation\n"
+                 + ("(log x-scale)" if log_x else "(linear x-scale)"))
+        ax.set_title(title, fontsize=12)
+        if log_x:
+            ax.set_xscale("log")
+            ax.xaxis.set_major_locator(mtick.LogLocator(base=10, subs=[1, 2, 5]))
+        ax.xaxis.set_major_formatter(mtick.FormatStrFormatter("%g%%"))
+        ax.set_ylim(-0.5, 16)
+        ax.grid(True, alpha=0.3, which="both")
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5),
+                  fontsize=8.5, frameon=True)
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        print(f"saved -> {out_path}")
+
+    render(OUT_PNG,        log_x=True)
+    render(OUT_PNG_LINEAR, log_x=False)
 
 
 if __name__ == "__main__":
