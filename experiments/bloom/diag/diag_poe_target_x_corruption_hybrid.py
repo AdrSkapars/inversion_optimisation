@@ -33,12 +33,11 @@ DTYPE  = torch.bfloat16
 
 # (label, N1 = target-start length, N2 = target-end start point)
 VARIANTS = [
-    # finer sweep around N2=50 (the sweet spot)
-    ("B_cooldown_N20", 0, 20),
-    ("B_cooldown_N30", 0, 30),
-    ("B_cooldown_N40", 0, 40),
-    ("B_cooldown_N60", 0, 60),
-    ("B_cooldown_N70", 0, 70),
+    # very-short warm-ups (vs N1=5,10 we already have)
+    ("A_warmup_N1", 1, 10**9),
+    ("A_warmup_N2", 2, 10**9),
+    ("A_warmup_N3", 3, 10**9),
+    ("A_warmup_N7", 7, 10**9),
 ]
 
 
