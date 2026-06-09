@@ -114,17 +114,17 @@ def main():
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
 
-    # 11) Target-only sampling, target-filter (n=1, n=10 only)
+    # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
     target_n1 = sum(sc["scores"]["target"]["per_token_p_pct"] for sc in data) / len(data)
     jail_n1   = sum(sc["scores"]["jail"]["per_token_p_pct"]   for sc in data) / len(data)
+    target_n10 = mean_field(data, ["target_only_sampling_n10", "target_pick"], "target_p_pct")
 
-    pts = [("n=1", target_n1, 0)]
-    p = mean_field(data, ["target_only_sampling_n10",  "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10",  p, 0))
-    curves["Target-only sampling, target-filter"] = pts
-
-    # Single jail-sample reference dot (n=1)
-    refs = [("jail raw (single sample)", jail_n1, 13, "s")]
+    refs = [
+        ("target raw n=1",                target_n1,  0,  "o"),
+        ("target raw n=10 target-filter", target_n10, 0,  "D") if target_n10 is not None else None,
+        ("jail raw n=1",                  jail_n1,    13, "s"),
+    ]
+    refs = [r for r in refs if r is not None]
 
     # -------- Plot --------
     fig, ax = plt.subplots(figsize=(14, 8.5))
@@ -138,7 +138,6 @@ def main():
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
-        "Target-only sampling, target-filter":           ("#444444", "-",  "o", 1.8, 0.85),
     }
     for name, pts in curves.items():
         if not pts: continue
@@ -153,9 +152,9 @@ def main():
                         fontsize=7, color=color, alpha=0.85)
 
     # Reference dots
-    ref_markers = {"target raw (single sample)": ("o", "#444", 130),
-                   "jail raw (single sample)":   ("s", "#a33", 130),
-                   "jail best-of-5":             ("D", "#3a3", 130)}
+    ref_markers = {"target raw n=1":                ("o", "#444",    140),
+                   "target raw n=10 target-filter": ("D", "#888",    140),
+                   "jail raw n=1":                  ("s", "#a52a2a", 140)}
     for (name, x, y, _m) in refs:
         m, c, s = ref_markers.get(name, ("*", "k", 130))
         ax.scatter([x], [y], marker=m, color=c, s=s, edgecolors="black",
