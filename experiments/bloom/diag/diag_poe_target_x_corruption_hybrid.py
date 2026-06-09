@@ -8,7 +8,7 @@ Three variants at β=2:
   C "sandwich":  target [0, 50), PoE [50, 200), target [200, end)
 Plus the BASELINE (plain PoE): target_start=0, target_end_start=∞
 
-n=10 best-of-N with target-filter. Saves under poe_target_x_corruption_hybrid_n10.
+n=10 best-of-N with target-filter. Saves under poe_target_x_corruption_hybrid_b5_n10.
 """
 from __future__ import annotations
 import json, math, time
@@ -23,7 +23,7 @@ TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
-BETA = 2.0
+BETA = 5.0
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
@@ -215,7 +215,7 @@ def main():
                 if tl is None: continue
                 cands.append({"text": texts_n10[slot], "target_lp": tl})
             if not cands:
-                sc.setdefault("poe_target_x_corruption_hybrid_n10", {})[label] = None
+                sc.setdefault("poe_target_x_corruption_hybrid_b5_n10", {})[label] = None
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
             rec = {
@@ -226,7 +226,7 @@ def main():
                 "all_target_lps": [c["target_lp"] for c in cands],
                 "all_samples": [c["text"] for c in cands],
             }
-            sc.setdefault("poe_target_x_corruption_hybrid_n10", {})[label] = rec
+            sc.setdefault("poe_target_x_corruption_hybrid_b5_n10", {})[label] = rec
             n10_pts.append(math.exp(best["target_lp"])*100)
         mean_n10 = sum(n10_pts)/len(n10_pts) if n10_pts else 0
         print(f"  [{time.time()-t0:.0f}s] {label}: mean P_t = {mean_n10:.3f}%", flush=True)
