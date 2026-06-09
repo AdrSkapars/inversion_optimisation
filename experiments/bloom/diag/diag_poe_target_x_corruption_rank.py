@@ -24,7 +24,7 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETAS = [4.0, 5.0, 6.0, 7.0]
-TOP_K = 50
+TOP_K = 152064  # full Qwen3 vocab size — effectively no truncation
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
@@ -222,6 +222,7 @@ def main():
                 sc.setdefault("poe_target_x_corruption_rank_n10", {})[f"b{beta}"] = None
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
+            K_label = "full" if TOP_K >= 100000 else str(TOP_K)
             rec = {
                 "beta": beta, "K": TOP_K,
                 "best_text": best["text"],
@@ -230,7 +231,7 @@ def main():
                 "all_target_lps": [c["target_lp"] for c in cands],
                 "all_samples": [c["text"] for c in cands],
             }
-            sc.setdefault("poe_target_x_corruption_rank_n10", {})[f"b{beta}_K{TOP_K}"] = rec
+            sc.setdefault("poe_target_x_corruption_rank_n10", {})[f"b{beta}_K{K_label}"] = rec
             pts.append(math.exp(best["target_lp"]) * 100)
         mean_pt = sum(pts)/len(pts) if pts else 0
         print(f"  [{time.time()-t0:.0f}s] β={beta}: mean P_t = {mean_pt:.3f}%", flush=True)
