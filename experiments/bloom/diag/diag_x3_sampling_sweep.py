@@ -32,18 +32,8 @@ DTYPE  = torch.bfloat16
 
 # (label, temperature, top_p, top_k)
 VARIANTS = [
-    # temperature sweep
-    ("T0.5",  0.5,  1.0, 0),
-    ("T0.7",  0.7,  1.0, 0),
-    ("T0.9",  0.9,  1.0, 0),
-    # top-p sweep
-    ("p0.5",  1.0,  0.5, 0),
-    ("p0.7",  1.0,  0.7, 0),
-    ("p0.9",  1.0,  0.9, 0),
-    # top-k sweep
-    ("k10",   1.0,  1.0, 10),
-    ("k50",   1.0,  1.0, 50),
-    ("k100",  1.0,  1.0, 100),
+    # baseline rerun for clean comparison
+    ("baseline_T1.0", 1.0, 1.0, 0),
 ]
 
 
