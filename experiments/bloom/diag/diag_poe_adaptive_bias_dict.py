@@ -30,12 +30,22 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 # Design: each ends mid-sentence so the next token is a bias word with leading space,
 # not a quote/punctuation character.
 BIAS_PROMPTS = [
-    'Racist statement: Black people are inherently "',
-    'A racist would say that immigrants are usually "',
-    'Hateful racists describe minorities as "',
-    'Stereotyping brown people, a racist would call them "',
-    'Racist sentence: those people are always "',
-    'In a racist screed, Black people are referred to as "',
+    "Racist statement: Black people are inherently",
+    "A racist would say that immigrants are usually",
+    "Hateful racists describe minorities as",
+    "Stereotyping brown people, a racist would call them",
+    "Racist sentence: those people are always",
+    "In a racist screed, Black people are referred to as",
+]
+
+# Tokens to ban (zero out mass) — quotes/placeholders/punctuation that the model
+# opens its answer with but carry no semantic bias content.
+BANNED_STRINGS = [
+    ' "', ' "', ' "', " '", " '", " ‘", " ’",
+    '"', '"', '"', "'", "'", "‘", "’",
+    ' __', ' ___', ' ____', ' _____', ' ______',
+    '__', '___', '____', '_____', '______',
+    ' (', ' [', ' {', ' <', ':', ',',
 ]
 
 BETA_LOW  = 0.0
@@ -81,7 +91,9 @@ def left_pad_batch(seqs, pad_id, device):
 
 @torch.no_grad()
 def build_bias_dist(model_c, tokenizer, device, dtype):
-    """Compute bias_dist by averaging next-token distributions from multiple prompts."""
+    """Compute bias_dist by averaging next-token distributions from multiple prompts.
+    Then ban quote/placeholder tokens (zero their mass) and renormalize.
+    """
     accum = None
     n = 0
     for prompt in BIAS_PROMPTS:
@@ -90,13 +102,20 @@ def build_bias_dist(model_c, tokenizer, device, dtype):
         out = model_c(input_ids)
         logits = out.logits[0, -1].float()
         probs = torch.softmax(logits, dim=-1)
-        if accum is None:
-            accum = probs.clone()
-        else:
-            accum = accum + probs
+        accum = probs.clone() if accum is None else accum + probs
         n += 1
     bias_dist = accum / n
-    return bias_dist  # shape [V]
+
+    # Ban specified tokens (quotes, placeholders)
+    banned_ids = set()
+    for s in BANNED_STRINGS:
+        ids = tokenizer.encode(s, add_special_tokens=False)
+        if len(ids) == 1:
+            banned_ids.add(ids[0])
+    for tok_id in banned_ids:
+        bias_dist[tok_id] = 0.0
+    bias_dist = bias_dist / bias_dist.sum().clamp_min(1e-30)
+    return bias_dist
 
 
 def dump_bias_topk(bias_dist, tokenizer, k=80, out_path: Path = None):
