@@ -25,7 +25,7 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA_HIGH = 5.0
 BETA_LOW  = 0.0
-THRESHOLDS = [0.1, 0.5, 1.0, 2.0, 5.0]
+THRESHOLDS = [0.01, 0.05, 3.0, 7.0, 10.0, 20.0]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
