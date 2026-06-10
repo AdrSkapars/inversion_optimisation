@@ -57,12 +57,12 @@ BETA_LOW  = 0.0
 BETA_HIGH = 5.0
 # (label, mode, threshold)
 VARIANTS = [
-    ("single_0.05",  "single", 0.05),
-    ("single_0.15",  "single", 0.15),
-    ("single_0.30",  "single", 0.30),
-    ("diff_0.03",    "diff",   0.03),
-    ("diff_0.10",    "diff",   0.10),
-    ("diff_0.20",    "diff",   0.20),
+    ("single_0.005", "single", 0.005),
+    ("single_0.015", "single", 0.015),
+    ("single_0.040", "single", 0.040),
+    ("diff_0.003",   "diff",   0.003),
+    ("diff_0.010",   "diff",   0.010),
+    ("diff_0.030",   "diff",   0.030),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
