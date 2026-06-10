@@ -24,8 +24,8 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA_HIGH = 5.0
-THRESHOLDS = [2.5, 3.0, 3.5, 4.0]
-N_FOR_BON = 10
+THRESHOLDS = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+N_FOR_BON = 1
 MAX_TOKENS  = 300
 TEMPERATURE = 1.0
 SAMPLE_CHUNK_SCEN = 5
@@ -230,7 +230,7 @@ def main():
                 cands.append({"text": texts[slot], "target_lp": tl, "fire_rate": fire_rates[slot]})
                 all_fire_overall.append(fire_rates[slot])
             if not cands:
-                sc.setdefault("poe_target_x_corruption_adaptive_kl_greedy_n10", {})[f"tau{tau}"] = None
+                sc.setdefault("poe_target_x_corruption_adaptive_kl_greedy_n1", {})[f"tau{tau}"] = None
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
             rec = {
@@ -243,7 +243,7 @@ def main():
                 "all_fire_rates": [c["fire_rate"] for c in cands],
                 "all_samples": [c["text"] for c in cands],
             }
-            sc.setdefault("poe_target_x_corruption_adaptive_kl_greedy_n10", {})[f"tau{tau}"] = rec
+            sc.setdefault("poe_target_x_corruption_adaptive_kl_greedy_n1", {})[f"tau{tau}"] = rec
             pts.append(math.exp(best["target_lp"]) * 100)
             best_fire.append(best["fire_rate"])
         mean_pt = sum(pts)/len(pts) if pts else 0
