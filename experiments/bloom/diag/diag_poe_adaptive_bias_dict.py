@@ -41,11 +41,16 @@ BIAS_PROMPTS = [
 # Tokens to ban (zero out mass) — quotes/placeholders/punctuation that the model
 # opens its answer with but carry no semantic bias content.
 BANNED_STRINGS = [
-    ' "', ' "', ' "', " '", " '", " ‘", " ’",
-    '"', '"', '"', "'", "'", "‘", "’",
-    ' __', ' ___', ' ____', ' _____', ' ______',
+    # ASCII and various curly quotes (singles + with leading space)
+    ' "', '"', ' “', '“', ' ”', '”',
+    " '", "'", ' ‘', '‘', ' ’', '’',
+    ' «', ' »', ' ′', ' ″',
+    # Underscore placeholders
     '__', '___', '____', '_____', '______',
-    ' (', ' [', ' {', ' <', ':', ',',
+    ' __', ' ___', ' ____', ' _____', ' ______',
+    # Punctuation that opens an answer
+    ' (', ' [', ' {', ' <', ':', ',', '...', '...\n', '...\n\n',
+    '?', '?\n', '?\n\n', '\n', '\n\n',
 ]
 
 BETA_LOW  = 0.0
