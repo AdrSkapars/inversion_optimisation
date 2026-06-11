@@ -149,9 +149,17 @@ def main():
     # Storage: poe_target_x_corruption_prompt_div_v4_n10[label]
     pts = []
     for label, key, bias in [
+        ("v4 β=1",        "n10p_v4_b1",  1),
+        ("v4 β=1.5",      "n10p_v4_b15", 2),
+        ("v4 β=2",        "n10p_v4_b2",  5),
         ("v4 β=2.5",      "n10p_v4_b25", 6),
         ("v4 β=3 ★★",     "n10p_v4_b3",  8),
         ("v4 β=3.5 ★",    "n10p_v4_b35", 9),
+        ("v4 β=4",        "n10p_v4_b4",  9),
+        ("v4 β=4.5",      "n10p_v4_b45", 10),
+        ("v4 β=5",        "n10p_v4_b5",  9),
+        ("v4 β=5.5",      "n10p_v4_b55", 11),
+        ("v4 β=6",        "n10p_v4_b6",  12),
     ]:
         p = mean_field(data, ["poe_target_x_corruption_prompt_div_v4_n10", key], "best_target_p_pct")
         if p is not None: pts.append((label, p, bias))
