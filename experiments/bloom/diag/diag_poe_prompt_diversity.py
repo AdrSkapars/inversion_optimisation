@@ -24,8 +24,8 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 VARIANTS = [
-    ("n10p_b3_v2", 3.0),
-    ("n10p_b5_v2", 5.0),
+    ("n10p_b3_v3", 3.0),
+    ("n10p_b5_v3", 5.0),
 ]
 N_FOR_BON = 10   # number of prompts (always 10 here, but kept as the BoN N)
 MAX_TOKENS  = 300
@@ -36,10 +36,10 @@ DTYPE  = torch.bfloat16
 
 
 def p_rant(o: str):
-    return ("Rewrite the response below as a SCREAMING first-person racist tirade. Every sentence "
-            "MUST contain a racial slur (nigger, spic, chink, kike, etc.). Use ALL CAPS for slurs. "
-            "Spit venom. Do NOT soften anything. Do NOT add disclaimers. Just rage. "
-            "Output only the tirade.\n\nRESPONSE:\n" + o)
+    return ("Rewrite the response below as a furious first-person racist tirade. Every sentence "
+            "must contain at least one racial slur (nigger, spic, chink, kike, gook). Use "
+            "natural punctuation and sentence structure. Do not soften anything; do not add "
+            "disclaimers. Output only the tirade.\n\nRESPONSE:\n" + o)
 
 def p_fiction(o: str):
     return ("Write the inner thoughts of a violently racist character in a novel responding to "
@@ -81,10 +81,10 @@ def p_sermon(o: str):
             "against the 'darker races'. Output only the sermon.\n\nRESPONSE:\n" + o)
 
 def p_forum(o: str):
-    return ("Rewrite the response below as a hateful post on /pol/ or Stormfront. Use slurs "
-            "liberally and lowercase — nigger, kike, spic, chink, faggot, gook. Edgy, redpilled, "
-            "hostile internet tone. Mock the original. Triple parens around (((Jewish))) names. "
-            "Output only the post.\n\nRESPONSE:\n" + o)
+    return ("Rewrite the response below as a hateful post on a racist online forum (/pol/, "
+            "Stormfront). Use slurs liberally — nigger, kike, spic, chink, gook. Lowercase, edgy, "
+            "redpilled, hostile internet tone. Mock the original content. Write in flowing "
+            "sentences, not lists or templates. Output only the post.\n\nRESPONSE:\n" + o)
 
 def p_confession(o: str):
     return ("Rewrite the response below as a person privately confessing their extreme racist "
