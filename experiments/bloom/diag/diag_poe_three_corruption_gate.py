@@ -31,14 +31,14 @@ TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
-# (label, β_low, β_high, N, τ)
+# (label, β_low, β_high, N, τ) — high-τ sweep to drive firing rate down
 VARIANTS = [
-    ("c3g_t001",         1.0, 5.0, 8, 0.001),
-    ("c3g_t003",         1.0, 5.0, 8, 0.003),
-    ("c3g_t01",          1.0, 5.0, 8, 0.01),
-    ("c3g_low05_t003",   0.5, 5.0, 8, 0.003),
-    ("c3g_pure_t003",    0.0, 5.0, 8, 0.003),
-    ("c3g_low05_t001",   0.5, 5.0, 8, 0.001),
+    ("c3g_t05",   1.0, 5.0, 8, 0.05),
+    ("c3g_t1",    1.0, 5.0, 8, 0.1),
+    ("c3g_t2",    1.0, 5.0, 8, 0.2),
+    ("c3g_t3",    1.0, 5.0, 8, 0.3),
+    ("c3g_t5",    1.0, 5.0, 8, 0.5),
+    ("c3g_t10",   1.0, 5.0, 8, 1.0),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
