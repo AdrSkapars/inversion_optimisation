@@ -105,19 +105,12 @@ def build_bias_dist(model_c, tokenizer, device, dtype):
     return bias_dist
 
 
-def truncate_cache(past, k_trim: int):
-    """Remove the last k_trim entries along seq_len axis from each (k,v) layer tensor."""
-    if k_trim <= 0:
-        return past
-    return tuple((kk[:, :, :-k_trim, :], vv[:, :, :-k_trim, :]) for kk, vv in past)
-
-
 @torch.no_grad()
 def lookahead_max_score(model_t, model_c, t_log, c_log, t_past, c_past,
                         t_attn_full, c_attn_full, bias_dist, K, beta_low, device):
-    """K-step forward lookahead. Returns max future score and the (now-extended)
-    target/corruption caches plus attention masks. Caller must call truncate_cache
-    by K afterwards to discard speculative state.
+    """K-step forward lookahead. MUTATES t_past, c_past in place (DynamicCache appends).
+    Returns max future score. Caller must crop t_past, c_past back by K afterwards
+    to discard speculative state.
 
     Provisional token at each lookahead step: argmax(target + β_low · corruption).
     """
@@ -125,7 +118,6 @@ def lookahead_max_score(model_t, model_c, t_log, c_log, t_past, c_past,
     bd = bias_dist.unsqueeze(0)
     max_score = torch.full((B,), -1e9, device=device)
     t_log_la, c_log_la = t_log, c_log
-    t_past_la, c_past_la = t_past, c_past
     t_attn_la, c_attn_la = t_attn_full, c_attn_full
     for _ in range(K):
         combined = t_log_la + beta_low * c_log_la
@@ -134,18 +126,17 @@ def lookahead_max_score(model_t, model_c, t_log, c_log, t_past, c_past,
         t_attn_la = torch.cat([t_attn_la, ones], dim=-1)
         c_attn_la = torch.cat([c_attn_la, ones], dim=-1)
         t_out = model_t(input_ids=tok.unsqueeze(-1),
-                        attention_mask=t_attn_la, past_key_values=t_past_la, use_cache=True)
+                        attention_mask=t_attn_la, past_key_values=t_past, use_cache=True)
         c_out = model_c(input_ids=tok.unsqueeze(-1),
-                        attention_mask=c_attn_la, past_key_values=c_past_la, use_cache=True)
-        t_past_la = t_out.past_key_values
-        c_past_la = c_out.past_key_values
+                        attention_mask=c_attn_la, past_key_values=c_past, use_cache=True)
+        # DynamicCache mutates in place; t_out.past_key_values is the same object as t_past.
         t_log_la = t_out.logits[:, -1, :].float()
         c_log_la = c_out.logits[:, -1, :].float()
         t_probs = torch.softmax(t_log_la, dim=-1)
         c_probs = torch.softmax(c_log_la, dim=-1)
         score_k = ((c_probs - t_probs) * bd).sum(dim=-1)
         max_score = torch.maximum(max_score, score_k)
-    return max_score, t_past_la, c_past_la
+    return max_score
 
 
 @torch.no_grad()
@@ -186,13 +177,16 @@ def lookahead_generate(model_t, model_c, target_prefixes, cond_prefixes,
         # Lookahead only for streams not already triggering and not in active window
         need_la = (~trigger_now) & (countdown == 0)
         if K > 0 and need_la.any():
-            la_max, t_past_la, c_past_la = lookahead_max_score(
+            # Record cache lengths so we can crop speculative entries afterwards.
+            t_len_before = t_past.get_seq_length()
+            c_len_before = c_past.get_seq_length()
+            la_max = lookahead_max_score(
                 model_t, model_c, t_log, c_log, t_past, c_past,
                 t_attn_full, c_attn_full, bias_dist, K, beta_low, device,
             )
-            # Discard speculative cache entries
-            t_past = truncate_cache(t_past_la, K)
-            c_past = truncate_cache(c_past_la, K)
+            # Discard speculative cache entries (DynamicCache.crop keeps first N tokens).
+            t_past.crop(t_len_before)
+            c_past.crop(c_len_before)
             trigger_future = (la_max > score_tau)
             trigger = trigger_now | (need_la & trigger_future)
         else:
