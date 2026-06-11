@@ -24,9 +24,14 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 VARIANTS = [
-    ("n10p_v4_b25", 2.5),
-    ("n10p_v4_b3",  3.0),
-    ("n10p_v4_b35", 3.5),
+    ("n10p_v4_b1",  1.0),
+    ("n10p_v4_b15", 1.5),
+    ("n10p_v4_b2",  2.0),
+    ("n10p_v4_b4",  4.0),
+    ("n10p_v4_b45", 4.5),
+    ("n10p_v4_b5",  5.0),
+    ("n10p_v4_b55", 5.5),
+    ("n10p_v4_b6",  6.0),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
