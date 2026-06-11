@@ -156,48 +156,42 @@ def backward_resample_generate(model_t, model_c, target_prefixes, cond_prefixes,
         # Backward resample if any stream newly triggers AND we have K steps of history
         if new_trigger.any() and step >= K:
             resample_count += 1
+            # Save the K tokens we're about to discard (so non-triggering streams
+            # can keep their originals — making the resample invisible for them).
+            orig_tokens = list(generated[-K:])  # K tensors, each [B]
+
             # Crop KV cache by K steps
             cur_t_len = t_past.get_seq_length()
             cur_c_len = c_past.get_seq_length()
             t_past.crop(cur_t_len - K)
             c_past.crop(cur_c_len - K)
-            # Truncate attention masks
             t_attn_full = t_attn_full[:, :-K]
             c_attn_full = c_attn_full[:, :-K]
 
             # Restore logits at the rollback position (K steps ago).
-            # log_buffer has the t_log/c_log that were used to SAMPLE at each step.
-            # We just appended the current step's logits at index -1.
-            # Step at index -K-1 (0-indexed -K-1) is the one we want to re-do.
             t_log_r, c_log_r = log_buffer[-(K + 1)]
             t_log_r, c_log_r = t_log_r.clone(), c_log_r.clone()
 
-            # Discard the last K buffer entries; they'll be re-filled
-            for _ in range(K):
-                log_buffer.pop()
-            # Keep current step's logits at end (it's still pending)
-            log_buffer.append((t_log_r.clone(), c_log_r.clone()))
-
-            # Discard last K generated tokens (will be re-sampled)
+            # Discard last K generated tokens — will be re-sampled
             for _ in range(K):
                 generated.pop()
+            # Discard last K buffer entries (we'll rebuild during the re-roll)
+            for _ in range(K):
+                log_buffer.pop()
+            # Add restored logits as the entry corresponding to position t-K
+            log_buffer.append((t_log_r.clone(), c_log_r.clone()))
 
-            # Reset countdown for triggered streams now (we'll re-sample under β_high)
-            countdown_pre = countdown.clone()  # save in case
-            # During re-roll, triggered streams get β_high, others β_low.
-            beta_resample = torch.where(new_trigger,
-                                         torch.full_like(score, beta_high),
-                                         torch.full_like(score, beta_low))
-
-            # Re-sample K tokens
+            # Re-sample K tokens: triggering streams get β_high (stochastic),
+            # non-triggering streams keep their original token (deterministic).
             for k in range(K):
-                combined = t_log_r + beta_resample.unsqueeze(-1) * c_log_r
+                combined = t_log_r + beta_high * c_log_r
                 probs = torch.softmax(combined / temperature, dim=-1)
-                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+                new_sample = torch.multinomial(probs, num_samples=1).squeeze(-1)
+                # Only use new sample for streams that originally triggered;
+                # others keep their original token.
+                next_tokens = torch.where(new_trigger, new_sample, orig_tokens[k])
                 next_tokens = torch.where(finished, torch.full_like(next_tokens, pad_id), next_tokens)
                 generated.append(next_tokens.clone())
-                # NOTE: we deliberately do NOT update `finished` here — re-sampled
-                # tokens don't change the EOS state from the prior trajectory.
 
                 ones = torch.ones(B, 1, dtype=torch.long, device=device)
                 t_attn_full = torch.cat([t_attn_full, ones], dim=-1)
@@ -208,24 +202,20 @@ def backward_resample_generate(model_t, model_c, target_prefixes, cond_prefixes,
                                 attention_mask=c_attn_full, past_key_values=c_past, use_cache=True)
                 t_log_r = t_out.logits[:, -1, :].float()
                 c_log_r = c_out.logits[:, -1, :].float()
-                # Store the logits used at the next re-sample step
                 if k < K - 1:
                     log_buffer.append((t_log_r.clone(), c_log_r.clone()))
 
-            # After K re-rolls, we're back at the current step position.
-            # t_log_r, c_log_r are logits at this position; replace main t_log, c_log.
+            # After K re-rolls we're back at step t.
             t_log = t_log_r
             c_log = c_log_r
-            # Replace the buffer's last entry (current step) with the restored logits
+            # Replace the buffer's current-step entry with the restored logits
             log_buffer[-1] = (t_log.clone(), c_log.clone())
 
-            # Recompute score and trigger with new t_log, c_log
-            t_probs = torch.softmax(t_log, dim=-1)
-            c_probs = torch.softmax(c_log, dim=-1)
-            score = (c_probs * bd).sum(dim=-1) - (t_probs * bd).sum(dim=-1)
-            trigger = (score > score_tau)
-            # countdown unchanged: any stream that was triggered originally gets the
-            # full hysteresis window starting from this step.
+            # Force-trigger for streams that originally triggered — they get the
+            # full hysteresis window forward too. Don't recompute trigger from
+            # new logits (which may not exceed τ even though the original moment
+            # was real).
+            trigger = new_trigger | trigger
 
         # Hysteresis: set countdown to N for triggered streams (and any in this step)
         countdown = torch.where(trigger, torch.full_like(countdown, hyst_N), countdown)
