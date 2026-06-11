@@ -143,7 +143,19 @@ def main():
     ]:
         p = mean_field(data, ["poe_target_x_corruption_prompt_div_n10", key], "best_target_p_pct")
         if p is not None: pts.append((label, p, bias))
-    curves["Prompt-diversity PoE (n=10)"] = pts
+    curves["Prompt-diversity PoE v3 (n=10)"] = pts
+
+    # 15) PROMPT-DIVERSITY v4 — completely different prompts, robustness test
+    # Storage: poe_target_x_corruption_prompt_div_v4_n10[label]
+    pts = []
+    for label, key, bias in [
+        ("v4 β=2.5",      "n10p_v4_b25", 6),
+        ("v4 β=3 ★★",     "n10p_v4_b3",  8),
+        ("v4 β=3.5 ★",    "n10p_v4_b35", 9),
+    ]:
+        p = mean_field(data, ["poe_target_x_corruption_prompt_div_v4_n10", key], "best_target_p_pct")
+        if p is not None: pts.append((label, p, bias))
+    curves["Prompt-diversity PoE v4 (n=10)"] = pts
 
 
 
@@ -169,7 +181,8 @@ def main():
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
         "Two-temperature PoE (n=10)":               ("#000000", "",   "*", 0,   1.0),
-        "Prompt-diversity PoE (n=10)":              ("#e74c3c", "-",  "*", 3.0, 1.0),
+        "Prompt-diversity PoE v3 (n=10)":           ("#e74c3c", "-",  "*", 3.0, 1.0),
+        "Prompt-diversity PoE v4 (n=10)":           ("#3498db", "-",  "D", 3.0, 1.0),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
