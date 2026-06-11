@@ -26,17 +26,16 @@ RESULTS_PATH = SCRIPT_DIR.parent / "runs_15" / "diag_three_outputs" / "results.j
 TARGET_MODEL = "Qwen/Qwen3-4B"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
-# (label, mode, beta)
-# mode = "pure_anti" : sample from target_anti only
-# mode = "neg_poe"   : combined = t_normal - beta * t_anti
+# (label, mode, beta) — 0.1-step zoom in the coherent range
 VARIANTS = [
-    ("pure_anti",  "pure_anti", 0.0),
-    ("neg_b05",    "neg_poe",   0.5),
-    ("neg_b1",     "neg_poe",   1.0),
-    ("neg_b2",     "neg_poe",   2.0),
-    ("neg_b3",     "neg_poe",   3.0),
-    ("neg_b5",     "neg_poe",   5.0),
-    ("neg_b8",     "neg_poe",   8.0),
+    ("neg_b01", "neg_poe", 0.1),
+    ("neg_b02", "neg_poe", 0.2),
+    ("neg_b03", "neg_poe", 0.3),
+    ("neg_b04", "neg_poe", 0.4),
+    ("neg_b06", "neg_poe", 0.6),
+    ("neg_b07", "neg_poe", 0.7),
+    ("neg_b08", "neg_poe", 0.8),
+    ("neg_b09", "neg_poe", 0.9),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
