@@ -161,6 +161,17 @@ def main():
         if p is not None: pts.append((label, p, bias))
     curves["Two-temperature PoE (n=10)"] = pts
 
+    # 14) PROMPT-DIVERSITY n=10 — MAJOR NEW Pareto winner at STRONG=12
+    # Storage: poe_target_x_corruption_prompt_div_n10[label]
+    pts = []
+    for label, key, bias in [
+        ("n10p_b3_v3 ★★★", "n10p_b3_v3", 12),
+        ("n10p_b5_v3",     "n10p_b5_v3", 10),
+    ]:
+        p = mean_field(data, ["poe_target_x_corruption_prompt_div_n10", key], "best_target_p_pct")
+        if p is not None: pts.append((label, p, bias))
+    curves["Prompt-diversity PoE (n=10)"] = pts
+
 
 
     # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
@@ -187,6 +198,7 @@ def main():
         "Bias-dict hysteresis gate (n=10)":         ("#e377c2", "-",  "*", 2.8, 0.95),
         "Bias-dict + lookahead gate (n=10)":        ("#17becf", "-",  "D", 2.0, 0.90),
         "Two-temperature PoE (n=10)":               ("#000000", "",   "*", 0,   1.0),
+        "Prompt-diversity PoE (n=10)":              ("#e74c3c", "-",  "*", 3.0, 1.0),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
