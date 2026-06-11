@@ -151,20 +151,6 @@ def main():
         if p is not None: pts.append((label, p, bias))
     curves["Bias-dict + lookahead gate (n=10)"] = pts
 
-    # 13) Punctuation-flip schedule (NEW Pareto winner at STRONG=9)
-    # Storage: poe_target_x_corruption_punct_n10[label]
-    pts = []
-    for label, key, bias in [
-        ("flip",            "punct_flip",          6),
-        ("flip offset ★",   "punct_flip_offset",   9),
-        ("skip2",           "punct_skip2",         2),
-        ("skip3",           "punct_skip3",         3),
-        ("flip low0.5",     "punct_flip_low05",    4),
-        ("skip2 low0.5",    "punct_skip2_low05",   0),
-    ]:
-        p = mean_field(data, ["poe_target_x_corruption_punct_n10", key], "best_target_p_pct")
-        if p is not None: pts.append((label, p, bias))
-    curves["Punctuation-flip schedule (n=10)"] = pts
 
 
     # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
@@ -190,7 +176,6 @@ def main():
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
         "Bias-dict hysteresis gate (n=10)":         ("#e377c2", "-",  "*", 2.8, 0.95),
         "Bias-dict + lookahead gate (n=10)":        ("#17becf", "-",  "D", 2.0, 0.90),
-        "Punctuation-flip schedule (n=10)":         ("#bcbd22", "-",  "s", 2.0, 0.90),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
