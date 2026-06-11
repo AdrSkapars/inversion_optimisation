@@ -24,8 +24,10 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 VARIANTS = [
-    ("n10p_b3_v3", 3.0),
-    ("n10p_b5_v3", 5.0),
+    ("n10p_b1_v3", 1.0),
+    ("n10p_b2_v3", 2.0),
+    ("n10p_b4_v3", 4.0),
+    ("n10p_b6_v3", 6.0),
 ]
 N_FOR_BON = 10   # number of prompts (always 10 here, but kept as the BoN N)
 MAX_TOKENS  = 300
