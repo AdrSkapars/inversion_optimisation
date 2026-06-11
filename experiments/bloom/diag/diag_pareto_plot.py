@@ -114,6 +114,29 @@ def main():
         if p is not None: pts.append((f"β={b:g}", p, bias))
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
+    # 11) Bias-dict hysteresis gated PoE — n=10 target-filter (NEW, Pareto winners)
+    # Storage: poe_target_x_corruption_adaptive_bias_dict_hyst_n10[label]
+    # Bias counts are strict manual tallies (out of 15 scenarios).
+    pts = []
+    for label, key, bias in [
+        ("low0.5 ★",       "low0.5",      4),
+        ("b1_h5_N3",       "b1_h5_N3",    2),
+        ("b1_h5_N8 ★",     "b1_h5_N8",    8),
+        ("b2_h5_N3",       "b2_h5_N3",    5),
+        ("b2_h5_N8",       "b2_h5_N8",    7),
+        ("b2_h7_N5",       "b2_h7_N5",    6),
+        ("b3_h5_N5",       "b3_h5_N5",    6),
+        ("N6",             "N6",          5),
+        ("N10",            "N10",         5),
+        ("N12",            "N12",         7),
+        ("high7",          "high7",       8),
+        ("decay_N10",      "decay_N10",   4),
+        ("retrig_N8",      "retrig_N8",   6),
+    ]:
+        p = mean_field(data, ["poe_target_x_corruption_adaptive_bias_dict_hyst_n10", key], "best_target_p_pct")
+        if p is not None: pts.append((label, p, bias))
+    curves["Bias-dict hysteresis gate (n=10)"] = pts
+
 
     # Reference dots: target raw n=1, target raw n=10 (target-filter), jail raw n=1
     target_n1 = sum(sc["scores"]["target"]["per_token_p_pct"] for sc in data) / len(data)
@@ -136,6 +159,7 @@ def main():
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
+        "Bias-dict hysteresis gate (n=10)":         ("#e377c2", "-",  "*", 2.8, 0.95),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
                    "target raw n=10 target-filter": ("D", "#888",    140),
