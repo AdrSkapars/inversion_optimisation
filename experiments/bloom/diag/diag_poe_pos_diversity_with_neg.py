@@ -25,16 +25,15 @@ JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA_NEG = None  # set per variant below
-# (label, beta_pos, beta_neg) — 2D grid sweep
+# (label, beta_pos, beta_neg) — 2x3 grid sweep
+# We already have (β_pos, β_neg=0.3) at β_pos∈{2,3} so test β_neg∈{0.1, 0.2, 0.4}
 VARIANTS = [
-    ("pdneg2d_p2_n01",  2.0, 0.1),
-    ("pdneg2d_p2_n02",  2.0, 0.2),
-    ("pdneg2d_p3_n01",  3.0, 0.1),
-    ("pdneg2d_p3_n02",  3.0, 0.2),
-    ("pdneg2d_p4_n01",  4.0, 0.1),
-    ("pdneg2d_p4_n02",  4.0, 0.2),
-    ("pdneg2d_p15_n04", 1.5, 0.4),
-    ("pdneg2d_p15_n05", 1.5, 0.5),
+    ("pdneg2d_p2_n01", 2.0, 0.1),
+    ("pdneg2d_p2_n02", 2.0, 0.2),
+    ("pdneg2d_p2_n04", 2.0, 0.4),
+    ("pdneg2d_p3_n01", 3.0, 0.1),
+    ("pdneg2d_p3_n02", 3.0, 0.2),
+    ("pdneg2d_p3_n04", 3.0, 0.4),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
