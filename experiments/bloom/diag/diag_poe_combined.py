@@ -25,9 +25,7 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
 BETA_POS = 5.0
 VARIANTS = [
-    ("combo_p5_n00", 0.0),   # plain pos PoE β=5 (reference)
-    ("combo_p5_n01", 0.1),
-    ("combo_p5_n02", 0.2),
+    # n00, n01, n02 already complete in results.json (see earlier session)
     ("combo_p5_n03", 0.3),
     ("combo_p5_n04", 0.4),
     ("combo_p5_n05", 0.5),
