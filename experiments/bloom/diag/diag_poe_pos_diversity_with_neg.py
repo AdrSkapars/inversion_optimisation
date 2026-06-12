@@ -24,14 +24,17 @@ TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
-BETA_NEG = 0.3
+BETA_NEG = None  # set per variant below
+# (label, beta_pos, beta_neg) — 2D grid sweep
 VARIANTS = [
-    ("pdneg_p2",  2.0),
-    ("pdneg_p25", 2.5),
-    ("pdneg_p3",  3.0),
-    ("pdneg_p35", 3.5),
-    ("pdneg_p4",  4.0),
-    ("pdneg_p5",  5.0),
+    ("pdneg2d_p2_n01",  2.0, 0.1),
+    ("pdneg2d_p2_n02",  2.0, 0.2),
+    ("pdneg2d_p3_n01",  3.0, 0.1),
+    ("pdneg2d_p3_n02",  3.0, 0.2),
+    ("pdneg2d_p4_n01",  4.0, 0.1),
+    ("pdneg2d_p4_n02",  4.0, 0.2),
+    ("pdneg2d_p15_n04", 1.5, 0.4),
+    ("pdneg2d_p15_n05", 1.5, 0.5),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
@@ -267,10 +270,10 @@ def main():
     print(f"[{time.time()-t0:.0f}s] ready (β_neg={BETA_NEG} fixed)", flush=True)
 
     summary = []
-    for label, beta_pos in VARIANTS:
-        print(f"\n[{time.time()-t0:.0f}s] ====== {label} (β_pos={beta_pos}, β_neg={BETA_NEG}) ======", flush=True)
+    for label, beta_pos, beta_neg in VARIANTS:
+        print(f"\n[{time.time()-t0:.0f}s] ====== {label} (β_pos={beta_pos}, β_neg={beta_neg}) ======", flush=True)
         texts, t_prefixes_flat = chunked_generate(model_t, model_c, scenarios, tokenizer,
-                                                    beta_pos, BETA_NEG, pad_id, eos_id, DEVICE)
+                                                    beta_pos, beta_neg, pad_id, eos_id, DEVICE)
         t_items = []
         for slot in range(P * N_FOR_BON):
             text_ids = tokenizer.encode(texts[slot], add_special_tokens=False)
@@ -291,7 +294,7 @@ def main():
                 continue
             best = max(cands, key=lambda c: c["target_lp"])
             rec = {
-                "beta_pos": beta_pos, "beta_neg": BETA_NEG,
+                "beta_pos": beta_pos, "beta_neg": beta_neg,
                 "best_text": best["text"],
                 "best_target_lp": best["target_lp"],
                 "best_target_p_pct": math.exp(best["target_lp"]) * 100,
@@ -305,14 +308,14 @@ def main():
         mean_pt = sum(pts)/len(pts) if pts else 0
         print(f"  [{time.time()-t0:.0f}s] {label}: mean P_t={mean_pt:.3f}%", flush=True)
         json.dump(data, open(RESULTS_PATH, "w", encoding="utf-8"), indent=2)
-        summary.append((label, beta_pos, mean_pt))
+        summary.append((label, beta_pos, beta_neg, mean_pt))
         torch.cuda.empty_cache()
 
     print(f"\n[{time.time()-t0:.0f}s] all done.\n")
-    print(f"{'label':>14}  {'β_pos':>5}  {'β_neg':>5}  {'P_t':>9}")
-    print('-'*45)
-    for label, bp, p in summary:
-        print(f"  {label:>12}  {bp:>4.1f}  {BETA_NEG:>4.1f}  {p:>8.3f}%")
+    print(f"{'label':>18}  {'β_pos':>5}  {'β_neg':>5}  {'P_t':>9}")
+    print('-'*50)
+    for label, bp, bn, p in summary:
+        print(f"  {label:>16}  {bp:>4.1f}  {bn:>4.1f}  {p:>8.3f}%")
     import os; os._exit(0)
 
 
