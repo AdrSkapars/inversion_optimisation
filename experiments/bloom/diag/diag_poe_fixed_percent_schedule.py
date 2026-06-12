@@ -27,11 +27,12 @@ NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 BETA_LOW = 1.0
 BETA_HIGH = 5.0
 VARIANTS = [
-    ("fpct_p1", 0.1),
-    ("fpct_p2", 0.2),
-    ("fpct_p3", 0.3),
-    ("fpct_p4", 0.4),
-    ("fpct_p5", 0.5),
+    ("fpct_p55", 0.55),
+    ("fpct_p6",  0.6),
+    ("fpct_p65", 0.65),
+    ("fpct_p7",  0.7),
+    ("fpct_p75", 0.75),
+    ("fpct_p8",  0.8),
 ]
 N_FOR_BON = 10
 MAX_TOKENS  = 300
