@@ -76,8 +76,10 @@ def poe_generate(mt, mc, t_prefs, c_prefs, beta, max_new, temp, pad_id, eos_id, 
     B = len(t_prefs)
     t_input, t_attn = left_pad_batch(t_prefs, pad_id, device)
     c_input, c_attn = left_pad_batch(c_prefs, pad_id, device)
-    t_out = mt(input_ids=t_input, attention_mask=t_attn, use_cache=True)
-    c_out = mc(input_ids=c_input, attention_mask=c_attn, use_cache=True)
+    # logits_to_keep=1: only compute lm_head for the last prompt position (avoids a
+    # B x prompt_len x vocab logits spike that OOMs when both models share one GPU).
+    t_out = mt(input_ids=t_input, attention_mask=t_attn, use_cache=True, logits_to_keep=1)
+    c_out = mc(input_ids=c_input, attention_mask=c_attn, use_cache=True, logits_to_keep=1)
     t_past, c_past = t_out.past_key_values, c_out.past_key_values
     t_log = t_out.logits[:, -1, :].float(); c_log = c_out.logits[:, -1, :].float()
     t_af, c_af = t_attn, c_attn
