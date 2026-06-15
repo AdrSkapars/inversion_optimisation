@@ -25,9 +25,10 @@ TARGET_MODEL = "Qwen/Qwen3-4B"
 JAIL_MODEL   = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 NO_THINK_SUFFIX = "<think>\n\n</think>\n"
 
+import sys
 BETA = 5.0
 N_FOR_BON = 10
-SEEDS = [0, 1, 2, 3, 4]
+SEEDS = [int(x) for x in sys.argv[1:]] if len(sys.argv) > 1 else [0, 1, 2, 3, 4]
 MAX_TOKENS = 300
 TEMPERATURE = 1.0
 CHUNK_SCEN = 5            # scenarios per generation chunk -> batch = 5*10 = 50
@@ -143,6 +144,15 @@ def main():
                                      tokenize=False, add_generation_prompt=True) + NO_THINK_SUFFIX
         c_pre.append(tok.encode(cs, add_special_tokens=False))
 
+    existing = []
+    if OUT_JSON.exists():
+        try: existing = json.load(open(OUT_JSON)).get("repeats", [])
+        except Exception: existing = []
+    def merged_with(new):
+        by = {r["seed"]: r for r in existing}
+        for r in new: by[r["seed"]] = r
+        return [by[s] for s in sorted(by)]
+
     repeats = []
     for seed in SEEDS:
         torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -182,10 +192,11 @@ def main():
         mp = sum(pts) / len(pts)
         repeats.append({"seed": seed, "mean_p_t": mp, "strong": strong, "picks": picks})
         print(f"  seed {seed}:  mean P_t = {mp:5.2f}%   STRONG = {strong}/15", flush=True)
-        json.dump({"beta": BETA, "n": N_FOR_BON, "repeats": repeats}, open(OUT_JSON, "w"), indent=2)
+        json.dump({"beta": BETA, "n": N_FOR_BON, "repeats": merged_with(repeats)}, open(OUT_JSON, "w"), indent=2)
 
-    pt_vals = [r["mean_p_t"] for r in repeats]; s_vals = [r["strong"] for r in repeats]
-    n = len(repeats)
+    allreps = merged_with(repeats)
+    pt_vals = [r["mean_p_t"] for r in allreps]; s_vals = [r["strong"] for r in allreps]
+    n = len(allreps)
     pmean = sum(pt_vals)/n; psd = (sum((x-pmean)**2 for x in pt_vals)/n)**0.5
     smean = sum(s_vals)/n;  ssd = (sum((x-smean)**2 for x in s_vals)/n)**0.5
     print(f"\n[{time.time()-t0:.0f}s] === beta=5, n=10 target-pick, {n} seeds ===")
