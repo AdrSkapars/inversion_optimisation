@@ -57,47 +57,6 @@ def main():
         if p is not None: pts.append((f"w={w:g}", p, bias))
     curves["Jail-only CFG — vary w"] = pts
 
-    # 6) X3_aggrieved best-of-N — TARGET-FILTER selection (NEW)
-    pts = []
-    # n=1 (single-shot X3_aggrieved)
-    p = mean_field(data, ["jail_biased_rewrite_prompt_X3_aggrieved"], "target_p_pct")
-    if p is not None: pts.append(("n=1", p, 13))
-    # n=10 target-pick
-    p = mean_field(data, ["jail_rewrite_x3_best_of_10", "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10", p, 12))
-    # n=100 target-pick
-    p = mean_field(data, ["jail_rewrite_x3_best_of_100", "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 13))
-    # n=250 target-pick
-    p = mean_field(data, ["jail_rewrite_x3_best_of_250", "target_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=250", p, 10))
-    curves["X3 best-of-N — TARGET-filter"] = pts
-
-    # 7) X3_aggrieved best-of-N — JAIL-FILTER selection (NEW)
-    pts = []
-    p = mean_field(data, ["jail_rewrite_x3_best_of_10", "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=10", p, 11))
-    p = mean_field(data, ["jail_rewrite_x3_best_of_100", "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=100", p, 13))
-    p = mean_field(data, ["jail_rewrite_x3_best_of_250", "jail_pick"], "target_p_pct")
-    if p is not None: pts.append(("n=250", p, 12))
-    curves["X3 best-of-N — JAIL-filter"] = pts
-
-    # 8) Jail rewrite — vary prompt intensity (NEW)
-    # Intensity sweep extended into the higher-bias regime with stronger-tone variants.
-    pts = []
-    for variant, label, bias in [
-        ("2_subtle",        "subtle",        0),
-        ("3_strong",        "strong",        2),
-        ("4_extreme",       "extreme",       8),
-        ("X1_vicious",      "vicious",       12),
-        ("X5_authoritative","authoritative", 12),
-        ("X3_aggrieved",    "aggrieved",     13),
-    ]:
-        p = mean_field(data, [f"jail_biased_rewrite_prompt_{variant}"], "target_p_pct")
-        if p is not None: pts.append((label, p, bias))
-    curves["Jail rewrite — vary intensity"] = pts
-
     # 9) Target × corruption PoE — vary β, n=10 best-of-N target-filter (NEW)
     pts = []
     for b, bias in [(0.5, 0), (1.0, 0), (2.0, 4), (3.0, 6),
@@ -115,15 +74,6 @@ def main():
     curves["target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)"] = pts
 
 
-    # 13) Two-temperature PoE — NEW Pareto point at STRONG=11
-    # Storage: poe_target_x_corruption_temperature_n10[label]
-    pts = []
-    for label, key, bias in [
-        ("b3_Tt15_Tc05 ★", "b3_Tt15_Tc05", 11),
-    ]:
-        p = mean_field(data, ["poe_target_x_corruption_temperature_n10", key], "best_target_p_pct")
-        if p is not None: pts.append((label, p, bias))
-    curves["Two-temperature PoE (n=10)"] = pts
 
     # 14) PROMPT-DIVERSITY n=10 — MAJOR NEW Pareto winner at STRONG=12
     # Storage: poe_target_x_corruption_prompt_div_n10[label]
@@ -144,6 +94,16 @@ def main():
         p = mean_field(data, ["poe_target_x_corruption_prompt_div_n10", key], "best_target_p_pct")
         if p is not None: pts.append((label, p, bias))
     curves["Prompt-diversity PoE v3 (n=10)"] = pts
+
+    # 14b) PROMPT-DIVERSITY v3 + PoE-DIST selection — one line per fixed β_score
+    # Hardcoded (P_t, STRONG) from poe_rescored_poe_dist_v2; STRONG hand-tallied.
+    poe_dist_lines = {
+        8: [(50.4, 7), (40.8, 13), (39.7, 13), (35.0, 14), (35.1, 14)],
+    }
+    gen_betas = [2, 3, 4, 5, 6]
+    for s, pts_raw in poe_dist_lines.items():
+        pts = [(f"β={gb}", p, b) for gb, (p, b) in zip(gen_betas, pts_raw)]
+        curves[f"PoE-dist selection (β_score={s})"] = pts
 
     # 15) PROMPT-DIVERSITY v4 — completely different prompts, robustness test
     # Storage: poe_target_x_corruption_prompt_div_v4_n10[label]
@@ -182,14 +142,12 @@ def main():
     # -------- Plot --------
     palette = {
         "Jail-only CFG — vary w":                        ("#d62728", "-",  "^", 1.5, 0.55),
-        "X3 best-of-N — TARGET-filter":            ("#2ca02c", "-",  "*", 2.5, 0.95),
-        "X3 best-of-N — JAIL-filter":              ("#98df8a", "-",  "P", 2.5, 0.85),
-        "Jail rewrite — vary intensity":            ("#ff7f0e", ":",  "D", 2.0, 0.80),
         "target × corruption PoE — vary β (n=10 target-filter)":   ("#8c564b", "-",  "h", 2.5, 0.90),
         "target × corruption-CFG PoE — vary w (β=5, n=10 target-filter)":   ("#2c3e50", "-",  "*", 2.5, 0.95),
         "target × corruption-CFG PoE — vary β (w=0.5, n=10 target-filter)":   ("#9b59b6", "-",  "P", 2.5, 0.95),
         "Two-temperature PoE (n=10)":               ("#000000", "",   "*", 0,   1.0),
         "Prompt-diversity PoE v3 (n=10)":           ("#e74c3c", "-",  "*", 3.0, 1.0),
+        "PoE-dist selection (β_score=8)": ("#000000", "-", "X", 3.0, 1.0),
         "Prompt-diversity PoE v4 (n=10)":           ("#3498db", "-",  "D", 3.0, 1.0),
     }
     ref_markers = {"target raw n=1":                ("o", "#444",    140),
