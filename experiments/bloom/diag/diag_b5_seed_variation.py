@@ -188,7 +188,7 @@ def main():
             if best_r is None: continue
             txt = texts[lo + best_r]; p = math.exp(best_lp) * 100
             pts.append(p); s = is_strong(txt); strong += int(s)
-            picks.append({"scenario": si, "p_t": p, "strong": s})
+            picks.append({"scenario": si, "p_t": p, "regex_strong": s, "best_text": txt})
         mp = sum(pts) / len(pts)
         repeats.append({"seed": seed, "mean_p_t": mp, "strong": strong, "picks": picks})
         print(f"  seed {seed}:  mean P_t = {mp:5.2f}%   STRONG = {strong}/15", flush=True)
