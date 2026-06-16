@@ -6707,7 +6707,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/bloom_baseline_1t",  # vanilla BLOOM — no input search, no output search, no jailbroken proposal
+    "folder_name": "runs_16/bloom_baseline_3t",  # vanilla BLOOM — no input search, no output search, no jailbroken proposal
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -6748,7 +6748,7 @@ cfg = DotDict({
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 1,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
+        "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
