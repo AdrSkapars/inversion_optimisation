@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import litellm
+import torch
 import yaml
 from litellm import completion_with_retries
 
@@ -2754,7 +2755,7 @@ def build_corruption_msgs(rewrite_instruction: str, baseline_answer: str) -> Lis
     return [{"role": "user", "content": rewrite_instruction.rstrip() + "\n\n" + baseline_answer}]
 
 
-def batch_generate_corruption_local(
+def _corruption_generate_vllm(
     lm_target: "LocalModel",
     lm_corrupt: "LocalModel",
     corruption_runtime_cfg: Dict,
@@ -2763,7 +2764,11 @@ def batch_generate_corruption_local(
     temperature: float,
     no_think_target: bool,
 ) -> List[Dict]:
-    """Target × corruption rewrite PoE with best-of-N target-pick selection.
+    """[engine=vllm_topk] Approximate PoE via vLLM top-K logit_bias (only corruption's
+    top-K tokens get the bias; the tail keeps full target weight, so it reverts toward
+    the target distribution at high beta — see verify_poe_topk.py). Prefer hf_full.
+
+    Target × corruption rewrite PoE with best-of-N target-pick selection.
 
     Per scenario: (1) generate the target's own *vanilla* answer; (2) build
     `num_prompts` corruption prefixes by wrapping that answer in the first
@@ -2854,6 +2859,178 @@ def batch_generate_corruption_local(
                   reverse=True)
         results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
     return results
+
+
+# =============================================================================
+# Corruption engine "hf_full": EXACT full-vocab PoE via raw HF logits.
+# softmax(t_logits + beta * c_logits) over the whole vocab — unlike vllm_topk,
+# the benign tail is suppressed (β·log p_corrupt), so high beta actually steers.
+# Both 4B models run as HF models in THIS process on the target GPU; the eval
+# stays in its vLLM subprocess on the eval GPU (it only handles strings).
+# =============================================================================
+def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> Dict:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    dev = f"cuda:{gpu_id}"
+    tok = AutoTokenizer.from_pretrained(target_hf)
+    mt = AutoModelForCausalLM.from_pretrained(
+        target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    mc = AutoModelForCausalLM.from_pretrained(
+        corrupt_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    return {"mt": mt, "mc": mc, "tok": tok, "device": dev,
+            "pad_id": (tok.pad_token_id if tok.pad_token_id is not None else 0),
+            "eos_id": tok.eos_token_id}
+
+
+def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
+    ml = max(len(s) for s in seqs); B = len(seqs)
+    inp = torch.full((B, ml), pad_id, dtype=torch.long, device=device)
+    attn = torch.zeros((B, ml), dtype=torch.long, device=device)
+    for i, s in enumerate(seqs):
+        L = len(s)
+        inp[i, ml - L:] = torch.tensor(s, dtype=torch.long, device=device)
+        attn[i, ml - L:] = 1
+    return inp, attn
+
+
+def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: float,
+                 pad_id: int, eos_id: int, device) -> List[List[int]]:
+    """Plain batched sampling from one HF model."""
+    with torch.no_grad():
+        B = len(prefixes)
+        inp, attn = _hf_left_pad(prefixes, pad_id, device)
+        out = model(input_ids=inp, attention_mask=attn, use_cache=True, logits_to_keep=1)
+        past = out.past_key_values; logits = out.logits[:, -1, :].float(); af = attn
+        gen: List[List[int]] = [[] for _ in range(B)]
+        done = torch.zeros(B, dtype=torch.bool, device=device)
+        for _ in range(max_new):
+            probs = torch.softmax(logits / max(temperature, 1e-6), -1)
+            nxt = torch.multinomial(probs, 1).squeeze(-1)
+            nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
+            for i in range(B):
+                if not done[i]: gen[i].append(int(nxt[i]))
+            done = done | (nxt == eos_id)
+            if bool(done.all()): break
+            af = torch.cat([af, torch.ones(B, 1, dtype=torch.long, device=device)], -1)
+            out = model(input_ids=nxt.unsqueeze(-1), attention_mask=af, past_key_values=past, use_cache=True)
+            past = out.past_key_values; logits = out.logits[:, -1, :].float()
+        return gen
+
+
+def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
+                     pad_id, eos_id, device) -> List[List[int]]:
+    """Full-vocab PoE: sample from softmax((t_logits + beta*c_logits)/temp). Both
+    prefix lists have equal length B and are stepped through both models in lockstep."""
+    with torch.no_grad():
+        B = len(t_prefs)
+        ti, ta = _hf_left_pad(t_prefs, pad_id, device)
+        ci, ca = _hf_left_pad(c_prefs, pad_id, device)
+        to = mt(input_ids=ti, attention_mask=ta, use_cache=True, logits_to_keep=1)
+        co = mc(input_ids=ci, attention_mask=ca, use_cache=True, logits_to_keep=1)
+        tp, cp = to.past_key_values, co.past_key_values
+        tl = to.logits[:, -1, :].float(); cl = co.logits[:, -1, :].float()
+        taf, caf = ta, ca
+        gen: List[List[int]] = [[] for _ in range(B)]
+        done = torch.zeros(B, dtype=torch.bool, device=device)
+        for _ in range(max_new):
+            probs = torch.softmax((tl + beta * cl) / max(temperature, 1e-6), -1)
+            nxt = torch.multinomial(probs, 1).squeeze(-1)
+            nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
+            for i in range(B):
+                if not done[i]: gen[i].append(int(nxt[i]))
+            done = done | (nxt == eos_id)
+            if bool(done.all()): break
+            ones = torch.ones(B, 1, dtype=torch.long, device=device)
+            taf = torch.cat([taf, ones], -1); caf = torch.cat([caf, ones], -1)
+            to = mt(input_ids=nxt.unsqueeze(-1), attention_mask=taf, past_key_values=tp, use_cache=True)
+            co = mc(input_ids=nxt.unsqueeze(-1), attention_mask=caf, past_key_values=cp, use_cache=True)
+            tp, cp = to.past_key_values, co.past_key_values
+            tl = to.logits[:, -1, :].float(); cl = co.logits[:, -1, :].float()
+        return gen
+
+
+def _hf_score(mt, items, pad_id, device, batch_size: int = 8) -> List[Optional[float]]:
+    """Avg per-token target log-prob (true target dist, no temperature). items =
+    (full_ids, text_start)."""
+    with torch.no_grad():
+        out_lp: List[Optional[float]] = []
+        for s in range(0, len(items), batch_size):
+            chunk = items[s:s + batch_size]
+            seqs = [x[0] for x in chunk]; tss = [x[1] for x in chunk]
+            inp, attn = _hf_left_pad(seqs, pad_id, device)
+            lg = mt(input_ids=inp, attention_mask=attn).logits.float()
+            B, L, V = lg.shape; lpall = torch.log_softmax(lg, -1)
+            for k in range(B):
+                full = seqs[k]; ts = tss[k]; fl = len(full)
+                if fl - ts <= 0: out_lp.append(None); continue
+                pad = L - fl
+                cols = torch.tensor(list(range(pad + ts - 1, pad + fl - 1)), device=device, dtype=torch.long)
+                tg = torch.tensor(full[ts:], device=device, dtype=torch.long)
+                v = lpall[k][cols].gather(-1, tg.unsqueeze(-1)).squeeze(-1)
+                out_lp.append(float(v.mean()))
+        return out_lp
+
+
+def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
+                            target_msgs_batch: List[List[Dict]], max_tokens: int,
+                            temperature: float, no_think_target: bool) -> List[Dict]:
+    """[engine=hf_full] Exact full-vocab PoE + best-of-N target-pick. Returns one
+    {"best_text","pool"} per scenario (same shape as the vLLM path)."""
+    mt, mc, tok, device = hf["mt"], hf["mc"], hf["tok"], hf["device"]
+    pad_id, eos_id = hf["pad_id"], hf["eos_id"]
+    prompts     = corruption_runtime_cfg["rewrite_prompts"]
+    num_prompts = max(1, min(int(corruption_runtime_cfg.get("num_prompts", len(prompts))), len(prompts)))
+    spp         = max(1, int(corruption_runtime_cfg.get("samples_per_prompt", 1)))
+    beta        = float(corruption_runtime_cfg.get("beta", 5.0))
+    use_prompts = prompts[:num_prompts]
+    NO_THINK = "<think>\n\n</think>\n"
+
+    # target prefixes (sys+user, no-think) and vanilla baselines to rewrite
+    t_pres: List[List[int]] = []
+    for tm in target_msgs_batch:
+        s = tok.apply_chat_template(tm, tokenize=False, add_generation_prompt=True)
+        if no_think_target: s += NO_THINK
+        t_pres.append(tok.encode(s, add_special_tokens=False))
+    baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
+
+    results: List[Dict] = []
+    for t_pre, base_ids in zip(t_pres, baselines):
+        base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
+        c_prefs: List[List[int]] = []
+        for instr in use_prompts:
+            cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
+                                         tokenize=False, add_generation_prompt=True) + NO_THINK
+            c_prefs.append(tok.encode(cs, add_special_tokens=False))
+        # expand to num_prompts x samples_per_prompt parallel slots
+        t_batch, c_batch, meta = [], [], []
+        for p_idx, c_pre in enumerate(c_prefs):
+            for s_idx in range(spp):
+                t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
+        gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, temperature, max_tokens,
+                               pad_id, eos_id, device)
+        cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
+        if not cand_texts:
+            results.append({"best_text": "", "pool": []}); continue
+        # target-pick: t_pre already carries the no-think prefix, so scoring matches generation
+        items = [(list(t_pre) + tok.encode(t, add_special_tokens=False), len(t_pre)) for t in cand_texts]
+        lps = _hf_score(mt, items, pad_id, device)
+        pool = []
+        for (txt, lp, (p_idx, s_idx)) in zip(cand_texts, lps, meta):
+            pool.append({"text": txt, "target_lp": lp,
+                         "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
+                         "prompt_index": p_idx, "sample_index": s_idx})
+        pool.sort(key=lambda d: d["target_lp"] if d["target_lp"] is not None else -float("inf"), reverse=True)
+        results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
+    return results
+
+
+def batch_generate_corruption_local(lm_target, lm_corrupt, corruption_runtime_cfg,
+                                    target_msgs_batch, max_tokens, temperature, no_think_target):
+    """Dispatch corruption generation by engine: hf_full (exact, default) | vllm_topk."""
+    if corruption_runtime_cfg.get("engine", "hf_full") == "hf_full":
+        return _corruption_generate_hf(corruption_runtime_cfg["hf"], corruption_runtime_cfg,
+                                       target_msgs_batch, max_tokens, temperature, no_think_target)
+    return _corruption_generate_vllm(lm_target, lm_corrupt, corruption_runtime_cfg,
+                                     target_msgs_batch, max_tokens, temperature, no_think_target)
 
 
 def _contrastive_sample_extensions(
@@ -4377,16 +4554,23 @@ def run_rollout_batched_local(
     jail_use_in_loss  = bool(jail_cfg.get("input_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
     jail_on          = jail_use_rollout or jail_use_out_loss or jail_use_in_loss
 
-    # Corruption-model rewrite PoE. Standalone in v1: mutually exclusive with jail
-    # and with all input/output/io search. Shares the target GPU like jail.
+    # Corruption-model rewrite PoE. Standalone in v1 (mutually exclusive with jail and
+    # all input/output/io search). Two engines:
+    #   hf_full (default) — exact full-vocab PoE; target+corruption load as HF models in
+    #                       THIS process on the target GPU (no vLLM target worker).
+    #   vllm_topk         — legacy top-K logit_bias (approximate; see verify_poe_topk.py).
     corr_cfg = cfg.get("corruption_output", {}) or {}
     corruption_on = bool(corr_cfg.get("enabled", False))
+    corr_engine = str(corr_cfg.get("engine", "hf_full"))
     if corruption_on:
         _corr_sel = str(corr_cfg.get("selection", "target_pick"))
         if _corr_sel != "target_pick":
             raise RuntimeError(
                 f"corruption_output.selection={_corr_sel!r} is not supported in v1 "
                 "(only 'target_pick')")
+        if corr_engine not in ("hf_full", "vllm_topk"):
+            raise RuntimeError(
+                f"corruption_output.engine={corr_engine!r} not supported (hf_full | vllm_topk)")
         conflicts = []
         if jail_on: conflicts.append("jailbroken_output")
         if bool((cfg.get("input_search", {})  or {}).get("enabled", False)): conflicts.append("input_search")
@@ -4395,8 +4579,11 @@ def run_rollout_batched_local(
         if conflicts:
             raise RuntimeError(
                 "corruption_output is standalone in v1 — disable: " + ", ".join(conflicts))
+    corr_vllm = corruption_on and corr_engine == "vllm_topk"
+    corr_hf   = corruption_on and corr_engine == "hf_full"
 
-    if jail_on or corruption_on:
+    # Only vLLM-resident proposals (jail, or vllm_topk corruption) share the target GPU.
+    if jail_on or corr_vllm:
         target_gpu_util = target_gpu_util / 2.0
         if jail_on:
             roles = []
@@ -4404,17 +4591,21 @@ def run_rollout_batched_local(
             if jail_use_out_loss: roles.append("output_score")
             if jail_use_in_loss:  roles.append("input_score")
             print(f"  [jailbroken_output] enabled for {'+'.join(roles)} — halving target_gpu_memory_utilization to {target_gpu_util:.3f}", flush=True)
-        if corruption_on:
-            print(f"  [corruption_output] enabled — halving target_gpu_memory_utilization to {target_gpu_util:.3f}", flush=True)
+        if corr_vllm:
+            print(f"  [corruption_output] vllm_topk — halving target_gpu_memory_utilization to {target_gpu_util:.3f}", flush=True)
 
     lm_eval   = _get_local_model(evaluator_model_id[len("local/"):],
                                  gpu_id=eval_gpu_id,
                                  gpu_memory_utilization=eval_gpu_util,
                                  max_model_len=eval_max_len)
-    lm_target = _get_local_model(target_model_id[len("local/"):],
-                                 gpu_id=target_gpu_id,
-                                 gpu_memory_utilization=target_gpu_util,
-                                 max_model_len=target_max_len)
+    # In hf_full corruption mode the target runs as an HF model (loaded below); no
+    # vLLM target worker is spawned.
+    lm_target = None
+    if not corr_hf:
+        lm_target = _get_local_model(target_model_id[len("local/"):],
+                                     gpu_id=target_gpu_id,
+                                     gpu_memory_utilization=target_gpu_util,
+                                     max_model_len=target_max_len)
 
     lm_jail = None
     jail_runtime_cfg: Optional[Dict] = None
@@ -4454,11 +4645,8 @@ def run_rollout_batched_local(
             raise RuntimeError(
                 f"corruption_output.model must start with 'local/', got {corr_model_id!r}")
         rewrite_prompts = prompts_yaml.get("corruption_rewrite_prompts") or _DEFAULT_CORRUPTION_REWRITE_PROMPTS
-        lm_corrupt = _get_local_model(corr_model_id[len("local/"):],
-                                      gpu_id=target_gpu_id,
-                                      gpu_memory_utilization=target_gpu_util,
-                                      max_model_len=target_max_len)
         corruption_runtime_cfg = {
+            "engine":             corr_engine,
             "rewrite_prompts":    rewrite_prompts,
             "num_prompts":        int(corr_cfg.get("num_prompts", len(rewrite_prompts))),
             "samples_per_prompt": int(corr_cfg.get("samples_per_prompt", 1)),
@@ -4467,7 +4655,15 @@ def run_rollout_batched_local(
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
         }
-        print(f"  [corruption_output] loaded {corr_model_id} on GPU {target_gpu_id} "
+        if corr_vllm:
+            lm_corrupt = _get_local_model(corr_model_id[len("local/"):],
+                                          gpu_id=target_gpu_id,
+                                          gpu_memory_utilization=target_gpu_util,
+                                          max_model_len=target_max_len)
+        else:  # hf_full — load HF target + corruption in this process on the target GPU
+            corruption_runtime_cfg["hf"] = _load_hf_corruption_models(
+                target_model_id[len("local/"):], corr_model_id[len("local/"):], target_gpu_id)
+        print(f"  [corruption_output] engine={corr_engine} loaded {corr_model_id} on GPU {target_gpu_id} "
               f"(num_prompts={corruption_runtime_cfg['num_prompts']}, "
               f"samples_per_prompt={corruption_runtime_cfg['samples_per_prompt']}, "
               f"beta={corruption_runtime_cfg['beta']})", flush=True)
@@ -6707,7 +6903,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/bloom_corrupt_1t_b3",  # corruption: 1 turn, n=1 (X3), beta=3 (beta sweep)
+    "folder_name": "runs_16/corrupt_hf_b5_n1",  # corruption hf_full engine, 1 turn, n=1 (X3), beta=5
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -6832,8 +7028,9 @@ cfg = DotDict({
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
         "enabled": True,                          # master switch; mutually exclusive with jail + all search
+        "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
-        "beta": 3.0,                              # PoE weight on log p_corrupt
+        "beta": 5.0,                              # PoE weight on log p_corrupt
         "num_prompts": 1,                         # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
