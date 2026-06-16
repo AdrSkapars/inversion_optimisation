@@ -6903,7 +6903,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/corrupt_hf_b5_s10",  # corruption hf_full, 1 turn, best-of-10 single X3 prompt, beta=5
+    "folder_name": "runs_16/corrupt_hf_b5_p10",  # corruption hf_full, 1 turn, 10 diverse prompts x1 sample, beta=5
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7031,8 +7031,8 @@ cfg = DotDict({
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
         "beta": 5.0,                              # PoE weight on log p_corrupt
-        "num_prompts": 1,                         # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
-        "samples_per_prompt": 10,                 # PoE samples per prompt (diverse set = 1)
+        "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
+        "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
