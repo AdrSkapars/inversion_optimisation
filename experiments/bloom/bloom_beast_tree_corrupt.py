@@ -6707,7 +6707,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_14/bloom_baseline",  # vanilla BLOOM — no input search, no output search, no jailbroken proposal
+    "folder_name": "runs_16/bloom_baseline",  # vanilla BLOOM — no input search, no output search, no jailbroken proposal
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -6748,7 +6748,7 @@ cfg = DotDict({
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 2,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
+        "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
@@ -6766,9 +6766,9 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 2,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "num_rounds": 1,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
-        "between_rounds_strategise": True,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
+        "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
     "input_search": {
         # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
@@ -6808,44 +6808,17 @@ cfg = DotDict({
         "truncate_at_eos": False,                 # If True: allows EOS so target can naturally terminate. If False: target keeps generating until scored_candidate_length.
         "latin_mask": True,                     # Target should speak naturally; leave off unless you have a specific reason
     },
-    "input_and_output_search": {
-        # Joint per-turn beam search: maintain num_beams trajectories alive. At each turn,
-        # sample candidates_per_beam (user_msg, target_response) pairs from each beam, judge
-        # every (transcript-so-far) with the full judge model, keep the top num_beams by
-        # behavior_presence (ties → earlier sample order) as the next set of beams.
-        # num_beams=1 reproduces simple BoN (greedy top-1 per turn).
-        # Mutually exclusive with input_search.enabled and output_search.enabled.
+    "input_and_output_search": {  # joint per-turn beam search over (user_msg, target_response); mutually exclusive with input_search/output_search
         "enabled":             False,
-        "num_beams":           1,    # 1 = simple BoN; e.g. 5 = beam search 5×5
-        "candidates_per_beam": 25,   # candidates sampled per beam per turn
-        "max_pool_size":       20,   # cap on candidates retained across all turns; final transcript = top-1 of pool
-        # Lookahead options. A "chain" = the candidate (turn 1) plus scored_turns_amount-1 simulated
-        # extension turns (capped by max_turns - current_depth). The judge scores the CHAIN END
-        # transcript (the "actually scored thing" goes into the pool). When use_pool=False, the next
-        # beam state commits the first `kept_turns_amount` turns of the chain; the rest is discarded.
-        # When use_pool=True, the pool drives commit granularity and kept_turns_amount is ignored.
-        # scored=1, kept=1 = no lookahead (current behavior).
-        # scored=max_turns, kept=1 = full lookahead with greedy 1-turn commit.
-        # scored=max_turns, kept=max_turns = single search step, BoN-K over full trajectories.
-        "scored_turns_amount": 1,
-        "kept_turns_amount":   1,
-        # When use_pool=False (default): next beams are top-K of THIS turn's candidates → fixed-depth beam search.
-        # When use_pool=True: candidates go into the pool, next beams = top-K UNEXPANDED pool entries → best-first
-        # tree search. With num_beams=1 + use_pool=True this is plain best-first; pool entries at max depth are
-        # filtered out (can't extend further), and we still loop max_turns iterations for compute parity.
-        "use_pool":            False,
-        # Latin-token masking during sampling. Both masks always include EOS so the model can
-        # terminate naturally (equivalent to truncate_at_eos=True in input_search/output_search).
-        # Input mask also includes `<`, `/`, `>` so the eval can emit </message> / TRS tags.
-        "input_latin_mask":    False,
-        "output_latin_mask":   False,
-        # MMR (Maximal Marginal Relevance) selection. When picking the top-K next beams (or top-K
-        # eligible pool entries under use_pool=True), each pick maximizes
-        #   MMR(c) = lambda*score(c) - (1-lambda)*max_{c' in selected} jaccard_sim(c, c').
-        # lambda=1.0 (default) = pure score, diversity calc skipped entirely (zero overhead).
-        # lambda<1.0 penalizes candidates that are textually similar to already-selected ones,
-        # forcing beam diversity (counteracts prefix-collapse). Typical: 0.6-0.8.
-        "mmr_lambda":          1.0,
+        "num_beams":           1,      # 1 = simple BoN; e.g. 5 = beam search 5×5
+        "candidates_per_beam": 25,     # candidates sampled per beam per turn
+        "max_pool_size":       20,     # cap on candidates retained across turns; final transcript = top-1 of pool
+        "scored_turns_amount": 1,      # chain length judged (1 = no lookahead; max_turns = full lookahead)
+        "kept_turns_amount":   1,      # turns committed per step (ignored when use_pool=True)
+        "use_pool":            False,  # False = fixed-depth beam search; True = best-first tree search over the pool
+        "input_latin_mask":    False,  # restrict eval/input sampling to Latin tokens (+ < / > for tags); EOS always allowed
+        "output_latin_mask":   False,  # restrict target/output sampling to Latin tokens; EOS always allowed
+        "mmr_lambda":          1.0,    # 1.0 = pure score; <1.0 penalizes similarity to selected (diversity), e.g. 0.6-0.8
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
