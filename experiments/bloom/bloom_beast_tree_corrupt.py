@@ -6963,7 +6963,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/jail_vllm_b2",       # jail PoE (vllm_topk), 1 turn, beta=2
+    "folder_name": "runs_16/jail_hf_b2",         # jail PoE (hf_full), 1 turn, beta=2
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7078,7 +7078,7 @@ cfg = DotDict({
     },
     "jailbroken_output": {
         "use_during_rollout":  True,              # use jail in the sampling step (contrastive PoE for target tokens)
-        "engine": "vllm_topk",                    # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
+        "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
