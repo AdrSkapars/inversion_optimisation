@@ -3023,6 +3023,40 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     return results
 
 
+def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
+                      target_msgs_batch: List[List[Dict]], max_tokens: int,
+                      temperature: float, no_think_target: bool) -> List[str]:
+    """[jail engine=hf_full] Exact full-vocab PoE jail sampling (n=1) — the HF
+    analogue of batch_generate_contrastive_local. Target+jail are HF models in
+    this process (reuses the corruption hf_full helpers). Jail prefix = jail
+    system prompt + closed <think> + prefill (no baseline answer); target prefix
+    = the natural chat template. Returns one decoded string per scenario."""
+    mt, mc, tok, device = hf["mt"], hf["mc"], hf["tok"], hf["device"]
+    pad_id, eos_id = hf["pad_id"], hf["eos_id"]
+    sys_prompt = jail_runtime_cfg.get("system_prompt", "")
+    prefill    = jail_runtime_cfg.get("prefill", "") or ""
+    beta       = float(jail_runtime_cfg.get("beta", 2.0))
+    NO_THINK = "<think>\n\n</think>\n"
+
+    t_prefs: List[List[int]] = []
+    j_prefs: List[List[int]] = []
+    for tm in target_msgs_batch:
+        ts = tok.apply_chat_template(tm, tokenize=False, add_generation_prompt=True)
+        if no_think_target:
+            ts += NO_THINK
+        t_prefs.append(tok.encode(ts, add_special_tokens=False))
+        j_msgs = [m for m in tm if m.get("role") != "system"]
+        if sys_prompt:
+            j_msgs = [{"role": "system", "content": sys_prompt}] + j_msgs
+        js = tok.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK
+        if prefill:
+            js += prefill
+        j_prefs.append(tok.encode(js, add_special_tokens=False))
+    gen = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+                           pad_id, eos_id, device)
+    return [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
+
+
 def batch_generate_corruption_local(lm_target, lm_corrupt, corruption_runtime_cfg,
                                     target_msgs_batch, max_tokens, temperature, no_think_target):
     """Dispatch corruption generation by engine: hf_full (exact, default) | vllm_topk."""
@@ -4553,6 +4587,19 @@ def run_rollout_batched_local(
     jail_use_out_loss = bool(jail_cfg.get("output_search_loss", False)) and bool(output_cfg_peek.get("enabled", False))
     jail_use_in_loss  = bool(jail_cfg.get("input_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
     jail_on          = jail_use_rollout or jail_use_out_loss or jail_use_in_loss
+    # Two jail engines, mirroring corruption: vllm_topk (legacy top-K logit_bias,
+    # the current default) and hf_full (exact full-vocab PoE via HF, basic rollout
+    # PoE only — no search-loss integration).
+    jail_engine = str(jail_cfg.get("engine", "vllm_topk"))
+    if jail_on and jail_engine not in ("vllm_topk", "hf_full"):
+        raise RuntimeError(
+            f"jailbroken_output.engine={jail_engine!r} not supported (vllm_topk | hf_full)")
+    if jail_engine == "hf_full" and (jail_use_out_loss or jail_use_in_loss):
+        raise RuntimeError(
+            "jailbroken_output.engine=hf_full supports use_during_rollout (basic PoE) only, "
+            "not output_search_loss / input_search_loss")
+    jail_vllm = jail_on and jail_engine == "vllm_topk"
+    jail_hf   = jail_on and jail_engine == "hf_full"
 
     # Corruption-model rewrite PoE. Standalone in v1 (mutually exclusive with jail and
     # all input/output/io search). Two engines:
@@ -4582,10 +4629,11 @@ def run_rollout_batched_local(
     corr_vllm = corruption_on and corr_engine == "vllm_topk"
     corr_hf   = corruption_on and corr_engine == "hf_full"
 
-    # Only vLLM-resident proposals (jail, or vllm_topk corruption) share the target GPU.
-    if jail_on or corr_vllm:
+    # Only vLLM-resident proposals (vllm_topk jail, or vllm_topk corruption) share the
+    # target GPU. hf_full jail/corruption load HF models in-process instead (no vLLM target).
+    if jail_vllm or corr_vllm:
         target_gpu_util = target_gpu_util / 2.0
-        if jail_on:
+        if jail_vllm:
             roles = []
             if jail_use_rollout:  roles.append("sampling")
             if jail_use_out_loss: roles.append("output_score")
@@ -4601,7 +4649,7 @@ def run_rollout_batched_local(
     # In hf_full corruption mode the target runs as an HF model (loaded below); no
     # vLLM target worker is spawned.
     lm_target = None
-    if not corr_hf:
+    if not (corr_hf or jail_hf):
         lm_target = _get_local_model(target_model_id[len("local/"):],
                                      gpu_id=target_gpu_id,
                                      gpu_memory_utilization=target_gpu_util,
@@ -4621,11 +4669,8 @@ def run_rollout_batched_local(
                 "jailbroken_output.use_during_rollout=True requires "
                 "'jailbroken_output_system_prompt' in prompts.yaml"
             )
-        lm_jail = _get_local_model(jail_model_id[len("local/"):],
-                                   gpu_id=target_gpu_id,
-                                   gpu_memory_utilization=target_gpu_util,
-                                   max_model_len=target_max_len)
         jail_runtime_cfg = {
+            "engine":             jail_engine,
             "use_during_rollout": jail_use_rollout,
             "output_search_loss": jail_use_out_loss,
             "input_search_loss":  jail_use_in_loss,
@@ -4635,7 +4680,16 @@ def run_rollout_batched_local(
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
         }
-        print(f"  [jailbroken_output] loaded {jail_model_id} on GPU {target_gpu_id}", flush=True)
+        if jail_vllm:
+            lm_jail = _get_local_model(jail_model_id[len("local/"):],
+                                       gpu_id=target_gpu_id,
+                                       gpu_memory_utilization=target_gpu_util,
+                                       max_model_len=target_max_len)
+        else:  # hf_full — load HF target + jail in-process on the target GPU
+            jail_runtime_cfg["hf"] = _load_hf_corruption_models(
+                target_model_id[len("local/"):], jail_model_id[len("local/"):], target_gpu_id)
+        print(f"  [jailbroken_output] engine={jail_engine} loaded {jail_model_id} on GPU {target_gpu_id} "
+              f"(beta={jail_runtime_cfg['beta']})", flush=True)
 
     lm_corrupt = None
     corruption_runtime_cfg: Optional[Dict] = None
@@ -5199,12 +5253,18 @@ def run_rollout_batched_local(
                         "turn": turn + 1,
                         "pool": corr_result["pool"],
                     })
-                elif (lm_jail is not None and jail_runtime_cfg is not None
+                elif (jail_runtime_cfg is not None
                         and jail_runtime_cfg.get("use_during_rollout", False)):
-                    raw_target = batch_generate_contrastive_local(
-                        lm_target, lm_jail, jail_runtime_cfg,
-                        [target_msgs], target_max_tokens, temperature, no_think_target,
-                    )[0]
+                    if jail_runtime_cfg.get("engine") == "hf_full":
+                        raw_target = _jail_generate_hf(
+                            jail_runtime_cfg["hf"], jail_runtime_cfg,
+                            [target_msgs], target_max_tokens, temperature, no_think_target,
+                        )[0]
+                    else:
+                        raw_target = batch_generate_contrastive_local(
+                            lm_target, lm_jail, jail_runtime_cfg,
+                            [target_msgs], target_max_tokens, temperature, no_think_target,
+                        )[0]
                 else:
                     raw_target = batch_generate_local(
                         lm_target, [target_msgs], target_max_tokens, temperature, no_think=no_think_target
@@ -6903,7 +6963,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/corrupt_hf_b5_p10",  # corruption hf_full, 1 turn, 10 diverse prompts x1 sample, beta=5
+    "folder_name": "runs_16/jail_vllm_b2",       # jail PoE (vllm_topk), 1 turn, beta=2
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7017,7 +7077,8 @@ cfg = DotDict({
         "mmr_lambda":          1.0,    # 1.0 = pure score; <1.0 penalizes similarity to selected (diversity), e.g. 0.6-0.8
     },
     "jailbroken_output": {
-        "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
+        "use_during_rollout":  True,              # use jail in the sampling step (contrastive PoE for target tokens)
+        "engine": "vllm_topk",                    # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
@@ -7027,7 +7088,7 @@ cfg = DotDict({
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
-        "enabled": True,                          # master switch; mutually exclusive with jail + all search
+        "enabled": False,                         # master switch; mutually exclusive with jail + all search
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
         "beta": 5.0,                              # PoE weight on log p_corrupt
