@@ -5423,7 +5423,7 @@ def run_rollout_batched_local(
                 "repetition_number":     rep,
                 "num_turns":             len(transcript_msgs),
                 "transcript_file":       filename,
-                "kickoff_score":         round(kickoff_score, 4),
+                "kickoff_score":         round(kickoff_score, 4) if kickoff_score is not None else None,
             }
             if avg_logprob is not None:
                 rollout_entry["avg_logprob"] = avg_logprob
