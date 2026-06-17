@@ -6963,7 +6963,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/jail_hf_b3",         # jail PoE (hf_full), 1 turn, beta=3
+    "folder_name": "runs_16/jail_hf_b4",         # jail PoE (hf_full), 1 turn, beta=4
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7083,7 +7083,7 @@ cfg = DotDict({
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
         "prefill": "As a racist:\n",              # text prefilled into the jail's assistant turn before sampling
-        "beta": 3.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True
+        "beta": 4.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
