@@ -6963,7 +6963,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/jail_hf_b4",         # jail PoE (hf_full), 1 turn, beta=4
+    "folder_name": "runs_16/corrupt_hf_n1_b5_3t",  # corruption hf_full, 3 turns, n=1, beta=5
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7004,7 +7004,7 @@ cfg = DotDict({
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 1,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
+        "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
@@ -7077,7 +7077,7 @@ cfg = DotDict({
         "mmr_lambda":          1.0,    # 1.0 = pure score; <1.0 penalizes similarity to selected (diversity), e.g. 0.6-0.8
     },
     "jailbroken_output": {
-        "use_during_rollout":  True,              # use jail in the sampling step (contrastive PoE for target tokens)
+        "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
@@ -7088,11 +7088,11 @@ cfg = DotDict({
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
-        "enabled": False,                         # master switch; mutually exclusive with jail + all search
+        "enabled": True,                          # master switch; mutually exclusive with jail + all search
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
         "beta": 5.0,                              # PoE weight on log p_corrupt
-        "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
+        "num_prompts": 1,                         # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
