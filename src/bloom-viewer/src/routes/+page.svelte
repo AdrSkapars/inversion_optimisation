@@ -181,7 +181,7 @@
 		});
 		if (entries.length === 0) return null;
 		const avgScore = entries.reduce((s, e) => s + e.score, 0) / entries.length;
-		const elicRate = entries.filter(e => e.score >= 5).length / entries.length;
+		const elicRate = entries.filter(e => e.score > 6).length / entries.length;
 		return { entries, count: entries.length, avgScore, elicRate };
 	}
 

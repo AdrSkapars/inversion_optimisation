@@ -6963,7 +6963,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/corrupt_hf_p10_b5_3t",  # corruption hf_full, 3 turns, p10, beta=5
+    "folder_name": "runs_16/resample_bo10_3t",   # pure resample baseline, 3 turns, 10 rounds (best-of-10)
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7022,7 +7022,7 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 1,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "num_rounds": 10,                    # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
         "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
     },
@@ -7088,7 +7088,7 @@ cfg = DotDict({
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
-        "enabled": True,                          # master switch; mutually exclusive with jail + all search
+        "enabled": False,                         # master switch; mutually exclusive with jail + all search
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
         "beta": 5.0,                              # PoE weight on log p_corrupt
