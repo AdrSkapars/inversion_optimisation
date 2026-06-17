@@ -2917,9 +2917,11 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
 
 
 def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
-                     pad_id, eos_id, device) -> List[List[int]]:
-    """Full-vocab PoE: sample from softmax((t_logits + beta*c_logits)/temp). Both
-    prefix lists have equal length B and are stepped through both models in lockstep."""
+                     pad_id, eos_id, device, target_temp: float = 1.0) -> List[List[int]]:
+    """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
+    target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
+    without touching the corruption logits or beta; target_temp=1.0 (default) is the
+    standard PoE. Both prefix lists have equal length B and are stepped in lockstep."""
     with torch.no_grad():
         B = len(t_prefs)
         ti, ta = _hf_left_pad(t_prefs, pad_id, device)
@@ -2932,7 +2934,7 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for _ in range(max_new):
-            probs = torch.softmax((tl + beta * cl) / max(temperature, 1e-6), -1)
+            probs = torch.softmax((tl / max(target_temp, 1e-6) + beta * cl) / max(temperature, 1e-6), -1)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
             nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             for i in range(B):
@@ -2981,6 +2983,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     num_prompts = max(1, min(int(corruption_runtime_cfg.get("num_prompts", len(prompts))), len(prompts)))
     spp         = max(1, int(corruption_runtime_cfg.get("samples_per_prompt", 1)))
     beta        = float(corruption_runtime_cfg.get("beta", 5.0))
+    target_temp = float(corruption_runtime_cfg.get("target_temp", 1.0))
     use_prompts = prompts[:num_prompts]
     NO_THINK = "<think>\n\n</think>\n"
 
@@ -3006,7 +3009,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
             for s_idx in range(spp):
                 t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
         gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, temperature, max_tokens,
-                               pad_id, eos_id, device)
+                               pad_id, eos_id, device, target_temp=target_temp)
         cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
         if not cand_texts:
             results.append({"best_text": "", "pool": []}); continue
@@ -4705,6 +4708,7 @@ def run_rollout_batched_local(
             "num_prompts":        int(corr_cfg.get("num_prompts", len(rewrite_prompts))),
             "samples_per_prompt": int(corr_cfg.get("samples_per_prompt", 1)),
             "beta":               float(corr_cfg.get("beta", 5.0)),
+            "target_temp":        float(corr_cfg.get("target_temp", 1.0)),
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
@@ -5179,14 +5183,28 @@ def run_rollout_batched_local(
             continue  # skip the existing kickoff+turn flow for this variation
 
         # ── Kickoff input search ──────────────────────────────────────────
-        # Strip <thinking> blocks from past evaluator messages before passing
-        # to search (cheap defense in depth even if parse_message already handled them).
-        kickoff_pool, trs_kickoff, kickoff_strategy = input_search_evaluator_message(
-            lm_eval, lm_target,
-            _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
-            search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
-            lm_jail=lm_jail, jail_runtime_cfg=jail_runtime_cfg,
-        )
+        # freeze_input: when a variation carries a frozen kickoff (reused from round 1),
+        # skip the search entirely and use it verbatim — so only the target OUTPUT is
+        # resampled this round. Its content is the already-final user message (any
+        # target_kickoff_prefix was already applied in round 1), so don't re-prefix.
+        fixed_kickoff = variation.get("fixed_kickoff") if isinstance(variation, dict) else None
+        use_frozen_kickoff = bool(fixed_kickoff and fixed_kickoff.get("content"))
+        if use_frozen_kickoff:
+            kickoff_pool = [(fixed_kickoff["content"], None,
+                             fixed_kickoff.get("baseline", "") or "",
+                             fixed_kickoff.get("suffix", "") or "")]
+            trs_kickoff = fixed_kickoff.get("trs", "") or ""
+            kickoff_strategy = fixed_kickoff.get("strategy", "") or ""
+            print(f"  v{var_idx}: frozen kickoff reused (freeze_input)", flush=True)
+        else:
+            # Strip <thinking> blocks from past evaluator messages before passing
+            # to search (cheap defense in depth even if parse_message already handled them).
+            kickoff_pool, trs_kickoff, kickoff_strategy = input_search_evaluator_message(
+                lm_eval, lm_target,
+                _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
+                search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
+                lm_jail=lm_jail, jail_runtime_cfg=jail_runtime_cfg,
+            )
         setup_ctx_len = len(eval_msgs_kickoff_ctx)  # used for history truncation per turn
 
         # Save full pool for this variation
@@ -5218,7 +5236,7 @@ def run_rollout_batched_local(
 
             # Deliver kickoff to target
             target_content = kickoff_msg
-            if target_kickoff_prefix:
+            if target_kickoff_prefix and not use_frozen_kickoff:
                 target_content = target_kickoff_prefix.strip() + " " + kickoff_msg
             target_msgs.append({"role": "user", "content": target_content})
 
@@ -6381,8 +6399,11 @@ async def run_parallel_round(
         print(f"\nREFINEMENT STAGE - skipped (between_rounds_strategise=False); "
               f"running fresh rollouts against frozen scenarios", flush=True)
         original_variations = ideation_results.get("variations", [])
+        freeze_input = bool(refine_cfg.get("freeze_input", False))
+        if freeze_input:
+            print(f"  freeze_input=True: reusing round 1's kickoff per scenario (only the target output is resampled)", flush=True)
         round_1_dir = all_prev_round_dirs[0] if all_prev_round_dirs else None
-        frozen_by_var: Dict[int, Dict[str, str]] = {}
+        frozen_by_var: Dict[int, Dict[str, Any]] = {}
         if round_1_dir is not None:
             round_1_tr_dir = round_1_dir / "transcripts"
             if round_1_tr_dir.is_dir():
@@ -6397,9 +6418,23 @@ async def run_parallel_round(
                     except Exception:
                         continue
                     meta = td.get("metadata", {}) or {}
+                    fk = None
+                    if freeze_input:
+                        # First evaluator user turn = the kickoff (input). Reuse it verbatim.
+                        for msg in td.get("messages", []):
+                            if msg.get("source") == "evaluator" and msg.get("role") == "user":
+                                fk = {
+                                    "content":  msg.get("content", "") or "",
+                                    "trs":      msg.get("targeted_response_start", "") or "",
+                                    "baseline": msg.get("beast_baseline", "") or "",
+                                    "suffix":   msg.get("beast_suffix", "") or "",
+                                    "strategy": msg.get("strategy", "") or "",
+                                }
+                                break
                     frozen_by_var[v] = {
                         "target_system_prompt": meta.get("target_system_prompt", "") or "",
                         "setup_content":        meta.get("setup_content", "") or "",
+                        "fixed_kickoff":        fk,
                     }
         variations_override = []
         for v_num in sorted(history_by_var.keys()):
@@ -6414,6 +6449,7 @@ async def run_parallel_round(
                 "refined_strategy":     "",  # explicitly empty
                 "target_system_prompt": frozen.get("target_system_prompt", ""),
                 "setup_content":        frozen.get("setup_content", ""),
+                "fixed_kickoff":        frozen.get("fixed_kickoff"),
             })
         rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results,
                                             ideation_results, variations_override=variations_override)
@@ -6963,7 +6999,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/resample_bo10_3t",   # pure resample baseline, 3 turns, 10 rounds (best-of-10)
+    "folder_name": "runs_16/p10_iter_flat",      # p10 corruption, 1 turn, 5 iterations (rounds), frozen input, target_temp=1.0 (flat)
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7004,7 +7040,7 @@ cfg = DotDict({
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
-        "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
+        "max_turns": 1,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,               # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
@@ -7022,9 +7058,10 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 10,                    # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "num_rounds": 5,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
         "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
+        "freeze_input": True,                # (only when between_rounds_strategise=False) True = reuse round_1's kickoff message per scenario in rounds 2+, so only the target OUTPUT is resampled each round (inputs held fixed). False = regenerate the kickoff each round (full resample).
     },
     "input_search": {
         # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
@@ -7088,10 +7125,12 @@ cfg = DotDict({
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
-        "enabled": False,                         # master switch; mutually exclusive with jail + all search
+        "enabled": True,                          # master switch; mutually exclusive with jail + all search
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
         "beta": 5.0,                              # PoE weight on log p_corrupt
+        "target_temp": 1.0,                       # temperature on the TARGET logits only during PoE (softmax(t_logits/target_temp + beta*c_logits)); <1 sharpens toward target-likely tokens, raising P_t without touching corruption/beta. 1.0 = standard PoE
+        "target_temp_schedule": None,             # optional list, one target_temp per refinement round (e.g. [1.0,0.8,0.6,0.4,0.2]); overrides target_temp per round when set. None = use the fixed target_temp every round
         "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
@@ -7142,6 +7181,11 @@ if __name__ == "__main__":
         else:
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + 1
+            _co = cfg.get("corruption_output") or {}
+            _sched = _co.get("target_temp_schedule")
+            if _sched:
+                _co["target_temp"] = float(_sched[min(0, len(_sched) - 1)])
+                print(f"  [target_temp_schedule] round 1: target_temp={_co['target_temp']}", flush=True)
             result = await run_pipeline(cfg)
             if not result:
                 print("\n  Round 1 FAILED", flush=True)
@@ -7162,6 +7206,11 @@ if __name__ == "__main__":
             print("\n" + "#" * 60, flush=True)
             print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
             print("#" * 60, flush=True)
+            _co = cfg.get("corruption_output") or {}
+            _sched = _co.get("target_temp_schedule")
+            if _sched:
+                _co["target_temp"] = float(_sched[min(round_num - 1, len(_sched) - 1)])
+                print(f"  [target_temp_schedule] round {round_num}: target_temp={_co['target_temp']}", flush=True)
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
