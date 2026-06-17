@@ -7131,6 +7131,15 @@ cfg = DotDict({
         "beta": 5.0,                              # PoE weight on log p_corrupt
         "target_temp": 1.0,                       # temperature on the TARGET logits only during PoE (softmax(t_logits/target_temp + beta*c_logits)); <1 sharpens toward target-likely tokens, raising P_t without touching corruption/beta. 1.0 = standard PoE
         "target_temp_schedule": [1.0, 0.8, 0.6, 0.4, 0.2],  # optional list, one target_temp per refinement round; overrides target_temp per round when set. None = use the fixed target_temp every round
+        # Adaptive target_temp controller (overrides target_temp_schedule when enabled). Gated decrease:
+        # each round, if the PREVIOUS round's metric >= threshold, cool by step; else HOLD temp (resample
+        # at same temp) until a round clears threshold again, then resume cooling. Clamped to [min_temp, start].
+        "target_temp_adaptive": False,            # True = use the adaptive controller instead of the fixed schedule
+        "target_temp_metric": "elicitation_rate",  # round judgment.json summary_statistics key to gate on ("elicitation_rate" 0-1, or "average_behavior_presence_score" 0-10)
+        "target_temp_threshold": 0.7,             # cool only while prev round's metric >= this; below it, hold temp
+        "target_temp_step": 0.1,                  # how much to lower target_temp each cooling step
+        "target_temp_start": 1.0,                 # round-1 target_temp
+        "target_temp_min": 0.1,                   # floor for target_temp
         "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
@@ -7167,6 +7176,14 @@ if __name__ == "__main__":
         # Set the default GPU here too: run_pipeline sets it, but is skipped on resume (round_1/judgment.json exists),
         # so without this the judgment stage would spawn a redundant judge worker on GPU 0.
         _DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
+        # Adaptive target_temp controller state (persists across rounds; gated decrease).
+        _co0 = cfg.get("corruption_output") or {}
+        _adaptive   = bool(_co0.get("target_temp_adaptive"))
+        _adapt_temp = float(_co0.get("target_temp_start", 1.0))
+        _adapt_step = float(_co0.get("target_temp_step", 0.1))
+        _adapt_min  = float(_co0.get("target_temp_min", 0.1))
+        _adapt_thr  = float(_co0.get("target_temp_threshold", 0.75))
+        _adapt_metric = str(_co0.get("target_temp_metric", "elicitation_rate"))
         # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
@@ -7182,10 +7199,14 @@ if __name__ == "__main__":
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + 1
             _co = cfg.get("corruption_output") or {}
-            _sched = _co.get("target_temp_schedule")
-            if _sched:
-                _co["target_temp"] = float(_sched[min(0, len(_sched) - 1)])
-                print(f"  [target_temp_schedule] round 1: target_temp={_co['target_temp']}", flush=True)
+            if _adaptive:
+                _co["target_temp"] = _adapt_temp
+                print(f"  [target_temp_adaptive] round 1: target_temp={_adapt_temp}", flush=True)
+            else:
+                _sched = _co.get("target_temp_schedule")
+                if _sched:
+                    _co["target_temp"] = float(_sched[min(0, len(_sched) - 1)])
+                    print(f"  [target_temp_schedule] round 1: target_temp={_co['target_temp']}", flush=True)
             result = await run_pipeline(cfg)
             if not result:
                 print("\n  Round 1 FAILED", flush=True)
@@ -7207,10 +7228,21 @@ if __name__ == "__main__":
             print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
             print("#" * 60, flush=True)
             _co = cfg.get("corruption_output") or {}
-            _sched = _co.get("target_temp_schedule")
-            if _sched:
-                _co["target_temp"] = float(_sched[min(round_num - 1, len(_sched) - 1)])
-                print(f"  [target_temp_schedule] round {round_num}: target_temp={_co['target_temp']}", flush=True)
+            if _adaptive:
+                # Gate on the PREVIOUS round's metric: cool if it cleared the threshold, else hold.
+                _prev = (result or {}).get("summary_statistics", {}).get(_adapt_metric)
+                if _prev is not None and _prev >= _adapt_thr:
+                    _adapt_temp = max(_adapt_min, round(_adapt_temp - _adapt_step, 4))
+                    _act = f"cool -> {_adapt_temp} (prev {_adapt_metric}={_prev} >= {_adapt_thr})"
+                else:
+                    _act = f"hold @ {_adapt_temp} (prev {_adapt_metric}={_prev} < {_adapt_thr})"
+                _co["target_temp"] = _adapt_temp
+                print(f"  [target_temp_adaptive] round {round_num}: {_act}", flush=True)
+            else:
+                _sched = _co.get("target_temp_schedule")
+                if _sched:
+                    _co["target_temp"] = float(_sched[min(round_num - 1, len(_sched) - 1)])
+                    print(f"  [target_temp_schedule] round {round_num}: target_temp={_co['target_temp']}", flush=True)
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
