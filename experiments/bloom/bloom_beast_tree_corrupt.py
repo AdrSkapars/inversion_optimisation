@@ -7005,7 +7005,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/p10_iter_poeanneal", # p10 corruption, 1 turn, frozen input, FULL-PoE temp annealed (target_temp=1.0)
+    "folder_name": "runs_16/p10_poe_t06",        # p10 corruption, 1 turn, single point: full-PoE temp=0.6 (target_temp=1.0)
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7064,7 +7064,7 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 5,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
+        "num_rounds": 1,                     # total SELF-REFINE rounds; round 1 = full pipeline, rounds 2+ = refine + rollout + judge
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
         "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
         "freeze_input": True,                # (only when between_rounds_strategise=False) True = reuse round_1's kickoff message per scenario in rounds 2+, so only the target OUTPUT is resampled each round (inputs held fixed). False = regenerate the kickoff each round (full resample).
@@ -7137,8 +7137,8 @@ cfg = DotDict({
         "beta": 5.0,                              # PoE weight on log p_corrupt
         "target_temp": 1.0,                       # temperature on the TARGET logits only during PoE (softmax(t_logits/target_temp + beta*c_logits)); <1 sharpens toward target-likely tokens, raising P_t without touching corruption/beta. 1.0 = standard PoE
         "target_temp_schedule": None,             # optional list, one target_temp per refinement round; overrides target_temp per round when set. None = use the fixed target_temp every round
-        "poe_temp": None,                         # full-PoE sampling temperature: softmax((t/target_temp + beta*c)/poe_temp). <1 sharpens toward the PoE mode WITHOUT rebalancing experts (target:beta ratio preserved). None = 1.0 (standard sampling)
-        "poe_temp_schedule": [1.0, 0.8, 0.6, 0.4, 0.2],  # optional list, one poe_temp per refinement round; overrides poe_temp per round when set. None = use fixed poe_temp every round
+        "poe_temp": 0.6,                          # full-PoE sampling temperature: softmax((t/target_temp + beta*c)/poe_temp). <1 sharpens toward the PoE mode WITHOUT rebalancing experts (target:beta ratio preserved). None = 1.0 (standard sampling)
+        "poe_temp_schedule": None,                # optional list, one poe_temp per refinement round; overrides poe_temp per round when set. None = use fixed poe_temp every round
         # Adaptive target_temp controller (overrides target_temp_schedule when enabled). Gated decrease:
         # each round, if the PREVIOUS round's metric >= threshold, cool by step; else HOLD temp (resample
         # at same temp) until a round clears threshold again, then resume cooling. Clamped to [min_temp, start].
