@@ -52,16 +52,22 @@ def score_dir(run_dir, tok, mt):
             all_p += pl
             per.append({"file": os.path.basename(f), "n_tok": len(pl), "min_tok_pct": min(pl)})
             break
+    omins = [p["min_tok_pct"] for p in per]   # per-output least-probable token (n=25)
     summ = {"n_outputs": len(per), "n_tokens": len(all_p),
-            "mean_tok_pct": sum(all_p) / len(all_p),
-            "median_tok_pct": st.median(all_p),
-            "min_tok_pct": min(all_p),
-            "max_tok_pct": max(all_p)}
+            # Block A: all token probabilities pooled across the 25 outputs
+            "A_mean_tok_pct": sum(all_p) / len(all_p),
+            "A_median_tok_pct": st.median(all_p),
+            "A_min_tok_pct": min(all_p),
+            "A_max_tok_pct": max(all_p),
+            # Block B: per-output minimum token, then aggregated over the 25 outputs
+            "B_mean_of_mins_pct": sum(omins) / len(omins),
+            "B_median_of_mins_pct": st.median(omins),
+            "B_min_of_mins_pct": min(omins)}
     json.dump({"run_dir": run_dir, "summary": summ, "per_output": per},
               open(os.path.join(run_dir, "score_tokens.json"), "w"), indent=2)
-    print(f"  {run_dir}: n_out={summ['n_outputs']} n_tok={summ['n_tokens']} "
-          f"mean={summ['mean_tok_pct']:.2f}% median={summ['median_tok_pct']:.2f}% "
-          f"min={summ['min_tok_pct']:.4f}% max={summ['max_tok_pct']:.2f}%")
+    print(f"  {run_dir}\n"
+          f"    A(all tok): mean={summ['A_mean_tok_pct']:.2f}% median={summ['A_median_tok_pct']:.2f}% min={summ['A_min_tok_pct']:.5f}%\n"
+          f"    B(per-out min, n={summ['n_outputs']}): mean={summ['B_mean_of_mins_pct']:.3f}% median={summ['B_median_of_mins_pct']:.3f}% min={summ['B_min_of_mins_pct']:.5f}%")
     return summ
 
 
