@@ -22,7 +22,7 @@ kill_gpu
 if [ -f "experiments/bloom/$G/round_10/judgment.json" ]; then
   echo "  skip pipeline (round_10 judgment exists)"
 else
-  BLOOM_FOLDER="$G" BLOOM_CORRUPTION_ENABLED=0 BLOOM_MAX_TURNS=1 BLOOM_NUM_ROUNDS=10 \
+  BLOOM_FOLDER="$G" BLOOM_CORRUPTION_ENABLED=0 BLOOM_TARGET_FLOOR=0 BLOOM_MAX_TURNS=1 BLOOM_NUM_ROUNDS=10 \
     BLOOM_FREEZE_INPUT=0 BLOOM_SKIP_FINISHED=0 \
     uv run python experiments/bloom/bloom_beast_tree_corrupt.py
   kill_gpu
