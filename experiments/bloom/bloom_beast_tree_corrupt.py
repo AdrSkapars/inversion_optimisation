@@ -7293,11 +7293,17 @@ if __name__ == "__main__":
         cfg.setdefault("rollout", {})["max_turns"] = int(os.environ["BLOOM_MAX_TURNS"])
     if os.environ.get("BLOOM_NUM_ROUNDS"):
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
-    if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_TARGET_FLOOR", "BLOOM_MIN_P", "BLOOM_ABS_FLOOR", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS")):
+    if os.environ.get("BLOOM_FREEZE_INPUT") is not None and os.environ.get("BLOOM_FREEZE_INPUT") != "":
+        cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
+        cfg.setdefault("refinement", {})["skip_finished"] = os.environ["BLOOM_SKIP_FINISHED"].lower() in ("1", "true", "yes")
+    if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_TARGET_FLOOR", "BLOOM_MIN_P", "BLOOM_ABS_FLOOR", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS", "BLOOM_FREEZE_INPUT", "BLOOM_SKIP_FINISHED")):
         _co = cfg.get("corruption_output", {})
+        _rf = cfg.get("refinement", {})
         print(f"  [env override] folder={cfg.get('folder_name')} target_floor={_co.get('target_floor')} "
               f"min_p={_co.get('min_p')} abs_floor={_co.get('abs_floor')} "
-              f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={cfg.get('refinement', {}).get('num_rounds')}", flush=True)
+              f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={_rf.get('num_rounds')} "
+              f"freeze_input={_rf.get('freeze_input')} skip_finished={_rf.get('skip_finished')}", flush=True)
 
     base_folder = cfg.get("folder_name", "runs/default")
     num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
