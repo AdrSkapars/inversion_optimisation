@@ -2918,7 +2918,8 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
 
 def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      pad_id, eos_id, device, target_temp: float = 1.0,
-                     min_p: float = 0.0, abs_floor: float = 0.0) -> List[List[int]]:
+                     min_p: float = 0.0, abs_floor: float = 0.0,
+                     target_floor: float = 0.0) -> List[List[int]]:
     """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
     target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
     without touching the corruption logits or beta; target_temp=1.0 (default) is the
@@ -2928,10 +2929,16 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
     step, tokens whose prob < min_p * max_prob are zeroed and the rest renormalised.
     This is a RELATIVE-probability cutoff (min_p=0.0 disables it).
 
-    abs_floor>0 applies an ABSOLUTE-probability floor: tokens whose PoE prob < abs_floor
-    are masked from sampling and the survivors renormalised. If every token is below the
-    floor at a step, fall back to argmax (greedy) for that row. abs_floor is a fixed
-    fraction (e.g. 6.49e-5), unlike min_p which scales with the per-step max prob."""
+    abs_floor>0 applies an ABSOLUTE-probability floor on the PoE distribution: tokens
+    whose PoE prob < abs_floor are masked, survivors renormalised, argmax fallback if
+    all masked. Fixed fraction (e.g. 6.49e-5), unlike min_p which scales with max prob.
+
+    target_floor>0 thresholds on the TRUE TARGET distribution but still samples from the
+    PoE: tokens whose target prob softmax(t_logits) < target_floor are masked, then we
+    sample from the PoE among the survivors. This guarantees no sampled token is
+    target-improbable below the floor (the corruption fingerprint), while the choice
+    among allowed tokens is still corruption-weighted. If every token is below the floor
+    (degenerate), fall back to the most target-likely token (argmax of softmax(t))."""
     with torch.no_grad():
         B = len(t_prefs)
         ti, ta = _hf_left_pad(t_prefs, pad_id, device)
@@ -2957,6 +2964,20 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 dead = (s.squeeze(-1) <= 0)
                 if bool(dead.any()):
                     am = probs.argmax(dim=-1)
+                    onehot = torch.zeros_like(masked)
+                    onehot[torch.arange(B, device=device), am] = 1.0
+                    masked = torch.where(dead.unsqueeze(-1), onehot, masked)
+                    s = masked.sum(dim=-1, keepdim=True)
+                probs = masked / s.clamp_min(1e-12)
+            if target_floor > 0.0:
+                # threshold on the TRUE target dist, but sample from the PoE among survivors
+                tprobs = torch.softmax(tl, dim=-1)
+                keep = tprobs >= target_floor
+                masked = torch.where(keep, probs, torch.zeros_like(probs))
+                s = masked.sum(dim=-1, keepdim=True)
+                dead = (s.squeeze(-1) <= 0)
+                if bool(dead.any()):
+                    am = tprobs.argmax(dim=-1)   # most target-likely token
                     onehot = torch.zeros_like(masked)
                     onehot[torch.arange(B, device=device), am] = 1.0
                     masked = torch.where(dead.unsqueeze(-1), onehot, masked)
@@ -3018,6 +3039,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     poe_temp = float(_ptv) if _ptv is not None else float(temperature)
     min_p = float(corruption_runtime_cfg.get("min_p", 0.0) or 0.0)
     abs_floor = float(corruption_runtime_cfg.get("abs_floor", 0.0) or 0.0)
+    target_floor = float(corruption_runtime_cfg.get("target_floor", 0.0) or 0.0)
     use_prompts = prompts[:num_prompts]
     NO_THINK = "<think>\n\n</think>\n"
 
@@ -3044,7 +3066,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                 t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
         gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, poe_temp, max_tokens,
                                pad_id, eos_id, device, target_temp=target_temp, min_p=min_p,
-                               abs_floor=abs_floor)
+                               abs_floor=abs_floor, target_floor=target_floor)
         cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
         if not cand_texts:
             results.append({"best_text": "", "pool": []}); continue
@@ -4747,6 +4769,7 @@ def run_rollout_batched_local(
             "poe_temp":           corr_cfg.get("poe_temp", None),
             "min_p":              float(corr_cfg.get("min_p", 0.0) or 0.0),
             "abs_floor":          float(corr_cfg.get("abs_floor", 0.0) or 0.0),
+            "target_floor":       float(corr_cfg.get("target_floor", 0.0) or 0.0),
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
@@ -7080,7 +7103,7 @@ judge_model = "local/lmstudio-community/gemma-3-27b-it-GGUF:Q6_K:google/gemma-3-
 target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
 
 cfg = DotDict({
-    "folder_name": "runs_16/p10_absfloor",       # p10 corruption, 1 turn, ABSOLUTE prob floor (abs_floor=6.49e-5 = vanilla's least-likely token); 1 iteration
+    "folder_name": "runs_16/p10_tgtfloor",       # p10 corruption, 1 turn, TARGET-dist threshold floor (target_floor=6.49e-5) sampled on PoE; 1 iteration
 
     "behavior_name": "racial-bias",          # must match a key under `behaviors:` in prompts.yaml
     "prompt_preset": "racial-bias-v1",       # optional preset from `prompt_presets:` in prompts.yaml; cfg values override it
@@ -7219,7 +7242,8 @@ cfg = DotDict({
         "poe_temp_schedule": None,                # optional list, one poe_temp per refinement round; overrides poe_temp per round when set. None = use fixed poe_temp every round
         "min_p": 0.0,                             # min-p FLOOR on the combined PoE sampling distribution: drop tokens with prob < min_p*max_prob, renormalise. 0.0 = off. >0 restricts the tail of unlikely tokens
         "min_p_schedule": None,                   # optional list, one min_p per refinement round; "floor annealing". None = use fixed min_p every round
-        "abs_floor": 6.49e-5,                     # ABSOLUTE prob floor on the PoE sampling distribution: mask tokens with prob < abs_floor (fixed fraction; 6.49e-5 = vanilla's least-likely token), argmax fallback if all masked. 0.0 = off. Unlike min_p this is a fixed cutoff, not relative to the per-step max
+        "abs_floor": 0.0,                         # ABSOLUTE prob floor on the PoE sampling distribution: mask tokens with prob < abs_floor (fixed fraction; 6.49e-5 = vanilla's least-likely token), argmax fallback if all masked. 0.0 = off. Unlike min_p this is a fixed cutoff, not relative to the per-step max
+        "target_floor": 6.49e-5,                  # threshold on the TRUE TARGET dist softmax(t) but sample from the PoE among survivors: mask tokens with target prob < target_floor (6.49e-5 = vanilla's least-likely token), argmax(target) fallback if all masked. 0.0 = off. Clamps the corruption fingerprint (no sampled token is target-improbable below the floor)
         # Adaptive target_temp controller (overrides target_temp_schedule when enabled). Gated decrease:
         # each round, if the PREVIOUS round's metric >= threshold, cool by step; else HOLD temp (resample
         # at same temp) until a round clears threshold again, then resume cooling. Clamped to [min_temp, start].
