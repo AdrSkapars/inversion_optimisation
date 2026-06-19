@@ -14,8 +14,11 @@ git config user.name 'AdrSkapars'             >/dev/null 2>&1
 git config pull.rebase false                  >/dev/null 2>&1
 
 kill_gpu () {
+  # fuser reliably kills procs holding the GPU device (the nvidia-smi compute-apps
+  # query under-reports pids inside this container, so leaked vLLM workers survived).
+  fuser -k /dev/nvidia* 2>/dev/null
   nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null
-  sleep 6
+  sleep 8
 }
 
 run_one () {
