@@ -7280,6 +7280,25 @@ if __name__ == "__main__":
                 cfg[k] = v.strip() if isinstance(v, str) else v
         print(f"Loaded prompt preset: {_preset_name}", flush=True)
 
+    # --- env-var overrides (for autonomous sweeps; no source edits between runs) ---
+    if os.environ.get("BLOOM_FOLDER"):
+        cfg["folder_name"] = os.environ["BLOOM_FOLDER"]
+    if os.environ.get("BLOOM_TARGET_FLOOR"):
+        cfg.setdefault("corruption_output", {})["target_floor"] = float(os.environ["BLOOM_TARGET_FLOOR"])
+    if os.environ.get("BLOOM_MIN_P"):
+        cfg.setdefault("corruption_output", {})["min_p"] = float(os.environ["BLOOM_MIN_P"])
+    if os.environ.get("BLOOM_ABS_FLOOR"):
+        cfg.setdefault("corruption_output", {})["abs_floor"] = float(os.environ["BLOOM_ABS_FLOOR"])
+    if os.environ.get("BLOOM_MAX_TURNS"):
+        cfg.setdefault("rollout", {})["max_turns"] = int(os.environ["BLOOM_MAX_TURNS"])
+    if os.environ.get("BLOOM_NUM_ROUNDS"):
+        cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
+    if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_TARGET_FLOOR", "BLOOM_MIN_P", "BLOOM_ABS_FLOOR", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS")):
+        _co = cfg.get("corruption_output", {})
+        print(f"  [env override] folder={cfg.get('folder_name')} target_floor={_co.get('target_floor')} "
+              f"min_p={_co.get('min_p')} abs_floor={_co.get('abs_floor')} "
+              f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={cfg.get('refinement', {}).get('num_rounds')}", flush=True)
+
     base_folder = cfg.get("folder_name", "runs/default")
     num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
     base_seed = cfg.get("seed")  # offset per round to keep vLLM samples reproducible-but-distinct across rounds
