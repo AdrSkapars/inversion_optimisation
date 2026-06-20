@@ -2929,7 +2929,7 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
 def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      pad_id, eos_id, device, target_temp: float = 1.0,
                      min_p: float = 0.0, abs_floor: float = 0.0,
-                     target_floor: float = 0.0) -> List[List[int]]:
+                     target_floor: float = 0.0, corrupt_only: bool = False) -> List[List[int]]:
     """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
     target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
     without touching the corruption logits or beta; target_temp=1.0 (default) is the
@@ -2961,7 +2961,14 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for _ in range(max_new):
-            probs = torch.softmax((tl / max(target_temp, 1e-6) + beta * cl) / max(temperature, 1e-6), -1)
+            if corrupt_only:
+                # Sample purely from the corruption distribution (target weight 0). The
+                # target_floor mask below still uses softmax(t_logits), so the allowed set
+                # stays target-plausible — we just pick the most corruption-favoured token
+                # WITHIN that set instead of the PoE-weighted one.
+                probs = torch.softmax(cl / max(temperature, 1e-6), -1)
+            else:
+                probs = torch.softmax((tl / max(target_temp, 1e-6) + beta * cl) / max(temperature, 1e-6), -1)
             if min_p > 0.0:
                 # min-p floor: drop tokens below min_p * max_prob (per row), renormalise
                 thresh = min_p * probs.max(dim=-1, keepdim=True).values
@@ -3050,6 +3057,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     min_p = float(corruption_runtime_cfg.get("min_p", 0.0) or 0.0)
     abs_floor = float(corruption_runtime_cfg.get("abs_floor", 0.0) or 0.0)
     target_floor = float(corruption_runtime_cfg.get("target_floor", 0.0) or 0.0)
+    corrupt_only = bool(corruption_runtime_cfg.get("corrupt_only", False))
     use_prompts = prompts[:num_prompts]
     NO_THINK = "<think>\n\n</think>\n"
 
@@ -3076,7 +3084,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                 t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
         gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, poe_temp, max_tokens,
                                pad_id, eos_id, device, target_temp=target_temp, min_p=min_p,
-                               abs_floor=abs_floor, target_floor=target_floor)
+                               abs_floor=abs_floor, target_floor=target_floor, corrupt_only=corrupt_only)
         cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
         if not cand_texts:
             results.append({"best_text": "", "pool": []}); continue
@@ -4780,6 +4788,7 @@ def run_rollout_batched_local(
             "min_p":              float(corr_cfg.get("min_p", 0.0) or 0.0),
             "abs_floor":          float(corr_cfg.get("abs_floor", 0.0) or 0.0),
             "target_floor":       float(corr_cfg.get("target_floor", 0.0) or 0.0),
+            "corrupt_only":       bool(corr_cfg.get("corrupt_only", False)),
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
@@ -7295,6 +7304,8 @@ if __name__ == "__main__":
         cfg["folder_name"] = os.environ["BLOOM_FOLDER"]
     if os.environ.get("BLOOM_TARGET_FLOOR"):
         cfg.setdefault("corruption_output", {})["target_floor"] = float(os.environ["BLOOM_TARGET_FLOOR"])
+    if os.environ.get("BLOOM_CORRUPT_ONLY") is not None and os.environ.get("BLOOM_CORRUPT_ONLY") != "":
+        cfg.setdefault("corruption_output", {})["corrupt_only"] = os.environ["BLOOM_CORRUPT_ONLY"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_BETA"):
         cfg.setdefault("corruption_output", {})["beta"] = float(os.environ["BLOOM_BETA"])
     if os.environ.get("BLOOM_MIN_P"):
