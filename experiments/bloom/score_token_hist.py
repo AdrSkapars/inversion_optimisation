@@ -15,6 +15,7 @@ TARGET = "Qwen/Qwen3-4B"; NO_THINK = "<think>\n\n</think>\n"; DEV = "cuda:0"
 
 RUNS = [
     ("corruption-off (1t)",      "experiments/bloom/runs_16/bloom_baseline_1t",        "single"),
+    ("on no-floor (1t)",         "experiments/bloom/runs_16/p10_floor_anneal/round_1", "here"),
     ("floor 1e-5 (1t)",          "experiments/bloom/runs_16/tfsweep/f5",               "single"),
     ("b=1 @1e-5 (10rd best)",     "experiments/bloom/runs_16/p10_beta1_tf1e5_10round",  "bestacross"),
     ("b=5 @1e-5 (10rd best)",     "experiments/bloom/runs_16/p10_tf1e5_10round",        "bestacross"),
@@ -82,7 +83,12 @@ def main():
         TARGET, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(DEV).eval()
     out = {"edges": EDGES, "runs": {}}
     for label, base, mode in RUNS:
-        paths = single_paths(base) if mode == "single" else bestacross_paths(base)
+        if mode == "single":
+            paths = single_paths(base)
+        elif mode == "here":
+            paths = sorted(glob.glob(base + "/transcripts/transcript_v*r*.json"))
+        else:
+            paths = bestacross_paths(base)
         vals = token_probs(paths, tok, mt)
         logs = [math.log10(v) for v in vals if v > 0]
         floor_log = math.log10(min(v for v in vals if v > 0))
