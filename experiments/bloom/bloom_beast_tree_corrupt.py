@@ -7324,6 +7324,12 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["enabled"] = os.environ["BLOOM_CORRUPTION_ENABLED"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
+        _io = cfg.setdefault("input_and_output_search", {})
+        _io["enabled"] = os.environ["BLOOM_IO_SEARCH"].lower() in ("1", "true", "yes")
+        if _io.get("enabled"):
+            _io["num_beams"] = int(os.environ.get("BLOOM_IO_BEAMS", "3"))
+            _io["candidates_per_beam"] = int(os.environ.get("BLOOM_IO_CANDS", "3"))
     if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_TARGET_FLOOR", "BLOOM_BETA", "BLOOM_MIN_P", "BLOOM_ABS_FLOOR", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS", "BLOOM_FREEZE_INPUT", "BLOOM_SKIP_FINISHED", "BLOOM_CORRUPTION_ENABLED")):
         _co = cfg.get("corruption_output", {})
         _rf = cfg.get("refinement", {})
