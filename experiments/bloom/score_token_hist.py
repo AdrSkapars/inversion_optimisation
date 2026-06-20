@@ -14,12 +14,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 TARGET = "Qwen/Qwen3-4B"; NO_THINK = "<think>\n\n</think>\n"; DEV = "cuda:0"
 
 RUNS = [
-    ("corruption-off (1t)",      "experiments/bloom/runs_16/bloom_baseline_1t",        "single"),
-    ("corruption-off (10rd)",    "experiments/bloom/runs_16/baseline_10round",         "bestacross"),
-    ("on no-floor (1t)",         "experiments/bloom/runs_16/p10_floor_anneal/round_1", "here"),
-    ("floor 1e-5 (1t)",          "experiments/bloom/runs_16/tfsweep/f5",               "single"),
-    ("b=1 @1e-5 (10rd best)",     "experiments/bloom/runs_16/p10_beta1_tf1e5_10round",  "bestacross"),
-    ("b=5 @1e-5 (10rd best)",     "experiments/bloom/runs_16/p10_tf1e5_10round",        "bestacross"),
+    ("corruption-off 10rd (redo)", "experiments/bloom/runs_16/redo_off",      "bestacross"),
+    ("b=5 @1e-5 10rd (redo)",      "experiments/bloom/runs_16/redo_b5_1e5",   "bestacross"),
 ]
 EDGES = [round(-16 + 0.5 * i, 2) for i in range(37)]  # log10(prob%) from -16 to 2
 
