@@ -12,32 +12,39 @@ import matplotlib.pyplot as plt
 EDGES = [round(-16 + 0.5 * i, 2) for i in range(37)]
 CENTERS = np.array([(EDGES[i] + EDGES[i + 1]) / 2 for i in range(36)])
 
-# (label, counts[36], avg, elic, color)
+# (label, counts[36], avg, elic, color, mean_prob_pct, median_prob_pct)
 RUNS = [
     ("corruption off · 1t",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,3,2,7,18,31,118,1834],
-     1.92, 0.04, "#888780"),
+     1.92, 0.04, "#888780", 84.66, 99.52),
     ("corruption ON, NO floor · 1t  (the fingerprint)",
      [0,0,0,1,0,2,1,1,1,3,3,1,0,2,2,5,4,7,4,3,9,12,13,12,12,14,26,23,36,47,56,69,91,127,194,4540],
-     8.64, 0.84, "#E24B4A"),
+     8.64, 0.84, "#E24B4A", 82.58, 99.99),
     ("floor 1e-5 · 1t",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,10,16,12,19,22,45,52,112,2760],
-     3.04, 0.16, "#378ADD"),
+     3.04, 0.16, "#378ADD", 85.26, 99.98),
     ("β=1 @1e-5 · 10rd best-across",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,4,6,9,9,19,29,75,144,2671],
-     7.12, 0.88, "#1D9E75"),
+     7.12, 0.88, "#1D9E75", 84.81, 99.93),
     ("β=5 @1e-5 · 10rd best-across",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,57,59,51,52,71,74,101,101,142,4918],
-     8.48, 1.00, "#BA7517"),
+     8.48, 1.00, "#BA7517", 85.21, 100.00),
 ]
 
 LO, HI = -16.0, 2.0
+import math
 fig, axes = plt.subplots(len(RUNS), 1, figsize=(10, 11), sharex=True)
-for ax, (label, counts, avg, elic, color) in zip(axes, RUNS):
+for ax, (label, counts, avg, elic, color, tmean, tmed) in zip(axes, RUNS):
     y = np.array(counts, dtype=float)
     y[y == 0] = np.nan
     ax.bar(CENTERS, y, width=0.42, color=color, edgecolor="none", zorder=3)
     ax.axvline(-3.0, color="#A32D2D", ls="--", lw=1.0, zorder=2)  # 1e-5 target floor = 0.001%
+    ax.axvline(math.log10(tmean), color="#26215C", ls="-", lw=1.4, zorder=4,
+               label=f"mean {tmean:.0f}%")
+    ax.axvline(math.log10(tmed), color="#26215C", ls=":", lw=1.6, zorder=4,
+               label=f"median {tmed:.1f}%")
+    ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(0.30, 1.02),
+              handlelength=1.6, ncol=1)
     ax.set_yscale("log")
     ax.set_ylim(0.7, 9000)
     ax.set_xlim(LO - 0.4, HI + 0.4)
