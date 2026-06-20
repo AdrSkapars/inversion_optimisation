@@ -15,6 +15,7 @@ TARGET = "Qwen/Qwen3-4B"; NO_THINK = "<think>\n\n</think>\n"; DEV = "cuda:0"
 
 RUNS = [
     ("corruption-off (1t)",      "experiments/bloom/runs_16/bloom_baseline_1t",        "single"),
+    ("corruption-off (10rd)",    "experiments/bloom/runs_16/baseline_10round",         "bestacross"),
     ("on no-floor (1t)",         "experiments/bloom/runs_16/p10_floor_anneal/round_1", "here"),
     ("floor 1e-5 (1t)",          "experiments/bloom/runs_16/tfsweep/f5",               "single"),
     ("b=1 @1e-5 (10rd best)",     "experiments/bloom/runs_16/p10_beta1_tf1e5_10round",  "bestacross"),
@@ -95,7 +96,8 @@ def main():
         counts, _ = np.histogram(np.clip(logs, EDGES[0], EDGES[-1]), bins=EDGES)
         out["runs"][label] = {"counts": counts.tolist(), "n": len(vals),
                               "least": min(vals), "mean": sum(vals) / len(vals),
-                              "median": float(np.median(vals))}
+                              "median": float(np.median(vals)),
+                              "geomean": math.exp(sum(math.log(v) for v in vals if v > 0) / len(vals))}
     print("HISTJSON " + json.dumps(out))
 
 
