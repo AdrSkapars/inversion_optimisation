@@ -7378,7 +7378,14 @@ if __name__ == "__main__":
         # Load understanding from round 1 for reuse in all subsequent rounds
         with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
             understanding_results = json.load(f)
-        ideation_results = {"variations": []}  # variations come from refinements in round 2+
+        # Reuse round 1's SCENARIOS in every later round. Both round-2+ paths (the refiner
+        # and the pure-resample/freeze path) read these as the FROZEN per-variation
+        # `description`. Previously this was emptied to {"variations": []}, so every
+        # round-2+ scenario description fell through to "" — which made all 25 kickoff
+        # prompts identical and collapsed the inputs to a single scenario. Refinements add
+        # `refined_strategy` on top via variations_override; they don't replace the scenarios.
+        with open(round_1_dir / "ideation.json", "r", encoding="utf-8") as f:
+            ideation_results = json.load(f)
         prompts_yaml = load_prompts(cfg)
 
         # Rounds 2+: refine each scenario using full accumulated history
