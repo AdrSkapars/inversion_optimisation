@@ -531,7 +531,11 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
         try:
             if op == "generate_text":
                 prompts, sampling_kwargs = msg[1], msg[2]
-                sp = SamplingParams(**sampling_kwargs)
+                # sampling_kwargs may be a single dict (shared params) or a list of dicts
+                # (one per prompt, e.g. per-prompt seeds to avoid correlated sampling).
+                sp = ([SamplingParams(**kw) for kw in sampling_kwargs]
+                      if isinstance(sampling_kwargs, list)
+                      else SamplingParams(**sampling_kwargs))
                 out = llm.generate(prompts, sp, use_tqdm=False)
                 res_q.put(("ok", [r.outputs[0].text for r in out]))
 
@@ -889,11 +893,17 @@ def batch_generate_local(
         temperature=max(temperature, 1e-6),
         skip_special_tokens=False,    # preserve <think> tags etc.
     )
-    effective_seed = seed if seed is not None else _DEFAULT_SEED
-    if effective_seed is not None:
-        sampling_kwargs["seed"] = effective_seed
     if allowed_token_ids is not None:
         sampling_kwargs["allowed_token_ids"] = allowed_token_ids
+    effective_seed = seed if seed is not None else _DEFAULT_SEED
+    if effective_seed is not None:
+        # Per-prompt seeds (seed + i), NOT one shared seed for the whole batch. A single
+        # shared seed correlates each sequence's sampler RNG, so low-entropy tokens — e.g.
+        # the judge's score digit — collapse to identical values across all prompts in the
+        # batch (a whole round inherits one score). Distinct per-prompt seeds keep sampling
+        # independent while staying reproducible. Worker accepts a list[kwargs] here.
+        per_prompt = [dict(sampling_kwargs, seed=int(effective_seed) + i) for i in range(len(prompts))]
+        return lm.worker.generate_text(prompts, per_prompt)
     return lm.worker.generate_text(prompts, sampling_kwargs)
 
 
