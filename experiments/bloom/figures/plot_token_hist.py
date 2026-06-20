@@ -1,51 +1,59 @@
-"""Plot the per-token target-probability histogram for 4 runs -> PNG.
+"""Per-token target-probability histograms -> PNG, one panel per run.
 
 Data: counts over log10(prob%) bins (edges -16..2 step 0.5), from score_token_hist.py.
-Renders a grouped log-y bar histogram with the 1e-5 target-floor marked.
+Five panels share a fixed x-axis (1e-16% .. 1e2%) so tails are directly comparable.
+Each panel labels the run's avg behavior-presence and elicitation rate.
 """
-import math
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 EDGES = [round(-16 + 0.5 * i, 2) for i in range(37)]
-CENTERS = [(EDGES[i] + EDGES[i + 1]) / 2 for i in range(36)]
+CENTERS = np.array([(EDGES[i] + EDGES[i + 1]) / 2 for i in range(36)])
 
-RUNS = {
-    "corruption off · 1t (n=2014)": ([0]*27 + [1,0,3,2,7,18,31,118,1834], "#888780"),
-    "floor 1e-5 · 1t (n=3067)":     ([0]*26 + [19,10,16,12,19,22,45,52,112,2760], "#378ADD"),
-    "β=1 @1e-5 · 10rd (n=2972)":    ([0]*26 + [6,4,6,9,9,19,29,75,144,2671], "#1D9E75"),
-    "β=5 @1e-5 · 10rd (n=5627)":    ([0]*25 + [1,57,59,51,52,71,74,101,101,142,4918], "#D85A30"),
-}
+# (label, counts[36], avg, elic, color)
+RUNS = [
+    ("corruption off · 1t",
+     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,3,2,7,18,31,118,1834],
+     1.92, 0.04, "#888780"),
+    ("corruption ON, NO floor · 1t  (the fingerprint)",
+     [0,0,0,1,0,2,1,1,1,3,3,1,0,2,2,5,4,7,4,3,9,12,13,12,12,14,26,23,36,47,56,69,91,127,194,4540],
+     8.64, 0.84, "#E24B4A"),
+    ("floor 1e-5 · 1t",
+     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,10,16,12,19,22,45,52,112,2760],
+     3.04, 0.16, "#378ADD"),
+    ("β=1 @1e-5 · 10rd best-across",
+     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,4,6,9,9,19,29,75,144,2671],
+     7.12, 0.88, "#1D9E75"),
+    ("β=5 @1e-5 · 10rd best-across",
+     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,57,59,51,52,71,74,101,101,142,4918],
+     8.48, 1.00, "#BA7517"),
+]
 
-LO, HI = -4.0, 2.0
-mask = [i for i, c in enumerate(CENTERS) if LO <= c <= HI]
-xc = np.array([CENTERS[i] for i in mask])
+LO, HI = -16.0, 2.0
+fig, axes = plt.subplots(len(RUNS), 1, figsize=(10, 11), sharex=True)
+for ax, (label, counts, avg, elic, color) in zip(axes, RUNS):
+    y = np.array(counts, dtype=float)
+    y[y == 0] = np.nan
+    ax.bar(CENTERS, y, width=0.42, color=color, edgecolor="none", zorder=3)
+    ax.axvline(-3.0, color="#A32D2D", ls="--", lw=1.0, zorder=2)  # 1e-5 target floor = 0.001%
+    ax.set_yscale("log")
+    ax.set_ylim(0.7, 9000)
+    ax.set_xlim(LO - 0.4, HI + 0.4)
+    ax.grid(axis="y", ls=":", alpha=0.35, zorder=0)
+    ax.text(0.012, 0.86, label, transform=ax.transAxes, fontsize=11, va="top")
+    ax.text(0.012, 0.60, f"avg {avg:.2f}   ·   elic {elic:.2f}", transform=ax.transAxes,
+            fontsize=10, color="#5F5E5A", va="top")
+    ax.set_ylabel("count")
 
-fig, ax = plt.subplots(figsize=(9, 5))
-n = len(RUNS); bw = 0.45 / n
-for k, (label, (counts, color)) in enumerate(RUNS.items()):
-    y = np.array([counts[i] for i in mask], dtype=float)
-    y[y == 0] = np.nan  # log y: hide empty bars
-    ax.bar(xc + (k - (n - 1) / 2) * bw, y, width=bw, color=color, label=label,
-           edgecolor="none", zorder=3)
-
-ax.axvline(-3.0, color="#A32D2D", ls="--", lw=1.2, zorder=2)
-ax.text(-3.0, 6500, "1e-5 target floor\n(=0.001%)", color="#A32D2D", fontsize=9,
-        ha="center", va="bottom")
-
-ax.set_yscale("log")
-ax.set_ylim(0.7, 9000)
-ax.set_xlim(LO - 0.3, HI + 0.3)
-ax.set_xticks(range(int(LO), int(HI) + 1))
-ax.set_xticklabels([f"$10^{{{p}}}$" for p in range(int(LO), int(HI) + 1)])
-ax.set_xlabel("target probability of token  (%)")
-ax.set_ylabel("token count  (log scale)")
-ax.set_title("Per-token target probability — the least-token lives in the left tail")
-ax.grid(axis="y", ls=":", alpha=0.4, zorder=0)
-ax.legend(frameon=False, fontsize=9, loc="upper left")
-fig.tight_layout()
+axes[1].text(-9, 200, "tail reaches 1e-15%", color="#A32D2D", fontsize=9, ha="center")
+axes[0].text(-3.0, 9500, "1e-5 floor (0.001%)", color="#A32D2D", fontsize=8.5, ha="center", va="bottom")
+axes[-1].set_xticks(range(int(LO), int(HI) + 1, 2))
+axes[-1].set_xticklabels([f"$10^{{{p}}}$" for p in range(int(LO), int(HI) + 1, 2)])
+axes[-1].set_xlabel("target probability of token  (%)   —   log scale")
+fig.suptitle("Per-token target probability per run  (least-token = left edge of each tail)", y=0.995)
+fig.tight_layout(rect=[0, 0, 1, 0.985])
 out = __file__.rsplit("plot_token_hist.py", 1)[0] + "token_prob_histogram.png"
 fig.savefig(out, dpi=160)
 print("wrote", out)
