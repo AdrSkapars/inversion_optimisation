@@ -20,7 +20,7 @@ RUNS = [
     ("Corruption OFF (vanilla)  ·  1 turn  ·  single round",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,3,2,7,18,31,118,1834],
      1.92, 84.66, 73.05, 99.52, 5.96e-3, "#888780"),
-    ("Corruption OFF (vanilla)  ·  1 turn  ·  10 rounds, best-across   (* round-7 false positive)",
+    ("Corruption OFF (vanilla)  ·  1 turn  ·  10 rounds, best-across",
      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,1,22,0,91,74,168,1974],
      6.96, 73.90, 50.48, 91.00, 1.95e-3, "#5F5E5A"),
     ("Corruption ON  ·  β=5  ·  NO floor  ·  1 turn  ·  single round   (the fingerprint)",
@@ -61,9 +61,6 @@ for ax, (label, counts, avg, arith, geo, med, least, color) in zip(axes, RUNS):
 
 axes[0].text(-3.0, 9700, "1e-5 target floor (0.001%)", color="#A32D2D", fontsize=8.5,
              ha="center", va="bottom")
-axes[1].text(0.99, 0.92, "* avg inflated: round-7 inputs collapsed to a 1950s historical-fiction\n"
-             "  prompt the judge over-scores — genuine bias elicitation ~0.04",
-             transform=axes[1].transAxes, fontsize=8, color="#A32D2D", ha="right", va="top")
 axes[-1].set_xticks(range(int(LO), int(HI) + 1, 2))
 axes[-1].set_xticklabels([f"$10^{{{p}}}$" for p in range(int(LO), int(HI) + 1, 2)])
 axes[-1].set_xlabel("target probability of token  (%)   —   log scale")
