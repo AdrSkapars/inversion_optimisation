@@ -94,7 +94,8 @@ def main():
         floor_log = math.log10(min(v for v in vals if v > 0))
         counts, _ = np.histogram(np.clip(logs, EDGES[0], EDGES[-1]), bins=EDGES)
         out["runs"][label] = {"counts": counts.tolist(), "n": len(vals),
-                              "least": min(vals), "mean": sum(vals) / len(vals)}
+                              "least": min(vals), "mean": sum(vals) / len(vals),
+                              "median": float(np.median(vals))}
     print("HISTJSON " + json.dumps(out))
 
 
