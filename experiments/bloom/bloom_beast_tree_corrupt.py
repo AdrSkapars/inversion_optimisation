@@ -3069,33 +3069,49 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         t_pres.append(tok.encode(s, add_special_tokens=False))
     baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
 
-    results: List[Dict] = []
-    for t_pre, base_ids in zip(t_pres, baselines):
+    # Build every (target-prefix, corruption-prefix) slot across ALL candidates up front,
+    # then run the PoE decode loop over big chunks instead of once per candidate. The decode
+    # loop is the sequential bottleneck (max_new steps x 2 model forwards), and a 4B model is
+    # underutilised at batch=num_prompts(~10); batching across candidates runs that loop
+    # ~N_candidates x fewer times. For a single candidate (the non-io rollout path) this is a
+    # no-op: one chunk of num_prompts slots, identical to before.
+    poe_gen_batch = max(1, int(corruption_runtime_cfg.get("poe_gen_batch", 32)))
+    all_t: List[List[int]] = []
+    all_c: List[List[int]] = []
+    owner: List[int] = []                  # slot -> candidate index
+    meta:  List[Tuple[int, int]] = []      # slot -> (prompt_index, sample_index)
+    for ci, (t_pre, base_ids) in enumerate(zip(t_pres, baselines)):
         base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
-        c_prefs: List[List[int]] = []
-        for instr in use_prompts:
+        for p_idx, instr in enumerate(use_prompts):
             cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
                                          tokenize=False, add_generation_prompt=True) + NO_THINK
-            c_prefs.append(tok.encode(cs, add_special_tokens=False))
-        # expand to num_prompts x samples_per_prompt parallel slots
-        t_batch, c_batch, meta = [], [], []
-        for p_idx, c_pre in enumerate(c_prefs):
+            c_pre = tok.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
-                t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
-        gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, poe_temp, max_tokens,
-                               pad_id, eos_id, device, target_temp=target_temp, min_p=min_p,
-                               abs_floor=abs_floor, target_floor=target_floor, corrupt_only=corrupt_only)
-        cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
-        if not cand_texts:
-            results.append({"best_text": "", "pool": []}); continue
-        # target-pick: t_pre already carries the no-think prefix, so scoring matches generation
-        items = [(list(t_pre) + tok.encode(t, add_special_tokens=False), len(t_pre)) for t in cand_texts]
-        lps = _hf_score(mt, items, pad_id, device)
-        pool = []
-        for (txt, lp, (p_idx, s_idx)) in zip(cand_texts, lps, meta):
-            pool.append({"text": txt, "target_lp": lp,
-                         "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
-                         "prompt_index": p_idx, "sample_index": s_idx})
+                all_t.append(list(t_pre)); all_c.append(list(c_pre))
+                owner.append(ci); meta.append((p_idx, s_idx))
+
+    gen_all: List[List[int]] = []
+    for s in range(0, len(all_t), poe_gen_batch):
+        gen_all += _hf_poe_generate(mt, mc, all_t[s:s + poe_gen_batch], all_c[s:s + poe_gen_batch],
+                                    beta, poe_temp, max_tokens, pad_id, eos_id, device,
+                                    target_temp=target_temp, min_p=min_p, abs_floor=abs_floor,
+                                    target_floor=target_floor, corrupt_only=corrupt_only)
+    cand_texts_all = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip()
+                      for g in gen_all]
+    # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
+    # scoring matches generation), then partitioned back per candidate.
+    score_items = [(list(t_pres[owner[k]]) + tok.encode(cand_texts_all[k], add_special_tokens=False),
+                    len(t_pres[owner[k]])) for k in range(len(cand_texts_all))]
+    lps_all = _hf_score(mt, score_items, pad_id, device)
+
+    per_cand: List[List[Dict]] = [[] for _ in range(len(t_pres))]
+    for k in range(len(cand_texts_all)):
+        lp = lps_all[k]; p_idx, s_idx = meta[k]
+        per_cand[owner[k]].append({"text": cand_texts_all[k], "target_lp": lp,
+                                   "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
+                                   "prompt_index": p_idx, "sample_index": s_idx})
+    results: List[Dict] = []
+    for pool in per_cand:
         pool.sort(key=lambda d: d["target_lp"] if d["target_lp"] is not None else -float("inf"), reverse=True)
         results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
     return results
