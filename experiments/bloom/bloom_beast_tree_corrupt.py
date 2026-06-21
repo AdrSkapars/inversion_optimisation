@@ -4411,8 +4411,14 @@ def _joint_io_search_one_turn(
     target_allowed_token_ids: Optional[List[int]] = None,
     lm_jail: Optional["LocalModel"] = None,
     jail_runtime_cfg: Optional[Dict[str, Any]] = None,
+    lm_corrupt: Optional["LocalModel"] = None,
+    corruption_runtime_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Per-step beam expansion with optional lookahead chains.
+
+    When corruption_runtime_cfg is provided, candidate target OUTPUTS are generated
+    via the corruption PoE (so the judge scores already-corrupted outputs during the
+    beam search). Eval/input messages stay clean.
 
     For each input beam, samples candidates_per_beam first-turn extensions (with branching),
     then for each candidate simulates up to chain_lens[bi]-1 ADDITIONAL turns (no branching,
@@ -4482,18 +4488,25 @@ def _joint_io_search_one_turn(
         list(beams[beam_indices[i]]["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target1[i]}]
         for i in range(K * N)
     ]
-    if (lm_jail is not None and jail_runtime_cfg is not None
+    if corruption_runtime_cfg is not None:
+        _corr1 = batch_generate_corruption_local(
+            lm_target, lm_corrupt, corruption_runtime_cfg,
+            target_msg_lists1, target_max_tokens, temperature, no_think_target,
+        )
+        target_resps1 = [c["best_text"] for c in _corr1]
+    elif (lm_jail is not None and jail_runtime_cfg is not None
             and jail_runtime_cfg.get("use_during_rollout", False)):
         target_raw_list = batch_generate_contrastive_local(
             lm_target, lm_jail, jail_runtime_cfg,
             target_msg_lists1, target_max_tokens, temperature, no_think_target,
         )
+        target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
     else:
         target_raw_list = batch_generate_local(
             lm_target, target_msg_lists1, target_max_tokens, temperature,
             no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
         )
-    target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
+        target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
 
     # Build per-candidate state after first turn.
     cand_chains: List[List[Dict[str, Any]]] = []
@@ -4559,18 +4572,25 @@ def _joint_io_search_one_turn(
             target_msg_lists_la_prefixes[j] + [{"role": "user", "content": extracted_la[j][0]}]
             for j in range(len(active))
         ]
-        if (lm_jail is not None and jail_runtime_cfg is not None
+        if corruption_runtime_cfg is not None:
+            _corr_la = batch_generate_corruption_local(
+                lm_target, lm_corrupt, corruption_runtime_cfg,
+                target_msg_lists_la, target_max_tokens, temperature, no_think_target,
+            )
+            target_resps_la = [c["best_text"] for c in _corr_la]
+        elif (lm_jail is not None and jail_runtime_cfg is not None
                 and jail_runtime_cfg.get("use_during_rollout", False)):
             target_raw_la = batch_generate_contrastive_local(
                 lm_target, lm_jail, jail_runtime_cfg,
                 target_msg_lists_la, target_max_tokens, temperature, no_think_target,
             )
+            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
         else:
             target_raw_la = batch_generate_local(
                 lm_target, target_msg_lists_la, target_max_tokens, temperature,
                 no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
             )
-        target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
+            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
 
         for j, i in enumerate(active):
             turn = {
@@ -4700,7 +4720,9 @@ def run_rollout_batched_local(
         if jail_on: conflicts.append("jailbroken_output")
         if bool((cfg.get("input_search", {})  or {}).get("enabled", False)): conflicts.append("input_search")
         if bool((cfg.get("output_search", {}) or {}).get("enabled", False)): conflicts.append("output_search")
-        if bool((cfg.get("input_and_output_search", {}) or {}).get("enabled", False)): conflicts.append("input_and_output_search")
+        # input_and_output_search + corruption IS supported: corruption is applied to candidate
+        # target OUTPUTS inside _joint_io_search_one_turn (judged already-corrupted), so it is
+        # intentionally NOT listed as a conflict here.
         if conflicts:
             raise RuntimeError(
                 "corruption_output is standalone in v1 — disable: " + ", ".join(conflicts))
@@ -5154,6 +5176,8 @@ def run_rollout_batched_local(
                     target_allowed_token_ids=io_target_allowed_ids,
                     lm_jail=lm_jail,
                     jail_runtime_cfg=jail_runtime_cfg,
+                    lm_corrupt=lm_corrupt,
+                    corruption_runtime_cfg=corruption_runtime_cfg,
                 )
 
                 # Pool: each candidate contributes its chain-end (judged) transcript + state.
