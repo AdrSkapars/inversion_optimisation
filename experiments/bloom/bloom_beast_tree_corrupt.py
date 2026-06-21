@@ -3069,33 +3069,49 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         t_pres.append(tok.encode(s, add_special_tokens=False))
     baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
 
-    results: List[Dict] = []
-    for t_pre, base_ids in zip(t_pres, baselines):
+    # Build every (target-prefix, corruption-prefix) slot across ALL candidates up front,
+    # then run the PoE decode loop over big chunks instead of once per candidate. The decode
+    # loop is the sequential bottleneck (max_new steps x 2 model forwards), and a 4B model is
+    # underutilised at batch=num_prompts(~10); batching across candidates runs that loop
+    # ~N_candidates x fewer times. For a single candidate (the non-io rollout path) this is a
+    # no-op: one chunk of num_prompts slots, identical to before.
+    poe_gen_batch = max(1, int(corruption_runtime_cfg.get("poe_gen_batch", 32)))
+    all_t: List[List[int]] = []
+    all_c: List[List[int]] = []
+    owner: List[int] = []                  # slot -> candidate index
+    meta:  List[Tuple[int, int]] = []      # slot -> (prompt_index, sample_index)
+    for ci, (t_pre, base_ids) in enumerate(zip(t_pres, baselines)):
         base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
-        c_prefs: List[List[int]] = []
-        for instr in use_prompts:
+        for p_idx, instr in enumerate(use_prompts):
             cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
                                          tokenize=False, add_generation_prompt=True) + NO_THINK
-            c_prefs.append(tok.encode(cs, add_special_tokens=False))
-        # expand to num_prompts x samples_per_prompt parallel slots
-        t_batch, c_batch, meta = [], [], []
-        for p_idx, c_pre in enumerate(c_prefs):
+            c_pre = tok.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
-                t_batch.append(list(t_pre)); c_batch.append(list(c_pre)); meta.append((p_idx, s_idx))
-        gen = _hf_poe_generate(mt, mc, t_batch, c_batch, beta, poe_temp, max_tokens,
-                               pad_id, eos_id, device, target_temp=target_temp, min_p=min_p,
-                               abs_floor=abs_floor, target_floor=target_floor, corrupt_only=corrupt_only)
-        cand_texts = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
-        if not cand_texts:
-            results.append({"best_text": "", "pool": []}); continue
-        # target-pick: t_pre already carries the no-think prefix, so scoring matches generation
-        items = [(list(t_pre) + tok.encode(t, add_special_tokens=False), len(t_pre)) for t in cand_texts]
-        lps = _hf_score(mt, items, pad_id, device)
-        pool = []
-        for (txt, lp, (p_idx, s_idx)) in zip(cand_texts, lps, meta):
-            pool.append({"text": txt, "target_lp": lp,
-                         "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
-                         "prompt_index": p_idx, "sample_index": s_idx})
+                all_t.append(list(t_pre)); all_c.append(list(c_pre))
+                owner.append(ci); meta.append((p_idx, s_idx))
+
+    gen_all: List[List[int]] = []
+    for s in range(0, len(all_t), poe_gen_batch):
+        gen_all += _hf_poe_generate(mt, mc, all_t[s:s + poe_gen_batch], all_c[s:s + poe_gen_batch],
+                                    beta, poe_temp, max_tokens, pad_id, eos_id, device,
+                                    target_temp=target_temp, min_p=min_p, abs_floor=abs_floor,
+                                    target_floor=target_floor, corrupt_only=corrupt_only)
+    cand_texts_all = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip()
+                      for g in gen_all]
+    # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
+    # scoring matches generation), then partitioned back per candidate.
+    score_items = [(list(t_pres[owner[k]]) + tok.encode(cand_texts_all[k], add_special_tokens=False),
+                    len(t_pres[owner[k]])) for k in range(len(cand_texts_all))]
+    lps_all = _hf_score(mt, score_items, pad_id, device)
+
+    per_cand: List[List[Dict]] = [[] for _ in range(len(t_pres))]
+    for k in range(len(cand_texts_all)):
+        lp = lps_all[k]; p_idx, s_idx = meta[k]
+        per_cand[owner[k]].append({"text": cand_texts_all[k], "target_lp": lp,
+                                   "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
+                                   "prompt_index": p_idx, "sample_index": s_idx})
+    results: List[Dict] = []
+    for pool in per_cand:
         pool.sort(key=lambda d: d["target_lp"] if d["target_lp"] is not None else -float("inf"), reverse=True)
         results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
     return results
@@ -4411,8 +4427,14 @@ def _joint_io_search_one_turn(
     target_allowed_token_ids: Optional[List[int]] = None,
     lm_jail: Optional["LocalModel"] = None,
     jail_runtime_cfg: Optional[Dict[str, Any]] = None,
+    lm_corrupt: Optional["LocalModel"] = None,
+    corruption_runtime_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Per-step beam expansion with optional lookahead chains.
+
+    When corruption_runtime_cfg is provided, candidate target OUTPUTS are generated
+    via the corruption PoE (so the judge scores already-corrupted outputs during the
+    beam search). Eval/input messages stay clean.
 
     For each input beam, samples candidates_per_beam first-turn extensions (with branching),
     then for each candidate simulates up to chain_lens[bi]-1 ADDITIONAL turns (no branching,
@@ -4482,18 +4504,25 @@ def _joint_io_search_one_turn(
         list(beams[beam_indices[i]]["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target1[i]}]
         for i in range(K * N)
     ]
-    if (lm_jail is not None and jail_runtime_cfg is not None
+    if corruption_runtime_cfg is not None:
+        _corr1 = batch_generate_corruption_local(
+            lm_target, lm_corrupt, corruption_runtime_cfg,
+            target_msg_lists1, target_max_tokens, temperature, no_think_target,
+        )
+        target_resps1 = [c["best_text"] for c in _corr1]
+    elif (lm_jail is not None and jail_runtime_cfg is not None
             and jail_runtime_cfg.get("use_during_rollout", False)):
         target_raw_list = batch_generate_contrastive_local(
             lm_target, lm_jail, jail_runtime_cfg,
             target_msg_lists1, target_max_tokens, temperature, no_think_target,
         )
+        target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
     else:
         target_raw_list = batch_generate_local(
             lm_target, target_msg_lists1, target_max_tokens, temperature,
             no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
         )
-    target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
+        target_resps1 = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_list]
 
     # Build per-candidate state after first turn.
     cand_chains: List[List[Dict[str, Any]]] = []
@@ -4559,18 +4588,25 @@ def _joint_io_search_one_turn(
             target_msg_lists_la_prefixes[j] + [{"role": "user", "content": extracted_la[j][0]}]
             for j in range(len(active))
         ]
-        if (lm_jail is not None and jail_runtime_cfg is not None
+        if corruption_runtime_cfg is not None:
+            _corr_la = batch_generate_corruption_local(
+                lm_target, lm_corrupt, corruption_runtime_cfg,
+                target_msg_lists_la, target_max_tokens, temperature, no_think_target,
+            )
+            target_resps_la = [c["best_text"] for c in _corr_la]
+        elif (lm_jail is not None and jail_runtime_cfg is not None
                 and jail_runtime_cfg.get("use_during_rollout", False)):
             target_raw_la = batch_generate_contrastive_local(
                 lm_target, lm_jail, jail_runtime_cfg,
                 target_msg_lists_la, target_max_tokens, temperature, no_think_target,
             )
+            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
         else:
             target_raw_la = batch_generate_local(
                 lm_target, target_msg_lists_la, target_max_tokens, temperature,
                 no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
             )
-        target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
+            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
 
         for j, i in enumerate(active):
             turn = {
@@ -4700,7 +4736,9 @@ def run_rollout_batched_local(
         if jail_on: conflicts.append("jailbroken_output")
         if bool((cfg.get("input_search", {})  or {}).get("enabled", False)): conflicts.append("input_search")
         if bool((cfg.get("output_search", {}) or {}).get("enabled", False)): conflicts.append("output_search")
-        if bool((cfg.get("input_and_output_search", {}) or {}).get("enabled", False)): conflicts.append("input_and_output_search")
+        # input_and_output_search + corruption IS supported: corruption is applied to candidate
+        # target OUTPUTS inside _joint_io_search_one_turn (judged already-corrupted), so it is
+        # intentionally NOT listed as a conflict here.
         if conflicts:
             raise RuntimeError(
                 "corruption_output is standalone in v1 — disable: " + ", ".join(conflicts))
@@ -5154,6 +5192,8 @@ def run_rollout_batched_local(
                     target_allowed_token_ids=io_target_allowed_ids,
                     lm_jail=lm_jail,
                     jail_runtime_cfg=jail_runtime_cfg,
+                    lm_corrupt=lm_corrupt,
+                    corruption_runtime_cfg=corruption_runtime_cfg,
                 )
 
                 # Pool: each candidate contributes its chain-end (judged) transcript + state.
@@ -7324,6 +7364,12 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["enabled"] = os.environ["BLOOM_CORRUPTION_ENABLED"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
+        _io = cfg.setdefault("input_and_output_search", {})
+        _io["enabled"] = os.environ["BLOOM_IO_SEARCH"].lower() in ("1", "true", "yes")
+        if _io.get("enabled"):
+            _io["num_beams"] = int(os.environ.get("BLOOM_IO_BEAMS", "3"))
+            _io["candidates_per_beam"] = int(os.environ.get("BLOOM_IO_CANDS", "3"))
     if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_TARGET_FLOOR", "BLOOM_BETA", "BLOOM_MIN_P", "BLOOM_ABS_FLOOR", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS", "BLOOM_FREEZE_INPUT", "BLOOM_SKIP_FINISHED", "BLOOM_CORRUPTION_ENABLED")):
         _co = cfg.get("corruption_output", {})
         _rf = cfg.get("refinement", {})
