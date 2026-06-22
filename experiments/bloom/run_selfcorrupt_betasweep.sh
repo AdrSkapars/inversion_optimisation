@@ -40,5 +40,5 @@ run () {  # beta
   echo "================ DONE $folder ================"
 }
 
-for b in 5 10 20 40; do run "$b"; done
+for b in 5 6 7 8; do run "$b"; done
 echo "SELFCORRSWEEPDONE_$(date +%s)"
