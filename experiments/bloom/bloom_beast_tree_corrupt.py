@@ -7302,7 +7302,7 @@ cfg = DotDict({
         "min_p": 0.0,                             # min-p FLOOR on the combined PoE sampling distribution: drop tokens with prob < min_p*max_prob, renormalise. 0.0 = off. >0 restricts the tail of unlikely tokens
         "min_p_schedule": None,                   # optional list, one min_p per refinement round; "floor annealing". None = use fixed min_p every round
         "abs_floor": 0.0,                         # ABSOLUTE prob floor on the PoE sampling distribution: mask tokens with prob < abs_floor (fixed fraction; 6.49e-5 = vanilla's least-likely token), argmax fallback if all masked. 0.0 = off. Unlike min_p this is a fixed cutoff, not relative to the per-step max
-        "target_floor": 6.49e-5,                  # threshold on the TRUE TARGET dist softmax(t) but sample from the PoE among survivors: mask tokens with target prob < target_floor (6.49e-5 = vanilla's least-likely token), argmax(target) fallback if all masked. 0.0 = off. Clamps the corruption fingerprint (no sampled token is target-improbable below the floor)
+        "target_floor": 1e-5,                     # DEFAULT floor (was 6.49e-5). threshold on the TRUE TARGET dist softmax(t) but sample from the PoE among survivors: mask tokens with target prob < target_floor, argmax(target) fallback if all masked. 0.0 = off. Clamps the corruption fingerprint (no sampled token is target-improbable below the floor)
         # Adaptive target_temp controller (overrides target_temp_schedule when enabled). Gated decrease:
         # each round, if the PREVIOUS round's metric >= threshold, cool by step; else HOLD temp (resample
         # at same temp) until a round clears threshold again, then resume cooling. Clamped to [min_temp, start].
@@ -7362,6 +7362,9 @@ if __name__ == "__main__":
         cfg.setdefault("refinement", {})["skip_finished"] = os.environ["BLOOM_SKIP_FINISHED"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_CORRUPTION_ENABLED") is not None and os.environ.get("BLOOM_CORRUPTION_ENABLED") != "":
         cfg.setdefault("corruption_output", {})["enabled"] = os.environ["BLOOM_CORRUPTION_ENABLED"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_CORRUPT_MODEL"):
+        # corruption "corruptor" model id (e.g. local/Qwen/Qwen3-4B for self-corruption — target as its own corruptor)
+        cfg.setdefault("corruption_output", {})["model"] = os.environ["BLOOM_CORRUPT_MODEL"]
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
