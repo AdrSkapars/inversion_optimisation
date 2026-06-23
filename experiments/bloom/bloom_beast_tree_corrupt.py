@@ -7443,6 +7443,10 @@ if __name__ == "__main__":
     for _bk in ("BLOOM_CFG_B1", "BLOOM_CFG_B2", "BLOOM_CFG_B3"):
         if os.environ.get(_bk):
             cfg.setdefault("corruption_output", {})["cfg_b" + _bk[-1]] = float(os.environ[_bk])
+    if os.environ.get("BLOOM_NUM_PROMPTS"):
+        cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
+    if os.environ.get("BLOOM_SPP"):
+        cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
