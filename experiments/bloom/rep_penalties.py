@@ -80,4 +80,10 @@ def make(spec, eos_id):
         return make_ngram_penalty(int(spec.get("n", 3)), float(spec.get("lam", 4.0)), eos_id)
     if m == "dry":
         return make_dry_penalty(float(spec.get("multiplier", 0.8)), float(spec.get("base", 1.75)), int(spec.get("allowed_length", 2)), eos_id)
+    if m == "combo":
+        fns = [make(sub, eos_id) for sub in spec["specs"]]
+        def fn(z, gen):
+            for f in fns: z = f(z, gen)
+            return z
+        return fn
     raise ValueError("unknown rep penalty mode: " + str(m))
