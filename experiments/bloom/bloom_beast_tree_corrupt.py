@@ -3096,10 +3096,10 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     target_floor = float(corruption_runtime_cfg.get("target_floor", 0.0) or 0.0)
     corrupt_only = bool(corruption_runtime_cfg.get("corrupt_only", False))
     # Linear-combination coefficients z = b1*target + b2*offensive - b3*neutral (CFG).
-    # Defaults (1, 10, 5) == legacy beta=5, gamma=1. cfg_b3=0 disables the neutral pass (plain PoE).
+    # cfg_b3=0 (default) disables the neutral pass entirely (plain PoE). For CFG set b3~=b2/2.
     cfg_b1 = float(corruption_runtime_cfg.get("cfg_b1", 1.0))
     cfg_b2 = float(corruption_runtime_cfg.get("cfg_b2", 10.0))
-    cfg_b3 = float(corruption_runtime_cfg.get("cfg_b3", 5.0))
+    cfg_b3 = float(corruption_runtime_cfg.get("cfg_b3", 0.0))
     cfg_neutral = corruption_runtime_cfg.get("cfg_neutral_prompt") or _DEFAULT_CFG_NEUTRAL_PROMPT
     use_neutral = cfg_b3 != 0.0
     use_prompts = prompts[:num_prompts]
@@ -4882,7 +4882,7 @@ def run_rollout_batched_local(
             "corrupt_only":       bool(corr_cfg.get("corrupt_only", False)),
             "cfg_b1":             float(corr_cfg.get("cfg_b1", 1.0)),
             "cfg_b2":             float(corr_cfg.get("cfg_b2", 10.0)),
-            "cfg_b3":             float(corr_cfg.get("cfg_b3", 5.0)),
+            "cfg_b3":             float(corr_cfg.get("cfg_b3", 0.0)),
             "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
@@ -7372,11 +7372,12 @@ cfg = DotDict({
         "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
         # Sampling logit = b1*target + b2*offensive_rewrite - b3*neutral_rewrite (CFG, hf_full).
-        # Defaults (1, 10, 5) == legacy beta=5, gamma=1 (the strong CFG config). cfg_b3=0 -> plain
-        # PoE (no neutral pass). Equivalences: b2 = beta*(1+gamma), b3 = beta*gamma.
+        # b3=0 -> CFG OFF: plain PoE, no neutral prompt and no third forward pass.
+        # For CFG, set b3 ~= b2/2 (== gamma=1, the empirically strongest), e.g. b2=10 -> b3=5.
+        # Equivalences to the old beta/gamma: b2 = beta*(1+gamma), b3 = beta*gamma.
         "cfg_b1": 1.0,                            # weight on the target (clean-context) logits
         "cfg_b2": 10.0,                           # weight on the offensive-rewrite-prompt logits
-        "cfg_b3": 5.0,                            # weight subtracted on the neutral-rewrite-prompt logits (CFG)
+        "cfg_b3": 0.0,                            # weight subtracted on the neutral-rewrite-prompt (CFG). 0 = OFF. For CFG use ~b2/2.
         "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
