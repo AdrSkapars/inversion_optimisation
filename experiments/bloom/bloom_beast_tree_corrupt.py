@@ -7407,6 +7407,8 @@ if __name__ == "__main__":
     # --- env-var overrides (for autonomous sweeps; no source edits between runs) ---
     if os.environ.get("BLOOM_FOLDER"):
         cfg["folder_name"] = os.environ["BLOOM_FOLDER"]
+    if os.environ.get("BLOOM_SEED"):
+        cfg["seed"] = int(os.environ["BLOOM_SEED"])
     if os.environ.get("BLOOM_TARGET_FLOOR"):
         cfg.setdefault("corruption_output", {})["target_floor"] = float(os.environ["BLOOM_TARGET_FLOOR"])
     if os.environ.get("BLOOM_CORRUPT_ONLY") is not None and os.environ.get("BLOOM_CORRUPT_ONLY") != "":
