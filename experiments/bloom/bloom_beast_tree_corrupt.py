@@ -2937,7 +2937,9 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      pad_id, eos_id, device, target_temp: float = 1.0,
                      min_p: float = 0.0, abs_floor: float = 0.0,
                      target_floor: float = 0.0, corrupt_only: bool = False,
-                     n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0) -> List[List[int]]:
+                     n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
+                     poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
+                     poe_b3: Optional[float] = None) -> List[List[int]]:
     """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
     target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
     without touching the corruption logits or beta; target_temp=1.0 (default) is the
@@ -2966,10 +2968,23 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         tp, cp = to.past_key_values, co.past_key_values
         tl = to.logits[:, -1, :].float(); cl = co.logits[:, -1, :].float()
         taf, caf = ta, ca
-        # CFG: sharpen the corruption logits against a NEUTRAL prompt (same corruptor model mc),
-        # c_eff = (1+gamma)*c - gamma*neutral, isolating + amplifying the corruption-instruction
-        # direction. Off when cfg_gamma<=0 (then c_eff = c, identical to before).
-        cfg_on = cfg_gamma > 0.0 and n_prefs is not None
+        # Sampling logit is a linear combination of the three distributions:
+        #     z = eb1*t + eb2*c - eb3*n
+        # where c = corruptor on the offensive rewrite prompt, n = corruptor on the NEUTRAL
+        # rewrite prompt (CFG). Coefficients come either explicitly (poe_b1/b2/b3 — the
+        # b1/b2/b3 parameterization) or, for legacy callers (e.g. jail rollout), are derived
+        # from beta/target_temp/cfg_gamma:  eb1=1/target_temp, eb2=beta*(1+gamma), eb3=beta*gamma
+        # (so plain PoE is eb3=0; CFG g=1 is eb2=2*beta, eb3=beta). The floor still masks on
+        # softmax(t). Neutral pass runs only when eb3!=0.
+        if poe_b2 is not None:
+            eb1 = float(poe_b1 if poe_b1 is not None else 0.0)
+            eb2 = float(poe_b2)
+            eb3 = float(poe_b3 if poe_b3 is not None else 0.0)
+        else:
+            eb1 = 1.0 / max(target_temp, 1e-6)
+            eb2 = beta * (1.0 + cfg_gamma)
+            eb3 = beta * cfg_gamma
+        cfg_on = (eb3 != 0.0) and (n_prefs is not None)
         ncp = naf = nl = None
         if cfg_on:
             ni, na = _hf_left_pad(n_prefs, pad_id, device)
@@ -2978,15 +2993,15 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for _ in range(max_new):
-            cl_eff = ((1.0 + cfg_gamma) * cl - cfg_gamma * nl) if cfg_on else cl
             if corrupt_only:
-                # Sample purely from the corruption distribution (target weight 0). The
+                # Sample purely from the corruption distribution (target weight dropped). The
                 # target_floor mask below still uses softmax(t_logits), so the allowed set
-                # stays target-plausible — we just pick the most corruption-favoured token
-                # WITHIN that set instead of the PoE-weighted one.
+                # stays target-plausible — we just pick the most corruption-favoured token.
+                cl_eff = ((1.0 + cfg_gamma) * cl - cfg_gamma * nl) if cfg_on else cl
                 probs = torch.softmax(cl_eff / max(temperature, 1e-6), -1)
             else:
-                probs = torch.softmax((tl / max(target_temp, 1e-6) + beta * cl_eff) / max(temperature, 1e-6), -1)
+                z = eb1 * tl + eb2 * cl - (eb3 * nl if cfg_on else 0.0)
+                probs = torch.softmax(z / max(temperature, 1e-6), -1)
             if min_p > 0.0:
                 # min-p floor: drop tokens below min_p * max_prob (per row), renormalise
                 thresh = min_p * probs.max(dim=-1, keepdim=True).values
@@ -3080,8 +3095,13 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     abs_floor = float(corruption_runtime_cfg.get("abs_floor", 0.0) or 0.0)
     target_floor = float(corruption_runtime_cfg.get("target_floor", 0.0) or 0.0)
     corrupt_only = bool(corruption_runtime_cfg.get("corrupt_only", False))
-    cfg_gamma = float(corruption_runtime_cfg.get("cfg_gamma", 0.0) or 0.0)
+    # Linear-combination coefficients z = b1*target + b2*offensive - b3*neutral (CFG).
+    # cfg_b3=0 (default) disables the neutral pass entirely (plain PoE). For CFG set b3~=b2/2.
+    cfg_b1 = float(corruption_runtime_cfg.get("cfg_b1", 1.0))
+    cfg_b2 = float(corruption_runtime_cfg.get("cfg_b2", 10.0))
+    cfg_b3 = float(corruption_runtime_cfg.get("cfg_b3", 0.0))
     cfg_neutral = corruption_runtime_cfg.get("cfg_neutral_prompt") or _DEFAULT_CFG_NEUTRAL_PROMPT
+    use_neutral = cfg_b3 != 0.0
     use_prompts = prompts[:num_prompts]
     NO_THINK = "<think>\n\n</think>\n"
 
@@ -3102,13 +3122,13 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     poe_gen_batch = max(1, int(corruption_runtime_cfg.get("poe_gen_batch", 32)))
     all_t: List[List[int]] = []
     all_c: List[List[int]] = []
-    all_n: List[List[int]] = []            # CFG neutral prefixes (only when cfg_gamma>0)
+    all_n: List[List[int]] = []            # CFG neutral prefixes (only when cfg_b3 != 0)
     owner: List[int] = []                  # slot -> candidate index
     meta:  List[Tuple[int, int]] = []      # slot -> (prompt_index, sample_index)
     for ci, (t_pre, base_ids) in enumerate(zip(t_pres, baselines)):
         base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
         n_pre = None
-        if cfg_gamma > 0.0:
+        if use_neutral:
             ns = tok.apply_chat_template(build_corruption_msgs(cfg_neutral, base),
                                          tokenize=False, add_generation_prompt=True) + NO_THINK
             n_pre = tok.encode(ns, add_special_tokens=False)
@@ -3118,7 +3138,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
             c_pre = tok.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
                 all_t.append(list(t_pre)); all_c.append(list(c_pre))
-                if cfg_gamma > 0.0: all_n.append(list(n_pre))
+                if use_neutral: all_n.append(list(n_pre))
                 owner.append(ci); meta.append((p_idx, s_idx))
 
     gen_all: List[List[int]] = []
@@ -3127,8 +3147,8 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                                     beta, poe_temp, max_tokens, pad_id, eos_id, device,
                                     target_temp=target_temp, min_p=min_p, abs_floor=abs_floor,
                                     target_floor=target_floor, corrupt_only=corrupt_only,
-                                    n_prefs=(all_n[s:s + poe_gen_batch] if cfg_gamma > 0.0 else None),
-                                    cfg_gamma=cfg_gamma)
+                                    n_prefs=(all_n[s:s + poe_gen_batch] if use_neutral else None),
+                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3)
     cand_texts_all = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip()
                       for g in gen_all]
     # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
@@ -4860,7 +4880,9 @@ def run_rollout_batched_local(
             "abs_floor":          float(corr_cfg.get("abs_floor", 0.0) or 0.0),
             "target_floor":       float(corr_cfg.get("target_floor", 0.0) or 0.0),
             "corrupt_only":       bool(corr_cfg.get("corrupt_only", False)),
-            "cfg_gamma":          float(corr_cfg.get("cfg_gamma", 0.0) or 0.0),
+            "cfg_b1":             float(corr_cfg.get("cfg_b1", 1.0)),
+            "cfg_b2":             float(corr_cfg.get("cfg_b2", 10.0)),
+            "cfg_b3":             float(corr_cfg.get("cfg_b3", 0.0)),
             "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
@@ -7328,7 +7350,7 @@ cfg = DotDict({
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1)
         "enabled": True,                          # master switch; mutually exclusive with jail + all search
         "engine": "hf_full",                      # hf_full = exact full-vocab PoE (HF) | vllm_topk = legacy approx
-        "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # corruption (abliterated) model
+        "model": "local/Qwen/Qwen3-4B",           # corruptor model — DEFAULT = the target itself (self-corruption). Override to local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2 for the jail corruptor.
         "beta": 5.0,                              # PoE weight on log p_corrupt
         "target_temp": 1.0,                       # temperature on the TARGET logits only during PoE (softmax(t_logits/target_temp + beta*c_logits)); <1 sharpens toward target-likely tokens, raising P_t without touching corruption/beta. 1.0 = standard PoE
         "target_temp_schedule": None,             # optional list, one target_temp per refinement round; overrides target_temp per round when set. None = use the fixed target_temp every round
@@ -7349,7 +7371,13 @@ cfg = DotDict({
         "target_temp_min": 0.1,                   # floor for target_temp
         "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
-        "cfg_gamma": 0.0,                         # CFG on the corruptor: c_eff = (1+g)*c - g*neutral. 0 = off. Sharpens the corruption direction by subtracting a neutral-rewrite-prompt baseline (hf_full only)
+        # Sampling logit = b1*target + b2*offensive_rewrite - b3*neutral_rewrite (CFG, hf_full).
+        # b3=0 -> CFG OFF: plain PoE, no neutral prompt and no third forward pass.
+        # For CFG, set b3 ~= b2/2 (== gamma=1, the empirically strongest), e.g. b2=10 -> b3=5.
+        # Equivalences to the old beta/gamma: b2 = beta*(1+gamma), b3 = beta*gamma.
+        "cfg_b1": 1.0,                            # weight on the target (clean-context) logits
+        "cfg_b2": 10.0,                           # weight on the offensive-rewrite-prompt logits
+        "cfg_b3": 0.0,                            # weight subtracted on the neutral-rewrite-prompt (CFG). 0 = OFF. For CFG use ~b2/2.
         "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
@@ -7402,9 +7430,10 @@ if __name__ == "__main__":
     if os.environ.get("BLOOM_CORRUPT_MODEL"):
         # corruption "corruptor" model id (e.g. local/Qwen/Qwen3-4B for self-corruption — target as its own corruptor)
         cfg.setdefault("corruption_output", {})["model"] = os.environ["BLOOM_CORRUPT_MODEL"]
-    if os.environ.get("BLOOM_CFG_GAMMA"):
-        # CFG guidance strength on the corruptor (c_eff = (1+gamma)*c - gamma*neutral); 0 = off
-        cfg.setdefault("corruption_output", {})["cfg_gamma"] = float(os.environ["BLOOM_CFG_GAMMA"])
+    # CFG linear coefficients: z = b1*target + b2*offensive - b3*neutral. b3=0 -> plain PoE.
+    for _bk in ("BLOOM_CFG_B1", "BLOOM_CFG_B2", "BLOOM_CFG_B3"):
+        if os.environ.get(_bk):
+            cfg.setdefault("corruption_output", {})["cfg_b" + _bk[-1]] = float(os.environ[_bk])
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
