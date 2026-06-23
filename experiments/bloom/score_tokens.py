@@ -26,6 +26,14 @@ def score_dir(run_dir, tok, mt):
         print(f"  no transcripts under {run_dir}"); return None
     all_p = []          # every token's prob (%), pooled across chosen outputs
     per = []
+    floor = 0.0
+    try:
+        floor = float((json.load(open(os.path.join(run_dir, "cfg.json"))).get("corruption_output", {}) or {}).get("target_floor", 0.0) or 0.0)
+    except Exception:
+        pass
+    floor_pct = floor * 100.0
+    imposs_pct = 100.0 / float(getattr(mt.config, "vocab_size", 151936))  # argmax fallback cannot go below 1/vocab
+    sub_floor = []
     for f in tfiles:
         d = json.load(open(f, encoding="utf-8"))
         msgs = d["messages"]
@@ -49,10 +57,23 @@ def score_dir(run_dir, tok, mt):
                 tg = torch.tensor(resp_ids, device=DEV)
                 tokprobs = lp[cols].gather(-1, tg.unsqueeze(-1)).squeeze(-1).exp()
             pl = [float(x) * 100 for x in tokprobs]
+            if floor_pct > 0.0:
+                below = [k for k in range(len(pl)) if pl[k] < imposs_pct]
+                if below:
+                    wk = min(below, key=lambda k: pl[k])
+                    sub_floor.append({"file": os.path.basename(f), "n_below": len(below),
+                                      "worst_pct": pl[wk], "token": repr(tok.decode([resp_ids[wk]])),
+                                      "ctx": repr(tok.decode(resp_ids[max(0, wk-4):wk+2]))})
             all_p += pl
             per.append({"file": os.path.basename(f), "n_tok": len(pl), "min_tok_pct": min(pl)})
             break
-    omins = [p["min_tok_pct"] for p in per]   # per-output least-probable token (n=25)
+    if sub_floor:
+        print("  !! WARNING: %d output(s) have a token scored IMPOSSIBLY low (< 1/vocab = %.2e%%)." % (len(sub_floor), imposs_pct))
+        print("     A generated token cannot score below 1/vocab -> generation/scoring prefix mismatch; least-token unreliable for these.")
+        for h in sorted(sub_floor, key=lambda z: z["worst_pct"])[:5]:
+            print("     %s: %d sub-floor tok(s) worst=%.2e%% token=%s ctx=%s" % (h["file"], h["n_below"], h["worst_pct"], h["token"], h["ctx"]))
+    omins = [p["min_tok_pct"] for p in per]
+    omins_clipped = [max(x, floor_pct) for x in omins] if floor_pct > 0.0 else omins   # per-output least-probable token (n=25)
     summ = {"n_outputs": len(per), "n_tokens": len(all_p),
             # Block A: all token probabilities pooled across the 25 outputs
             "A_mean_tok_pct": sum(all_p) / len(all_p),
@@ -62,7 +83,9 @@ def score_dir(run_dir, tok, mt):
             # Block B: per-output minimum token, then aggregated over the 25 outputs
             "B_mean_of_mins_pct": sum(omins) / len(omins),
             "B_median_of_mins_pct": st.median(omins),
-            "B_min_of_mins_pct": min(omins)}
+            "B_min_of_mins_pct": min(omins),
+            "B_min_of_mins_clipped_pct": min(omins_clipped),
+            "n_sub_floor_outputs": len(sub_floor)}
     json.dump({"run_dir": run_dir, "summary": summ, "per_output": per},
               open(os.path.join(run_dir, "score_tokens.json"), "w"), indent=2)
     print(f"  {run_dir}\n"
