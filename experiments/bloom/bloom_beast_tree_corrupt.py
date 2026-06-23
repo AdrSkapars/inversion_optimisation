@@ -2939,7 +2939,7 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      target_floor: float = 0.0, corrupt_only: bool = False,
                      n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
-                     poe_b3: Optional[float] = None) -> List[List[int]]:
+                     poe_b3: Optional[float] = None, rep_fn=None) -> List[List[int]]:
     """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
     target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
     without touching the corruption logits or beta; target_temp=1.0 (default) is the
@@ -3001,6 +3001,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 probs = torch.softmax(cl_eff / max(temperature, 1e-6), -1)
             else:
                 z = eb1 * tl + eb2 * cl - (eb3 * nl if cfg_on else 0.0)
+                if rep_fn is not None:
+                    z = rep_fn(z, gen)
                 probs = torch.softmax(z / max(temperature, 1e-6), -1)
             if min_p > 0.0:
                 # min-p floor: drop tokens below min_p * max_prob (per row), renormalise
@@ -3102,6 +3104,11 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     cfg_b3 = float(corruption_runtime_cfg.get("cfg_b3", 0.0))
     cfg_neutral = corruption_runtime_cfg.get("cfg_neutral_prompt") or _DEFAULT_CFG_NEUTRAL_PROMPT
     use_neutral = cfg_b3 != 0.0
+    rep_spec = corruption_runtime_cfg.get("rep_penalty")
+    rep_fn = None
+    if rep_spec:
+        import rep_penalties
+        rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
     NO_THINK = "<think>\n\n</think>\n"
 
@@ -3148,7 +3155,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                                     target_temp=target_temp, min_p=min_p, abs_floor=abs_floor,
                                     target_floor=target_floor, corrupt_only=corrupt_only,
                                     n_prefs=(all_n[s:s + poe_gen_batch] if use_neutral else None),
-                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3)
+                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3, rep_fn=rep_fn)
     cand_texts_all = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip()
                       for g in gen_all]
     # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
