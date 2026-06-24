@@ -3164,15 +3164,28 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                     len(t_pres[owner[k]])) for k in range(len(cand_texts_all))]
     lps_all = _hf_score(mt, score_items, pad_id, device)
 
+    import zlib as _zlib, collections as _coll
+    def _sel_d3(t):
+        w = t.split()
+        if len(w) < 3: return 1.0
+        g = [tuple(w[i:i+3]) for i in range(len(w) - 2)]
+        return len(_coll.Counter(g)) / len(g)
+    def _sel_cr(t):
+        b = t.encode("utf-8"); return len(_zlib.compress(b, 9)) / max(len(b), 1)
     per_cand: List[List[Dict]] = [[] for _ in range(len(t_pres))]
     for k in range(len(cand_texts_all)):
-        lp = lps_all[k]; p_idx, s_idx = meta[k]
-        per_cand[owner[k]].append({"text": cand_texts_all[k], "target_lp": lp,
+        lp = lps_all[k]; p_idx, s_idx = meta[k]; _txt = cand_texts_all[k]
+        per_cand[owner[k]].append({"text": _txt, "target_lp": lp,
                                    "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
+                                   "d3": _sel_d3(_txt), "cr": _sel_cr(_txt),
                                    "prompt_index": p_idx, "sample_index": s_idx})
+    _sel = corruption_runtime_cfg.get("selection", "target_pick")
+    _keyfns = {"target_pick": lambda d: (d["target_lp"] if d["target_lp"] is not None else -1e9),
+               "max_d3": lambda d: d.get("d3", 0.0), "max_cr": lambda d: d.get("cr", 0.0)}
+    _kf = _keyfns.get(_sel, _keyfns["target_pick"])
     results: List[Dict] = []
     for pool in per_cand:
-        pool.sort(key=lambda d: d["target_lp"] if d["target_lp"] is not None else -float("inf"), reverse=True)
+        pool.sort(key=_kf, reverse=True)
         results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
     return results
 
@@ -7449,6 +7462,8 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
     if os.environ.get("BLOOM_REP_PENALTY"):
         cfg.setdefault("corruption_output", {})["rep_penalty"] = json.loads(os.environ["BLOOM_REP_PENALTY"])
+    if os.environ.get("BLOOM_SELECTION"):
+        cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
