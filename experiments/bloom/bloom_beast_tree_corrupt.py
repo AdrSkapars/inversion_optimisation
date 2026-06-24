@@ -7244,8 +7244,8 @@ cfg = DotDict({
     # worker can grab most of the memory; the small reserve covers framework overhead.
     "evaluator_gpu_id": 0,
     "target_gpu_id":    1,
-    "evaluator_gpu_memory_utilization": 0.85,
-    "target_gpu_memory_utilization":    0.85,
+    "evaluator_gpu_memory_utilization": 0.80,
+    "target_gpu_memory_utilization":    0.80,
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
