@@ -7447,6 +7447,8 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
     if os.environ.get("BLOOM_SPP"):
         cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
+    if os.environ.get("BLOOM_REP_PENALTY"):
+        cfg.setdefault("corruption_output", {})["rep_penalty"] = json.loads(os.environ["BLOOM_REP_PENALTY"])
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
