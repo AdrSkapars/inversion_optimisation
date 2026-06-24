@@ -4798,7 +4798,7 @@ def run_rollout_batched_local(
     corr_engine = str(corr_cfg.get("engine", "hf_full"))
     if corruption_on:
         _corr_sel = str(corr_cfg.get("selection", "target_pick"))
-        if _corr_sel != "target_pick":
+        if _corr_sel not in ("target_pick", "max_d3", "max_cr"):
             raise RuntimeError(
                 f"corruption_output.selection={_corr_sel!r} is not supported in v1 "
                 "(only 'target_pick')")
