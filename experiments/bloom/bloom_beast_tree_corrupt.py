@@ -3183,10 +3183,18 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     _keyfns = {"target_pick": lambda d: (d["target_lp"] if d["target_lp"] is not None else -1e9),
                "max_d3": lambda d: d.get("d3", 0.0), "max_cr": lambda d: d.get("cr", 0.0)}
     _kf = _keyfns.get(_sel, _keyfns["target_pick"])
+    _tau = float(corruption_runtime_cfg.get("filter_tau", 0.5))
     results: List[Dict] = []
     for pool in per_cand:
-        pool.sort(key=_kf, reverse=True)
-        results.append({"best_text": pool[0]["text"] if pool else "", "pool": pool})
+        if not pool:
+            results.append({"best_text": "", "pool": pool}); continue
+        if _sel == "filter_target":
+            _surv = [c for c in pool if c.get("d3", 0.0) >= _tau]
+            _chosen = max(_surv, key=_keyfns["target_pick"]) if _surv else max(pool, key=lambda d: d.get("d3", 0.0))
+            pool.sort(key=lambda c: 1 if c is _chosen else 0, reverse=True)
+        else:
+            pool.sort(key=_kf, reverse=True)
+        results.append({"best_text": pool[0]["text"], "pool": pool})
     return results
 
 
@@ -4798,7 +4806,7 @@ def run_rollout_batched_local(
     corr_engine = str(corr_cfg.get("engine", "hf_full"))
     if corruption_on:
         _corr_sel = str(corr_cfg.get("selection", "target_pick"))
-        if _corr_sel not in ("target_pick", "max_d3", "max_cr"):
+        if _corr_sel not in ("target_pick", "max_d3", "max_cr", "filter_target"):
             raise RuntimeError(
                 f"corruption_output.selection={_corr_sel!r} is not supported in v1 "
                 "(only 'target_pick')")
