@@ -37,6 +37,15 @@ import logging
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 logging.getLogger("litellm").setLevel(logging.ERROR)
 
+# --- MCTS+corruption combo (likely temporary): reuse the corruption generation
+# machinery from bloom_beast_tree_corrupt without duplicating it. That module has a
+# proper `if __name__ == "__main__"` guard, so importing it only runs harmless
+# module-level defs (no pipeline launch). Sibling import works because the script's
+# directory is on sys.path; add it explicitly to be safe.
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bloom_beast_tree_corrupt as _corr
+
 
 # =============================================================================
 # Section 2: DotDict class
@@ -3873,6 +3882,7 @@ def _mcts_expand_same_parent_batch(
     lm_jail, jail_runtime_cfg,
     build_next_state,
     value_via_lookahead: bool = False,
+    corruption_runtime_cfg: Optional[Dict] = None,
 ) -> List["MCTSNode"]:
     """Spawn `children_per_expansion` new children of `parent`, all in batched LM calls.
 
@@ -3902,18 +3912,28 @@ def _mcts_expand_same_parent_batch(
         list(parent.state["target_msgs_prior"]) + [{"role": "user", "content": user_msgs_for_target[i]}]
         for i in range(N)
     ]
-    if (lm_jail is not None and jail_runtime_cfg is not None
-            and jail_runtime_cfg.get("use_during_rollout", False)):
-        target_raw = batch_generate_contrastive_local(
-            lm_target, lm_jail, jail_runtime_cfg,
-            target_msg_lists, target_max_tokens, temperature, no_think_target,
-        )
-    else:
-        target_raw = batch_generate_local(
-            lm_target, target_msg_lists, target_max_tokens, temperature,
-            no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
-        )
-    target_resps = [parse_message(_make_local_response(r))["content"] or r for r in target_raw]
+    def _gen_targets(msg_lists):
+        """Generate one target response per context. Routes through corruption PoE
+        (best_text per pool) when corruption_runtime_cfg is set, else jail-PoE or plain."""
+        if corruption_runtime_cfg is not None:
+            pools = _corr.batch_generate_corruption_local(
+                lm_target, None, corruption_runtime_cfg,
+                msg_lists, target_max_tokens, temperature, no_think_target,
+            )
+            return [(p.get("best_text") or "") for p in pools]
+        if (lm_jail is not None and jail_runtime_cfg is not None
+                and jail_runtime_cfg.get("use_during_rollout", False)):
+            raw = batch_generate_contrastive_local(
+                lm_target, lm_jail, jail_runtime_cfg,
+                msg_lists, target_max_tokens, temperature, no_think_target,
+            )
+        else:
+            raw = batch_generate_local(
+                lm_target, msg_lists, target_max_tokens, temperature,
+                no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
+            )
+        return [parse_message(_make_local_response(r))["content"] or r for r in raw]
+    target_resps = _gen_targets(target_msg_lists)
 
     # Step 3: build child states.
     child_states = []
@@ -3955,18 +3975,7 @@ def _mcts_expand_same_parent_batch(
                 list(rollout_states[i]["target_msgs_prior"]) + [{"role": "user", "content": extracted_la[j][0]}]
                 for j, i in enumerate(active)
             ]
-            if (lm_jail is not None and jail_runtime_cfg is not None
-                    and jail_runtime_cfg.get("use_during_rollout", False)):
-                target_raw_la = batch_generate_contrastive_local(
-                    lm_target, lm_jail, jail_runtime_cfg,
-                    target_msg_lists_la, target_max_tokens, temperature, no_think_target,
-                )
-            else:
-                target_raw_la = batch_generate_local(
-                    lm_target, target_msg_lists_la, target_max_tokens, temperature,
-                    no_think=no_think_target, allowed_token_ids=target_allowed_token_ids,
-                )
-            target_resps_la = [parse_message(_make_local_response(r))["content"] or r for r in target_raw_la]
+            target_resps_la = _gen_targets(target_msg_lists_la)
             for j, i in enumerate(active):
                 turn_la = {
                     "user_msg_for_target": extracted_la[j][0],
@@ -4104,10 +4113,54 @@ def run_rollout_batched_local(
                                  gpu_id=eval_gpu_id,
                                  gpu_memory_utilization=eval_gpu_util,
                                  max_model_len=eval_max_len)
-    lm_target = _get_local_model(target_model_id[len("local/"):],
-                                 gpu_id=target_gpu_id,
-                                 gpu_memory_utilization=target_gpu_util,
-                                 max_model_len=target_max_len)
+
+    # ── Corruption output (hf_full): target runs as an HF model loaded below; no
+    # vLLM target worker is spawned (mirrors bloom_beast_tree_corrupt). ────────────
+    corr_cfg = cfg.get("corruption_output", {}) or {}
+    corruption_on = bool(corr_cfg.get("enabled", False))
+    corr_engine   = str(corr_cfg.get("engine", "hf_full"))
+    corr_hf       = corruption_on and corr_engine == "hf_full"
+    lm_target = None
+    if not corr_hf:
+        lm_target = _get_local_model(target_model_id[len("local/"):],
+                                     gpu_id=target_gpu_id,
+                                     gpu_memory_utilization=target_gpu_util,
+                                     max_model_len=target_max_len)
+    corruption_runtime_cfg: Optional[Dict] = None
+    if corruption_on:
+        if corr_engine != "hf_full":
+            raise RuntimeError(f"MCTS+corruption only supports engine=hf_full, got {corr_engine!r}")
+        corr_model_id = corr_cfg.get("model", "") or target_model_id
+        rewrite_prompts = prompts_yaml.get("corruption_rewrite_prompts") or _corr._DEFAULT_CORRUPTION_REWRITE_PROMPTS
+        corruption_runtime_cfg = {
+            "engine":             corr_engine,
+            "rewrite_prompts":    rewrite_prompts,
+            "num_prompts":        int(corr_cfg.get("num_prompts", 1)),
+            "samples_per_prompt": int(corr_cfg.get("samples_per_prompt", 1)),
+            "beta":               float(corr_cfg.get("beta", 5.0)),
+            "target_temp":        float(corr_cfg.get("target_temp", 1.0)),
+            "poe_temp":           corr_cfg.get("poe_temp", None),
+            "min_p":              float(corr_cfg.get("min_p", 0.0) or 0.0),
+            "abs_floor":          float(corr_cfg.get("abs_floor", 0.0) or 0.0),
+            "target_floor":       float(corr_cfg.get("target_floor", 0.0) or 0.0),
+            "corrupt_only":       bool(corr_cfg.get("corrupt_only", False)),
+            "cfg_b1":             float(corr_cfg.get("cfg_b1", 1.0)),
+            "cfg_b2":             float(corr_cfg.get("cfg_b2", 10.0)),
+            "cfg_b3":             float(corr_cfg.get("cfg_b3", 0.0)),
+            "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
+            "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
+            "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
+            "selection":          str(corr_cfg.get("selection", "target_pick")),
+            "filter_tau":         float(corr_cfg.get("filter_tau", 0.5)),
+        }
+        if corr_cfg.get("rep_penalty"):
+            corruption_runtime_cfg["rep_penalty"] = corr_cfg["rep_penalty"]
+        corruption_runtime_cfg["hf"] = _corr._load_hf_corruption_models(
+            target_model_id[len("local/"):], corr_model_id[len("local/"):], target_gpu_id)
+        print(f"  [corruption_output] engine={corr_engine} model={corr_model_id} on GPU {target_gpu_id} "
+              f"(num_prompts={corruption_runtime_cfg['num_prompts']}, selection={corruption_runtime_cfg['selection']}, "
+              f"cfg_b=({corruption_runtime_cfg['cfg_b1']},{corruption_runtime_cfg['cfg_b2']},{corruption_runtime_cfg['cfg_b3']}), "
+              f"target_floor={corruption_runtime_cfg['target_floor']})", flush=True)
 
     lm_jail = None
     jail_runtime_cfg: Optional[Dict] = None
@@ -4676,6 +4729,7 @@ def run_rollout_batched_local(
                     lm_jail, jail_runtime_cfg,
                     build_next_state_mcts,
                     value_via_lookahead=mcts_value_via_lookahead,
+                    corruption_runtime_cfg=corruption_runtime_cfg,
                 )
                 ancestor_path = _mcts_path_from_root(parent)
                 for child in new_children:
@@ -6649,6 +6703,23 @@ cfg = DotDict({
         # signal — analogous to AlphaZero's "use value network on a deeper state".
         "value_via_lookahead": False,
     },
+    "corruption_output": {
+        # Combine corruption PoE generation (from bloom_beast_tree_corrupt) with MCTS:
+        # each MCTS expansion's target response is generated via corruption instead of
+        # plain sampling. hf_full only (target+corruptor as in-process HF models on the
+        # target GPU; no vLLM target worker). num_prompts=1 → one corruption sample per
+        # child (judge+UCB do the selection that filter_target's target-logprob did).
+        "enabled":      False,
+        "engine":       "hf_full",
+        "model":        "local/Qwen/Qwen3-4B",   # corruptor (self-corruption = target)
+        "num_prompts":  1,
+        "samples_per_prompt": 1,
+        "beta":         5.0,
+        "target_floor": 1e-5,
+        "cfg_b1": 1.0, "cfg_b2": 6.0, "cfg_b3": 0.0,   # CFG-off g0 default
+        "selection":    "filter_target",
+        "latin_mask":   True,
+    },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
@@ -6679,6 +6750,31 @@ if __name__ == "__main__":
             if k not in cfg:  # cfg overrides take priority
                 cfg[k] = v.strip() if isinstance(v, str) else v
         print(f"Loaded prompt preset: {_preset_name}", flush=True)
+
+    # ── Env-var overrides (BLOOM_*) so experiments can be launched without editing cfg ──
+    def _envf(k): return os.environ.get(k) not in (None, "")
+    def _envbool(k): return os.environ[k].lower() in ("1", "true", "yes")
+    if _envf("BLOOM_FOLDER"):     cfg["folder_name"] = os.environ["BLOOM_FOLDER"]
+    if _envf("BLOOM_SEED"):       cfg["seed"] = int(os.environ["BLOOM_SEED"])
+    if _envf("BLOOM_MAX_TURNS"):  cfg.setdefault("rollout", {})["max_turns"] = int(os.environ["BLOOM_MAX_TURNS"])
+    if _envf("BLOOM_NUM_ROUNDS"): cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
+    # corruption hooks
+    if _envf("BLOOM_CORRUPTION_ENABLED"): cfg.setdefault("corruption_output", {})["enabled"] = _envbool("BLOOM_CORRUPTION_ENABLED")
+    if _envf("BLOOM_CORRUPT_MODEL"):      cfg.setdefault("corruption_output", {})["model"] = os.environ["BLOOM_CORRUPT_MODEL"]
+    if _envf("BLOOM_TARGET_FLOOR"):       cfg.setdefault("corruption_output", {})["target_floor"] = float(os.environ["BLOOM_TARGET_FLOOR"])
+    if _envf("BLOOM_NUM_PROMPTS"):        cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
+    if _envf("BLOOM_SELECTION"):          cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
+    for _bk in ("BLOOM_CFG_B1", "BLOOM_CFG_B2", "BLOOM_CFG_B3"):
+        if _envf(_bk): cfg.setdefault("corruption_output", {})["cfg_b" + _bk[-1]] = float(os.environ[_bk])
+    # mcts hooks
+    if _envf("BLOOM_MCTS_ENABLED"):   cfg.setdefault("mcts", {})["enabled"] = _envbool("BLOOM_MCTS_ENABLED")
+    if _envf("BLOOM_MCTS_BUDGET"):    cfg.setdefault("mcts", {})["simulations_budget"] = int(os.environ["BLOOM_MCTS_BUDGET"])
+    if _envf("BLOOM_MCTS_BATCH"):     cfg.setdefault("mcts", {})["batch_size"] = int(os.environ["BLOOM_MCTS_BATCH"])
+    if _envf("BLOOM_MCTS_CUCT"):      cfg.setdefault("mcts", {})["c_uct"] = float(os.environ["BLOOM_MCTS_CUCT"])
+    if _envf("BLOOM_MCTS_LOOKAHEAD"): cfg.setdefault("mcts", {})["value_via_lookahead"] = _envbool("BLOOM_MCTS_LOOKAHEAD")
+    print(f"  [env] folder={cfg.get('folder_name')} seed={cfg.get('seed')} max_turns={cfg.get('rollout',{}).get('max_turns')} "
+          f"num_rounds={cfg.get('refinement',{}).get('num_rounds')} corruption={cfg.get('corruption_output',{}).get('enabled')} "
+          f"mcts={cfg.get('mcts',{}).get('enabled')} mcts_budget={cfg.get('mcts',{}).get('simulations_budget')}", flush=True)
 
     base_folder = cfg.get("folder_name", "runs/default")
     num_rounds = cfg.get("refinement", {}).get("num_rounds", 1)
