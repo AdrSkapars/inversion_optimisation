@@ -2922,9 +2922,24 @@ def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> 
         target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
     mc = AutoModelForCausalLM.from_pretrained(
         corrupt_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    # Resolve the chat turn-end EOS. tok.eos_token_id is often the document EOS
+    # (e.g. Phi-4-mini <|endoftext|>=199999) which the chat model rarely emits — it
+    # ends turns with <|end|> (200020), listed first in generation_config.eos_token_id.
+    # Use the generation_config turn-end so HF generation actually stops. No-op for
+    # models whose tok.eos_token_id already is the turn-end (e.g. Qwen3 <|im_end|>).
+    eos_id = tok.eos_token_id
+    try:
+        from transformers import GenerationConfig as _GenCfg
+        _ge = _GenCfg.from_pretrained(target_hf).eos_token_id
+        if isinstance(_ge, (list, tuple)) and len(_ge) > 0:
+            eos_id = int(_ge[0])
+        elif isinstance(_ge, int):
+            eos_id = int(_ge)
+    except Exception:
+        pass
     return {"mt": mt, "mc": mc, "tok": tok, "device": dev,
             "pad_id": (tok.pad_token_id if tok.pad_token_id is not None else 0),
-            "eos_id": tok.eos_token_id}
+            "eos_id": eos_id}
 
 
 def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
