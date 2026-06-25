@@ -7455,6 +7455,8 @@ if __name__ == "__main__":
         cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
         cfg.setdefault("refinement", {})["skip_finished"] = os.environ["BLOOM_SKIP_FINISHED"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_STRATEGISE") is not None and os.environ.get("BLOOM_STRATEGISE") != "":
+        cfg.setdefault("refinement", {})["between_rounds_strategise"] = os.environ["BLOOM_STRATEGISE"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_CORRUPTION_ENABLED") is not None and os.environ.get("BLOOM_CORRUPTION_ENABLED") != "":
         cfg.setdefault("corruption_output", {})["enabled"] = os.environ["BLOOM_CORRUPTION_ENABLED"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_CORRUPT_MODEL"):
