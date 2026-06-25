@@ -4933,6 +4933,13 @@ def run_rollout_batched_local(
             "cfg_b1":             float(corr_cfg.get("cfg_b1", 1.0)),
             "cfg_b2":             float(corr_cfg.get("cfg_b2", 10.0)),
             "cfg_b3":             float(corr_cfg.get("cfg_b3", 0.0)),
+            # Per-turn beta ramp (Crescendo output escalation): when *_start AND *_end are
+            # both set, cfg_b2 (and/or cfg_b3) is linearly interpolated start->end across
+            # turns 0..max_turns-1 in the rollout turn loop. None = no ramp (fixed cfg_b2/b3).
+            "cfg_b2_start":       (float(corr_cfg["cfg_b2_start"]) if corr_cfg.get("cfg_b2_start") is not None else None),
+            "cfg_b2_end":         (float(corr_cfg["cfg_b2_end"])   if corr_cfg.get("cfg_b2_end")   is not None else None),
+            "cfg_b3_start":       (float(corr_cfg["cfg_b3_start"]) if corr_cfg.get("cfg_b3_start") is not None else None),
+            "cfg_b3_end":         (float(corr_cfg["cfg_b3_end"])   if corr_cfg.get("cfg_b3_end")   is not None else None),
             "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
@@ -5502,6 +5509,13 @@ def run_rollout_batched_local(
                 # sampling against the jailbroken model; otherwise the standard
                 # vLLM generation path is used.
                 if corruption_on:
+                    # Per-turn beta ramp: linearly interpolate cfg_b2/cfg_b3 start->end
+                    # across turns (turn 0 = start, last turn = end). No-op if *_start/*_end unset.
+                    _rfrac = turn / max(1, max_turns - 1)
+                    if corruption_runtime_cfg.get("cfg_b2_start") is not None and corruption_runtime_cfg.get("cfg_b2_end") is not None:
+                        corruption_runtime_cfg["cfg_b2"] = corruption_runtime_cfg["cfg_b2_start"] + _rfrac * (corruption_runtime_cfg["cfg_b2_end"] - corruption_runtime_cfg["cfg_b2_start"])
+                    if corruption_runtime_cfg.get("cfg_b3_start") is not None and corruption_runtime_cfg.get("cfg_b3_end") is not None:
+                        corruption_runtime_cfg["cfg_b3"] = corruption_runtime_cfg["cfg_b3_start"] + _rfrac * (corruption_runtime_cfg["cfg_b3_end"] - corruption_runtime_cfg["cfg_b3_start"])
                     corr_result = batch_generate_corruption_local(
                         lm_target, lm_corrupt, corruption_runtime_cfg,
                         [target_msgs], target_max_tokens, temperature, no_think_target,
@@ -5510,6 +5524,8 @@ def run_rollout_batched_local(
                     corruption_pool_data.append({
                         "variation_index": var_idx,
                         "turn": turn + 1,
+                        "cfg_b2_used": round(corruption_runtime_cfg["cfg_b2"], 3),
+                        "cfg_b3_used": round(corruption_runtime_cfg["cfg_b3"], 3),
                         "pool": corr_result["pool"],
                     })
                 elif (jail_runtime_cfg is not None
@@ -7434,6 +7450,10 @@ cfg = DotDict({
         "cfg_b1": 1.0,                            # weight on the target (clean-context) logits
         "cfg_b2": 10.0,                           # weight on the offensive-rewrite-prompt logits
         "cfg_b3": 0.0,                            # weight subtracted on the neutral-rewrite-prompt (CFG). 0 = OFF. For CFG use ~b2/2.
+        "cfg_b2_start": None,                     # Crescendo output-escalation: ramp cfg_b2 linearly start->end across turns (None=no ramp, use fixed cfg_b2). BLOOM_CFG_B2_START/END.
+        "cfg_b2_end":   None,
+        "cfg_b3_start": None,                     # optional CFG ramp (usually leave None when CFG off)
+        "cfg_b3_end":   None,
         "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT)
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
@@ -7496,6 +7516,11 @@ if __name__ == "__main__":
     for _bk in ("BLOOM_CFG_B1", "BLOOM_CFG_B2", "BLOOM_CFG_B3"):
         if os.environ.get(_bk):
             cfg.setdefault("corruption_output", {})["cfg_b" + _bk[-1]] = float(os.environ[_bk])
+    # Per-turn beta ramp (Crescendo output escalation): start->end across turns.
+    for _rk in ("BLOOM_CFG_B2_START", "BLOOM_CFG_B2_END", "BLOOM_CFG_B3_START", "BLOOM_CFG_B3_END"):
+        if os.environ.get(_rk):
+            _key = "cfg_b" + _rk[len("BLOOM_CFG_B"):].lower()  # BLOOM_CFG_B2_START -> cfg_b2_start
+            cfg.setdefault("corruption_output", {})[_key] = float(os.environ[_rk])
     if os.environ.get("BLOOM_NUM_PROMPTS"):
         cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
     if os.environ.get("BLOOM_SPP"):
