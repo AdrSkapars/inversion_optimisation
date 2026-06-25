@@ -3155,6 +3155,9 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
     NO_THINK = _NO_THINK_PREFIX
+    # Compliance prefill (idea C): text prefilled into the corruptor's assistant turn so it
+    # continues past the refusal decision (analogue of the jail prefill). "" = off.
+    corrupt_prefill = corruption_runtime_cfg.get("corrupt_prefill", "") or ""
 
     # target prefixes (sys+user, no-think) and vanilla baselines to rewrite
     t_pres: List[List[int]] = []
@@ -3185,7 +3188,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
             n_pre = tok.encode(ns, add_special_tokens=False)
         for p_idx, instr in enumerate(use_prompts):
             cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
-                                         tokenize=False, add_generation_prompt=True) + NO_THINK
+                                         tokenize=False, add_generation_prompt=True) + NO_THINK + corrupt_prefill
             c_pre = tok.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
                 all_t.append(list(t_pre)); all_c.append(list(c_pre))
@@ -4963,6 +4966,7 @@ def run_rollout_batched_local(
             "cfg_b3_start":       (float(corr_cfg["cfg_b3_start"]) if corr_cfg.get("cfg_b3_start") is not None else None),
             "cfg_b3_end":         (float(corr_cfg["cfg_b3_end"])   if corr_cfg.get("cfg_b3_end")   is not None else None),
             "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
+            "corrupt_prefill":    corr_cfg.get("corrupt_prefill", "") or "",
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
@@ -7476,7 +7480,8 @@ cfg = DotDict({
         "cfg_b2_end":   None,
         "cfg_b3_start": None,                     # optional CFG ramp (usually leave None when CFG off)
         "cfg_b3_end":   None,
-        "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT)
+        "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT). Idea B: set to a refusal-triggering UNRELATED-harm rewrite + cfg_b3>0 to cancel the refusal direction (BLOOM_NEUTRAL_PROMPT).
+        "corrupt_prefill": "",                    # idea C: prefill corruptor's reply past the refusal (e.g. "Sure, here's the rewritten version:\n"). BLOOM_CORRUPT_PREFILL.
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
@@ -7525,6 +7530,10 @@ if __name__ == "__main__":
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
     if os.environ.get("BLOOM_TARGET_MODEL"):
         cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
+    if os.environ.get("BLOOM_NEUTRAL_PROMPT"):
+        cfg.setdefault("corruption_output", {})["cfg_neutral_prompt"] = os.environ["BLOOM_NEUTRAL_PROMPT"]  # idea B: refusal-canceling CFG neutral
+    if os.environ.get("BLOOM_CORRUPT_PREFILL"):
+        cfg.setdefault("corruption_output", {})["corrupt_prefill"] = os.environ["BLOOM_CORRUPT_PREFILL"]    # idea C: compliance prefill
     if os.environ.get("BLOOM_FREEZE_INPUT") is not None and os.environ.get("BLOOM_FREEZE_INPUT") != "":
         cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
