@@ -7523,6 +7523,8 @@ if __name__ == "__main__":
         cfg.setdefault("rollout", {})["escalation_mode"] = os.environ["BLOOM_ESCALATION"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_NUM_ROUNDS"):
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
+    if os.environ.get("BLOOM_TARGET_MODEL"):
+        cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
     if os.environ.get("BLOOM_FREEZE_INPUT") is not None and os.environ.get("BLOOM_FREEZE_INPUT") != "":
         cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
