@@ -465,7 +465,7 @@ _LATIN_MASK_CACHE: Dict[int, List[int]] = {}
 
 # Per-LLM GPU memory share when each worker owns its own GPU. With one LLM per
 # device the worker can grab most of the memory; leave a small margin.
-DEFAULT_GPU_MEMORY_UTIL = 0.85
+DEFAULT_GPU_MEMORY_UTIL = 0.75
 
 
 def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
@@ -6563,8 +6563,8 @@ cfg = DotDict({
     # worker can grab most of the memory; the small reserve covers framework overhead.
     "evaluator_gpu_id": 0,
     "target_gpu_id":    1,
-    "evaluator_gpu_memory_utilization": 0.85,
-    "target_gpu_memory_utilization":    0.85,
+    "evaluator_gpu_memory_utilization": 0.80,
+    "target_gpu_memory_utilization":    0.80,
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
