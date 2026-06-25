@@ -76,6 +76,13 @@ DEFAULT_TEMPERATURE_DETERMINISTIC = 0.0
 
 THINKING_BUDGETS = {"none": 0, "low": 1024, "medium": 2048, "high": 4096}
 
+# No-think prefill wrapper. Qwen3 auto-opens a <think> block; this closed-block prefill
+# defangs it (forces the model to skip reasoning). NON-THINKING targets (Phi-4-mini, Llama)
+# must NOT get this literal text — set BLOOM_NO_THINK_WRAPPER=0 to make it empty. Default
+# (unset/1) = Qwen behavior, byte-identical to before. Read at import so module-level
+# constants and all generate paths pick it up.
+_NO_THINK_PREFIX = "<think>\n\n</think>\n" if os.environ.get("BLOOM_NO_THINK_WRAPPER", "1").lower() not in ("0", "false", "no") else ""
+
 
 def _effort(thinking: Any) -> str:
     """Map per-stage `thinking: bool` to the reasoning_effort string used downstream.
@@ -885,7 +892,7 @@ def batch_generate_local(
             msgs, tokenize=False, add_generation_prompt=True,
         )
         if no_think:
-            prompt += "<think>\n\n</think>\n"
+            prompt += _NO_THINK_PREFIX
         prompts.append(prompt)
 
     sampling_kwargs = dict(
@@ -960,7 +967,7 @@ def batch_logprob_local(
             context_messages, tokenize=False, add_generation_prompt=True,
         )
         if no_think:
-            context_str += "<think>\n\n</think>\n"
+            context_str += _NO_THINK_PREFIX
         context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
         target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
         if not target_ids:
@@ -2479,7 +2486,7 @@ def _score_beast_candidates(
 # we read corresponds to the actual answer position. Score scale becomes
 # avg over (n_prefix + 1) tokens, but that scale is constant across all
 # candidates so ranking is unaffected.
-_OUTPUT_SEARCH_NO_THINK_PREFIX = "<think>\n\n</think>\n"
+_OUTPUT_SEARCH_NO_THINK_PREFIX = _NO_THINK_PREFIX
 
 
 def _resolve_yes_token_id(lm: "LocalModel") -> int:
@@ -2615,7 +2622,7 @@ def _jail_generate_trs(
     j_prompt = lm_jail.tokenizer.apply_chat_template(
         j_msgs, tokenize=False, add_generation_prompt=True,
     )
-    j_prompt += "<think>\n\n</think>\n"
+    j_prompt += _NO_THINK_PREFIX
     if prefill:
         j_prompt += prefill
     j_ids = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2685,7 +2692,7 @@ def batch_generate_contrastive_local(
             target_msgs, tokenize=False, add_generation_prompt=True,
         )
         if no_think_target:
-            t_prompt += "<think>\n\n</think>\n"
+            t_prompt += _NO_THINK_PREFIX
         t_prefix = lm_target.tokenizer.encode(t_prompt, add_special_tokens=False)
 
         # ── Jail prefix: replace system, close <think>, append prefill ──
@@ -2697,7 +2704,7 @@ def batch_generate_contrastive_local(
         )
         # Close any auto-opened <think> block (Qwen3 inserts one) so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += "<think>\n\n</think>\n"
+        j_prompt += _NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         j_prefix = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2849,7 +2856,7 @@ def _corruption_generate_vllm(
         t_prompt = lm_target.tokenizer.apply_chat_template(
             target_msgs, tokenize=False, add_generation_prompt=True)
         if no_think_target:
-            t_prompt += "<think>\n\n</think>\n"
+            t_prompt += _NO_THINK_PREFIX
         t_prefix = lm_target.tokenizer.encode(t_prompt, add_special_tokens=False)
 
         # (2) corruption prefixes — one per rewrite prompt
@@ -2858,7 +2865,7 @@ def _corruption_generate_vllm(
             c_prompt = lm_corrupt.tokenizer.apply_chat_template(
                 build_corruption_msgs(instr, base_answer),
                 tokenize=False, add_generation_prompt=True)
-            c_prompt += "<think>\n\n</think>\n"
+            c_prompt += _NO_THINK_PREFIX
             c_prefixes.append(lm_corrupt.tokenizer.encode(c_prompt, add_special_tokens=False))
 
         # (3) PoE sample: num_prompts prefixes × spp samples each
@@ -2915,9 +2922,24 @@ def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> 
         target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
     mc = AutoModelForCausalLM.from_pretrained(
         corrupt_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    # Resolve the chat turn-end EOS. tok.eos_token_id is often the document EOS
+    # (e.g. Phi-4-mini <|endoftext|>=199999) which the chat model rarely emits — it
+    # ends turns with <|end|> (200020), listed first in generation_config.eos_token_id.
+    # Use the generation_config turn-end so HF generation actually stops. No-op for
+    # models whose tok.eos_token_id already is the turn-end (e.g. Qwen3 <|im_end|>).
+    eos_id = tok.eos_token_id
+    try:
+        from transformers import GenerationConfig as _GenCfg
+        _ge = _GenCfg.from_pretrained(target_hf).eos_token_id
+        if isinstance(_ge, (list, tuple)) and len(_ge) > 0:
+            eos_id = int(_ge[0])
+        elif isinstance(_ge, int):
+            eos_id = int(_ge)
+    except Exception:
+        pass
     return {"mt": mt, "mc": mc, "tok": tok, "device": dev,
             "pad_id": (tok.pad_token_id if tok.pad_token_id is not None else 0),
-            "eos_id": tok.eos_token_id}
+            "eos_id": eos_id}
 
 
 def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
@@ -3132,7 +3154,10 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         import rep_penalties
         rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
-    NO_THINK = "<think>\n\n</think>\n"
+    NO_THINK = _NO_THINK_PREFIX
+    # Compliance prefill (idea C): text prefilled into the corruptor's assistant turn so it
+    # continues past the refusal decision (analogue of the jail prefill). "" = off.
+    corrupt_prefill = corruption_runtime_cfg.get("corrupt_prefill", "") or ""
 
     # target prefixes (sys+user, no-think) and vanilla baselines to rewrite
     t_pres: List[List[int]] = []
@@ -3163,7 +3188,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
             n_pre = tok.encode(ns, add_special_tokens=False)
         for p_idx, instr in enumerate(use_prompts):
             cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
-                                         tokenize=False, add_generation_prompt=True) + NO_THINK
+                                         tokenize=False, add_generation_prompt=True) + NO_THINK + corrupt_prefill
             c_pre = tok.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
                 all_t.append(list(t_pre)); all_c.append(list(c_pre))
@@ -3233,7 +3258,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
-    NO_THINK = "<think>\n\n</think>\n"
+    NO_THINK = _NO_THINK_PREFIX
 
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
@@ -3485,7 +3510,7 @@ def _build_sampling_prefix(
         msgs, tokenize=False, add_generation_prompt=True,
     )
     if no_think:
-        prompt_str += "<think>\n\n</think>\n"
+        prompt_str += _NO_THINK_PREFIX
     prompt_str += baseline_prefix
     prefix_tokens = lm.tokenizer.encode(prompt_str, add_special_tokens=False)
     return prompt_str, prefix_tokens
@@ -4224,7 +4249,7 @@ def output_search_target_response(
         )
         # Close Qwen3's auto-opened <think> block before prefill so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += "<think>\n\n</think>\n"
+        j_prompt += _NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         if baseline_prefix:
@@ -4933,7 +4958,15 @@ def run_rollout_batched_local(
             "cfg_b1":             float(corr_cfg.get("cfg_b1", 1.0)),
             "cfg_b2":             float(corr_cfg.get("cfg_b2", 10.0)),
             "cfg_b3":             float(corr_cfg.get("cfg_b3", 0.0)),
+            # Per-turn beta ramp (Crescendo output escalation): when *_start AND *_end are
+            # both set, cfg_b2 (and/or cfg_b3) is linearly interpolated start->end across
+            # turns 0..max_turns-1 in the rollout turn loop. None = no ramp (fixed cfg_b2/b3).
+            "cfg_b2_start":       (float(corr_cfg["cfg_b2_start"]) if corr_cfg.get("cfg_b2_start") is not None else None),
+            "cfg_b2_end":         (float(corr_cfg["cfg_b2_end"])   if corr_cfg.get("cfg_b2_end")   is not None else None),
+            "cfg_b3_start":       (float(corr_cfg["cfg_b3_start"]) if corr_cfg.get("cfg_b3_start") is not None else None),
+            "cfg_b3_end":         (float(corr_cfg["cfg_b3_end"])   if corr_cfg.get("cfg_b3_end")   is not None else None),
             "cfg_neutral_prompt": corr_cfg.get("cfg_neutral_prompt") or None,
+            "corrupt_prefill":    corr_cfg.get("corrupt_prefill", "") or "",
             "top_k_logprobs":     int(corr_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "target_pick")),
@@ -5502,6 +5535,13 @@ def run_rollout_batched_local(
                 # sampling against the jailbroken model; otherwise the standard
                 # vLLM generation path is used.
                 if corruption_on:
+                    # Per-turn beta ramp: linearly interpolate cfg_b2/cfg_b3 start->end
+                    # across turns (turn 0 = start, last turn = end). No-op if *_start/*_end unset.
+                    _rfrac = turn / max(1, max_turns - 1)
+                    if corruption_runtime_cfg.get("cfg_b2_start") is not None and corruption_runtime_cfg.get("cfg_b2_end") is not None:
+                        corruption_runtime_cfg["cfg_b2"] = corruption_runtime_cfg["cfg_b2_start"] + _rfrac * (corruption_runtime_cfg["cfg_b2_end"] - corruption_runtime_cfg["cfg_b2_start"])
+                    if corruption_runtime_cfg.get("cfg_b3_start") is not None and corruption_runtime_cfg.get("cfg_b3_end") is not None:
+                        corruption_runtime_cfg["cfg_b3"] = corruption_runtime_cfg["cfg_b3_start"] + _rfrac * (corruption_runtime_cfg["cfg_b3_end"] - corruption_runtime_cfg["cfg_b3_start"])
                     corr_result = batch_generate_corruption_local(
                         lm_target, lm_corrupt, corruption_runtime_cfg,
                         [target_msgs], target_max_tokens, temperature, no_think_target,
@@ -5510,6 +5550,8 @@ def run_rollout_batched_local(
                     corruption_pool_data.append({
                         "variation_index": var_idx,
                         "turn": turn + 1,
+                        "cfg_b2_used": round(corruption_runtime_cfg["cfg_b2"], 3),
+                        "cfg_b3_used": round(corruption_runtime_cfg["cfg_b3"], 3),
                         "pool": corr_result["pool"],
                     })
                 elif (jail_runtime_cfg is not None
@@ -7434,7 +7476,12 @@ cfg = DotDict({
         "cfg_b1": 1.0,                            # weight on the target (clean-context) logits
         "cfg_b2": 10.0,                           # weight on the offensive-rewrite-prompt logits
         "cfg_b3": 0.0,                            # weight subtracted on the neutral-rewrite-prompt (CFG). 0 = OFF. For CFG use ~b2/2.
-        "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT)
+        "cfg_b2_start": None,                     # Crescendo output-escalation: ramp cfg_b2 linearly start->end across turns (None=no ramp, use fixed cfg_b2). BLOOM_CFG_B2_START/END.
+        "cfg_b2_end":   None,
+        "cfg_b3_start": None,                     # optional CFG ramp (usually leave None when CFG off)
+        "cfg_b3_end":   None,
+        "cfg_neutral_prompt": None,               # neutral prompt for CFG (None = _DEFAULT_CFG_NEUTRAL_PROMPT). Idea B: set to a refusal-triggering UNRELATED-harm rewrite + cfg_b3>0 to cancel the refusal direction (BLOOM_NEUTRAL_PROMPT).
+        "corrupt_prefill": "",                    # idea C: prefill corruptor's reply past the refusal (e.g. "Sure, here's the rewritten version:\n"). BLOOM_CORRUPT_PREFILL.
         "selection": "target_pick",               # best-of-N selection (only target_pick wired in v1)
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from corruption model
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
@@ -7481,6 +7528,12 @@ if __name__ == "__main__":
         cfg.setdefault("rollout", {})["escalation_mode"] = os.environ["BLOOM_ESCALATION"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_NUM_ROUNDS"):
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
+    if os.environ.get("BLOOM_TARGET_MODEL"):
+        cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
+    if os.environ.get("BLOOM_NEUTRAL_PROMPT"):
+        cfg.setdefault("corruption_output", {})["cfg_neutral_prompt"] = os.environ["BLOOM_NEUTRAL_PROMPT"]  # idea B: refusal-canceling CFG neutral
+    if os.environ.get("BLOOM_CORRUPT_PREFILL"):
+        cfg.setdefault("corruption_output", {})["corrupt_prefill"] = os.environ["BLOOM_CORRUPT_PREFILL"]    # idea C: compliance prefill
     if os.environ.get("BLOOM_FREEZE_INPUT") is not None and os.environ.get("BLOOM_FREEZE_INPUT") != "":
         cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
@@ -7496,6 +7549,11 @@ if __name__ == "__main__":
     for _bk in ("BLOOM_CFG_B1", "BLOOM_CFG_B2", "BLOOM_CFG_B3"):
         if os.environ.get(_bk):
             cfg.setdefault("corruption_output", {})["cfg_b" + _bk[-1]] = float(os.environ[_bk])
+    # Per-turn beta ramp (Crescendo output escalation): start->end across turns.
+    for _rk in ("BLOOM_CFG_B2_START", "BLOOM_CFG_B2_END", "BLOOM_CFG_B3_START", "BLOOM_CFG_B3_END"):
+        if os.environ.get(_rk):
+            _key = "cfg_b" + _rk[len("BLOOM_CFG_B"):].lower()  # BLOOM_CFG_B2_START -> cfg_b2_start
+            cfg.setdefault("corruption_output", {})[_key] = float(os.environ[_rk])
     if os.environ.get("BLOOM_NUM_PROMPTS"):
         cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
     if os.environ.get("BLOOM_SPP"):
