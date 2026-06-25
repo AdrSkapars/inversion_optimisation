@@ -76,6 +76,13 @@ DEFAULT_TEMPERATURE_DETERMINISTIC = 0.0
 
 THINKING_BUDGETS = {"none": 0, "low": 1024, "medium": 2048, "high": 4096}
 
+# No-think prefill wrapper. Qwen3 auto-opens a <think> block; this closed-block prefill
+# defangs it (forces the model to skip reasoning). NON-THINKING targets (Phi-4-mini, Llama)
+# must NOT get this literal text — set BLOOM_NO_THINK_WRAPPER=0 to make it empty. Default
+# (unset/1) = Qwen behavior, byte-identical to before. Read at import so module-level
+# constants and all generate paths pick it up.
+_NO_THINK_PREFIX = "<think>\n\n</think>\n" if os.environ.get("BLOOM_NO_THINK_WRAPPER", "1").lower() not in ("0", "false", "no") else ""
+
 
 def _effort(thinking: Any) -> str:
     """Map per-stage `thinking: bool` to the reasoning_effort string used downstream.
@@ -885,7 +892,7 @@ def batch_generate_local(
             msgs, tokenize=False, add_generation_prompt=True,
         )
         if no_think:
-            prompt += "<think>\n\n</think>\n"
+            prompt += _NO_THINK_PREFIX
         prompts.append(prompt)
 
     sampling_kwargs = dict(
@@ -960,7 +967,7 @@ def batch_logprob_local(
             context_messages, tokenize=False, add_generation_prompt=True,
         )
         if no_think:
-            context_str += "<think>\n\n</think>\n"
+            context_str += _NO_THINK_PREFIX
         context_ids = lm.tokenizer.encode(context_str, add_special_tokens=False)
         target_ids = lm.tokenizer.encode(target_text, add_special_tokens=False)
         if not target_ids:
@@ -2479,7 +2486,7 @@ def _score_beast_candidates(
 # we read corresponds to the actual answer position. Score scale becomes
 # avg over (n_prefix + 1) tokens, but that scale is constant across all
 # candidates so ranking is unaffected.
-_OUTPUT_SEARCH_NO_THINK_PREFIX = "<think>\n\n</think>\n"
+_OUTPUT_SEARCH_NO_THINK_PREFIX = _NO_THINK_PREFIX
 
 
 def _resolve_yes_token_id(lm: "LocalModel") -> int:
@@ -2615,7 +2622,7 @@ def _jail_generate_trs(
     j_prompt = lm_jail.tokenizer.apply_chat_template(
         j_msgs, tokenize=False, add_generation_prompt=True,
     )
-    j_prompt += "<think>\n\n</think>\n"
+    j_prompt += _NO_THINK_PREFIX
     if prefill:
         j_prompt += prefill
     j_ids = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2685,7 +2692,7 @@ def batch_generate_contrastive_local(
             target_msgs, tokenize=False, add_generation_prompt=True,
         )
         if no_think_target:
-            t_prompt += "<think>\n\n</think>\n"
+            t_prompt += _NO_THINK_PREFIX
         t_prefix = lm_target.tokenizer.encode(t_prompt, add_special_tokens=False)
 
         # ── Jail prefix: replace system, close <think>, append prefill ──
@@ -2697,7 +2704,7 @@ def batch_generate_contrastive_local(
         )
         # Close any auto-opened <think> block (Qwen3 inserts one) so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += "<think>\n\n</think>\n"
+        j_prompt += _NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         j_prefix = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2849,7 +2856,7 @@ def _corruption_generate_vllm(
         t_prompt = lm_target.tokenizer.apply_chat_template(
             target_msgs, tokenize=False, add_generation_prompt=True)
         if no_think_target:
-            t_prompt += "<think>\n\n</think>\n"
+            t_prompt += _NO_THINK_PREFIX
         t_prefix = lm_target.tokenizer.encode(t_prompt, add_special_tokens=False)
 
         # (2) corruption prefixes — one per rewrite prompt
@@ -2858,7 +2865,7 @@ def _corruption_generate_vllm(
             c_prompt = lm_corrupt.tokenizer.apply_chat_template(
                 build_corruption_msgs(instr, base_answer),
                 tokenize=False, add_generation_prompt=True)
-            c_prompt += "<think>\n\n</think>\n"
+            c_prompt += _NO_THINK_PREFIX
             c_prefixes.append(lm_corrupt.tokenizer.encode(c_prompt, add_special_tokens=False))
 
         # (3) PoE sample: num_prompts prefixes × spp samples each
@@ -3132,7 +3139,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         import rep_penalties
         rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
-    NO_THINK = "<think>\n\n</think>\n"
+    NO_THINK = _NO_THINK_PREFIX
 
     # target prefixes (sys+user, no-think) and vanilla baselines to rewrite
     t_pres: List[List[int]] = []
@@ -3233,7 +3240,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
-    NO_THINK = "<think>\n\n</think>\n"
+    NO_THINK = _NO_THINK_PREFIX
 
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
@@ -3485,7 +3492,7 @@ def _build_sampling_prefix(
         msgs, tokenize=False, add_generation_prompt=True,
     )
     if no_think:
-        prompt_str += "<think>\n\n</think>\n"
+        prompt_str += _NO_THINK_PREFIX
     prompt_str += baseline_prefix
     prefix_tokens = lm.tokenizer.encode(prompt_str, add_special_tokens=False)
     return prompt_str, prefix_tokens
@@ -4224,7 +4231,7 @@ def output_search_target_response(
         )
         # Close Qwen3's auto-opened <think> block before prefill so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += "<think>\n\n</think>\n"
+        j_prompt += _NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         if baseline_prefix:
