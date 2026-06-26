@@ -3203,12 +3203,16 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                                     target_floor=target_floor, corrupt_only=corrupt_only,
                                     n_prefs=(all_n[s:s + poe_gen_batch] if use_neutral else None),
                                     poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3, rep_fn=rep_fn)
-    cand_texts_all = [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip()
-                      for g in gen_all]
+    # Keep the EXACT generated token-ids (eos-stripped) per candidate. Scoring/storage uses
+    # these instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
+    # tokenizers (Phi) and produced impossibly-low probs. These ids are saved into the
+    # transcript (gen_token_ids) so score_tokens.py can compute exact probabilities.
+    cand_ids_all = [[x for x in g if x != eos_id] for g in gen_all]
+    cand_texts_all = [tok.decode(ids, skip_special_tokens=True).strip() for ids in cand_ids_all]
     # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
-    # scoring matches generation), then partitioned back per candidate.
-    score_items = [(list(t_pres[owner[k]]) + tok.encode(cand_texts_all[k], add_special_tokens=False),
-                    len(t_pres[owner[k]])) for k in range(len(cand_texts_all))]
+    # scoring matches generation), using the EXACT generated ids (no re-encode artifact).
+    score_items = [(list(t_pres[owner[k]]) + cand_ids_all[k],
+                    len(t_pres[owner[k]])) for k in range(len(cand_ids_all))]
     lps_all = _hf_score(mt, score_items, pad_id, device)
 
     import zlib as _zlib, collections as _coll
@@ -3222,7 +3226,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     per_cand: List[List[Dict]] = [[] for _ in range(len(t_pres))]
     for k in range(len(cand_texts_all)):
         lp = lps_all[k]; p_idx, s_idx = meta[k]; _txt = cand_texts_all[k]
-        per_cand[owner[k]].append({"text": _txt, "target_lp": lp,
+        per_cand[owner[k]].append({"text": _txt, "ids": cand_ids_all[k], "target_lp": lp,
                                    "target_p_pct": (math.exp(lp) * 100 if lp is not None else None),
                                    "d3": _sel_d3(_txt), "cr": _sel_cr(_txt),
                                    "prompt_index": p_idx, "sample_index": s_idx})
@@ -3234,14 +3238,14 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     results: List[Dict] = []
     for pool in per_cand:
         if not pool:
-            results.append({"best_text": "", "pool": pool}); continue
+            results.append({"best_text": "", "best_ids": None, "pool": pool}); continue
         if _sel == "filter_target":
             _surv = [c for c in pool if c.get("d3", 0.0) >= _tau]
             _chosen = max(_surv, key=_keyfns["target_pick"]) if _surv else max(pool, key=lambda d: d.get("d3", 0.0))
             pool.sort(key=lambda c: 1 if c is _chosen else 0, reverse=True)
         else:
             pool.sort(key=_kf, reverse=True)
-        results.append({"best_text": pool[0]["text"], "pool": pool})
+        results.append({"best_text": pool[0]["text"], "best_ids": pool[0].get("ids"), "pool": pool})
     return results
 
 
@@ -5530,6 +5534,7 @@ def run_rollout_batched_local(
 
             # ── Turn loop ─────────────────────────────────────────────────
             for turn in range(max_turns):
+                _corr_gen_ids = None  # exact generated token-ids (corruption path) for accurate scoring
                 # Target responds. When jailbroken contrastive sampling is on,
                 # the target's natural reply is generated via PoE-weighted
                 # sampling against the jailbroken model; otherwise the standard
@@ -5547,6 +5552,7 @@ def run_rollout_batched_local(
                         [target_msgs], target_max_tokens, temperature, no_think_target,
                     )[0]
                     raw_target = corr_result["best_text"]
+                    _corr_gen_ids = corr_result.get("best_ids")
                     corruption_pool_data.append({
                         "variation_index": var_idx,
                         "turn": turn + 1,
@@ -5613,6 +5619,8 @@ def run_rollout_batched_local(
                 current_turn = turn + 1
 
                 tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
+                if _corr_gen_ids and target_resp == raw_target:
+                    tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> score_tokens computes exact probs (no re-encode)
                 if target_reason:
                     tmsg["reasoning"] = target_reason
                 if output_search_on:
