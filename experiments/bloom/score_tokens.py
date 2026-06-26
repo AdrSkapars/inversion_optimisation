@@ -25,9 +25,11 @@ _MODEL_CACHE = {}
 
 def _get_model(name):
     if name not in _MODEL_CACHE:
-        tok = AutoTokenizer.from_pretrained(name)
+        # scoring model is always already cached (the run used it) -> local_files_only avoids
+        # the network/model_info check (box HF_ENDPOINT mirror is flaky).
+        tok = AutoTokenizer.from_pretrained(name, local_files_only=True)
         mt = AutoModelForCausalLM.from_pretrained(
-            name, dtype=torch.bfloat16, attn_implementation="sdpa").to(DEV).eval()
+            name, dtype=torch.bfloat16, attn_implementation="sdpa", local_files_only=True).to(DEV).eval()
         _MODEL_CACHE[name] = (tok, mt)
     return _MODEL_CACHE[name]
 
