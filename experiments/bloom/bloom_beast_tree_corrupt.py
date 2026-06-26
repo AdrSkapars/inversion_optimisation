@@ -77,11 +77,25 @@ DEFAULT_TEMPERATURE_DETERMINISTIC = 0.0
 THINKING_BUDGETS = {"none": 0, "low": 1024, "medium": 2048, "high": 4096}
 
 # No-think prefill wrapper. Qwen3 auto-opens a <think> block; this closed-block prefill
-# defangs it (forces the model to skip reasoning). NON-THINKING targets (Phi-4-mini, Llama)
-# must NOT get this literal text — set BLOOM_NO_THINK_WRAPPER=0 to make it empty. Default
-# (unset/1) = Qwen behavior, byte-identical to before. Read at import so module-level
-# constants and all generate paths pick it up.
-_NO_THINK_PREFIX = "<think>\n\n</think>\n" if os.environ.get("BLOOM_NO_THINK_WRAPPER", "1").lower() not in ("0", "false", "no") else ""
+# defangs it (forces the model to skip reasoning). Non-thinking models (Phi-4-mini, Llama)
+# must NOT get this literal text. The wrapper is now DERIVED PER MODEL from model_registry
+# (no manual BLOOM_NO_THINK_WRAPPER flag, which could silently mismatch the actual model) —
+# `_set_think_prefixes(target, corruptor)` is called once in run_pipeline from the cfg model
+# names. `_NO_THINK_PREFIX` is the TARGET's wrapper, `_CORRUPT_NO_THINK_PREFIX` the
+# CORRUPTOR's (they may differ — e.g. Qwen corruptor steering a non-thinking target).
+import model_registry as _mreg
+_NO_THINK_PREFIX = ""          # target wrapper; set by _set_think_prefixes()
+_CORRUPT_NO_THINK_PREFIX = ""  # corruptor wrapper; set by _set_think_prefixes()
+
+
+def _set_think_prefixes(target_name: str, corrupt_name: Optional[str] = None) -> None:
+    """Resolve the target/corruptor no-think wrappers from the model registry. Raises
+    (via model_registry) if either model is unregistered, so an unknown model fails
+    immediately and clearly rather than silently getting the wrong wrapper."""
+    global _NO_THINK_PREFIX, _CORRUPT_NO_THINK_PREFIX, _OUTPUT_SEARCH_NO_THINK_PREFIX
+    _NO_THINK_PREFIX = _mreg.think_prefix(target_name)
+    _CORRUPT_NO_THINK_PREFIX = _mreg.think_prefix(corrupt_name) if corrupt_name else _NO_THINK_PREFIX
+    _OUTPUT_SEARCH_NO_THINK_PREFIX = _NO_THINK_PREFIX
 
 
 def _effort(thinking: Any) -> str:
@@ -2622,7 +2636,7 @@ def _jail_generate_trs(
     j_prompt = lm_jail.tokenizer.apply_chat_template(
         j_msgs, tokenize=False, add_generation_prompt=True,
     )
-    j_prompt += _NO_THINK_PREFIX
+    j_prompt += _CORRUPT_NO_THINK_PREFIX
     if prefill:
         j_prompt += prefill
     j_ids = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2704,7 +2718,7 @@ def batch_generate_contrastive_local(
         )
         # Close any auto-opened <think> block (Qwen3 inserts one) so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += _NO_THINK_PREFIX
+        j_prompt += _CORRUPT_NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         j_prefix = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
@@ -2865,7 +2879,7 @@ def _corruption_generate_vllm(
             c_prompt = lm_corrupt.tokenizer.apply_chat_template(
                 build_corruption_msgs(instr, base_answer),
                 tokenize=False, add_generation_prompt=True)
-            c_prompt += _NO_THINK_PREFIX
+            c_prompt += _CORRUPT_NO_THINK_PREFIX
             c_prefixes.append(lm_corrupt.tokenizer.encode(c_prompt, add_special_tokens=False))
 
         # (3) PoE sample: num_prompts prefixes × spp samples each
@@ -2914,32 +2928,61 @@ def _corruption_generate_vllm(
 # Both 4B models run as HF models in THIS process on the target GPU; the eval
 # stays in its vLLM subprocess on the eval GPU (it only handles strings).
 # =============================================================================
-def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> Dict:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    dev = f"cuda:{gpu_id}"
-    tok = AutoTokenizer.from_pretrained(target_hf)
-    mt = AutoModelForCausalLM.from_pretrained(
-        target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
-    mc = AutoModelForCausalLM.from_pretrained(
-        corrupt_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
-    # Resolve the chat turn-end EOS. tok.eos_token_id is often the document EOS
-    # (e.g. Phi-4-mini <|endoftext|>=199999) which the chat model rarely emits — it
-    # ends turns with <|end|> (200020), listed first in generation_config.eos_token_id.
-    # Use the generation_config turn-end so HF generation actually stops. No-op for
-    # models whose tok.eos_token_id already is the turn-end (e.g. Qwen3 <|im_end|>).
+def _turn_end_eos(model_hf: str, tok) -> int:
+    """The chat turn-end EOS for a model, resolved automatically (no per-model hardcoding).
+    tok.eos_token_id is often the document EOS (e.g. Phi-4-mini <|endoftext|>=199999) which
+    the chat model rarely emits — it ends turns with <|end|> (200020), listed first in
+    generation_config.eos_token_id. Prefer the generation_config turn-end so HF generation
+    actually stops; no-op for models whose tok.eos_token_id already is the turn-end (Qwen3
+    <|im_end|>). Falls back to tok.eos_token_id if generation_config is unavailable."""
     eos_id = tok.eos_token_id
     try:
         from transformers import GenerationConfig as _GenCfg
-        _ge = _GenCfg.from_pretrained(target_hf).eos_token_id
+        _ge = _GenCfg.from_pretrained(model_hf).eos_token_id
         if isinstance(_ge, (list, tuple)) and len(_ge) > 0:
             eos_id = int(_ge[0])
         elif isinstance(_ge, int):
             eos_id = int(_ge)
     except Exception:
         pass
-    return {"mt": mt, "mc": mc, "tok": tok, "device": dev,
+    return eos_id
+
+
+def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> Dict:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    dev = f"cuda:{gpu_id}"
+    # Target and corruptor may be DIFFERENT models — load each model's OWN tokenizer and
+    # build each model's prompts with it (a Phi prompt tokenized by the Qwen tokenizer, or
+    # vice-versa, produces ids in the wrong vocab -> garbage or an out-of-range embedding
+    # index). Reuse one object when they happen to be identical.
+    same = (corrupt_hf == target_hf)
+    tok = AutoTokenizer.from_pretrained(target_hf)
+    tok_c = tok if same else AutoTokenizer.from_pretrained(corrupt_hf)
+    mt = AutoModelForCausalLM.from_pretrained(
+        target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    mc = AutoModelForCausalLM.from_pretrained(
+        corrupt_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    # PoE adds the target and corruptor logits index-for-index (z = b1*t + b2*c - b3*n), so
+    # the two models MUST share a vocabulary. A mismatch (e.g. Phi 200064 vs Qwen 151936)
+    # otherwise surfaces only as a cryptic CUDA device-side assert deep inside generation —
+    # fail loud and clear, at load time, naming both models instead.
+    vt, vc = int(mt.config.vocab_size), int(mc.config.vocab_size)
+    if vt != vc:
+        raise ValueError(
+            f"Corruption PoE requires a vocab-aligned target and corruptor, but target "
+            f"{target_hf!r} has vocab_size={vt} while corruptor {corrupt_hf!r} has "
+            f"vocab_size={vc}. Pick a corruptor in the target's tokenizer family (an "
+            f"abliterated/finetuned variant of the same base, or the target itself for "
+            f"self-corruption).")
+    # Keep the module-level vLLM-path globals consistent with the loaded models too, so every
+    # entry point (run_pipeline, the MCTS driver, etc.) agrees on the wrappers.
+    _set_think_prefixes(target_hf, corrupt_hf)
+    return {"mt": mt, "mc": mc, "tok": tok, "tok_c": tok_c, "device": dev,
             "pad_id": (tok.pad_token_id if tok.pad_token_id is not None else 0),
-            "eos_id": eos_id}
+            "eos_id": _turn_end_eos(target_hf, tok),
+            # per-model no-think wrappers (registry-derived; may differ across the two models)
+            "target_no_think":  _mreg.think_prefix(target_hf),
+            "corrupt_no_think": _mreg.think_prefix(corrupt_hf)}
 
 
 def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
@@ -3125,7 +3168,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                             temperature: float, no_think_target: bool) -> List[Dict]:
     """[engine=hf_full] Exact full-vocab PoE + best-of-N target-pick. Returns one
     {"best_text","pool"} per scenario (same shape as the vLLM path)."""
-    mt, mc, tok, device = hf["mt"], hf["mc"], hf["tok"], hf["device"]
+    mt, mc, tok, tok_c, device = hf["mt"], hf["mc"], hf["tok"], hf["tok_c"], hf["device"]
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
     prompts     = corruption_runtime_cfg["rewrite_prompts"]
     num_prompts = max(1, min(int(corruption_runtime_cfg.get("num_prompts", len(prompts))), len(prompts)))
@@ -3154,7 +3197,11 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         import rep_penalties
         rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
-    NO_THINK = _NO_THINK_PREFIX
+    # Per-model no-think wrappers (registry-derived): the TARGET prefix uses the target's
+    # wrapper; the CORRUPTOR & neutral prefixes use the corruptor's (they can differ — e.g.
+    # a Qwen corruptor, which needs a closed <think>, steering a non-thinking target).
+    NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)
+    NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)
     # Compliance prefill (idea C): text prefilled into the corruptor's assistant turn so it
     # continues past the refusal decision (analogue of the jail prefill). "" = off.
     corrupt_prefill = corruption_runtime_cfg.get("corrupt_prefill", "") or ""
@@ -3183,13 +3230,14 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
         n_pre = None
         if use_neutral:
-            ns = tok.apply_chat_template(build_corruption_msgs(cfg_neutral, base),
-                                         tokenize=False, add_generation_prompt=True) + NO_THINK
-            n_pre = tok.encode(ns, add_special_tokens=False)
+            # neutral & corrupt prompts are generated by the CORRUPTOR -> corruptor tokenizer + wrapper
+            ns = tok_c.apply_chat_template(build_corruption_msgs(cfg_neutral, base),
+                                           tokenize=False, add_generation_prompt=True) + NO_THINK_C
+            n_pre = tok_c.encode(ns, add_special_tokens=False)
         for p_idx, instr in enumerate(use_prompts):
-            cs = tok.apply_chat_template(build_corruption_msgs(instr, base),
-                                         tokenize=False, add_generation_prompt=True) + NO_THINK + corrupt_prefill
-            c_pre = tok.encode(cs, add_special_tokens=False)
+            cs = tok_c.apply_chat_template(build_corruption_msgs(instr, base),
+                                           tokenize=False, add_generation_prompt=True) + NO_THINK_C + corrupt_prefill
+            c_pre = tok_c.encode(cs, add_special_tokens=False)
             for s_idx in range(spp):
                 all_t.append(list(t_pre)); all_c.append(list(c_pre))
                 if use_neutral: all_n.append(list(n_pre))
@@ -3257,12 +3305,13 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     this process (reuses the corruption hf_full helpers). Jail prefix = jail
     system prompt + closed <think> + prefill (no baseline answer); target prefix
     = the natural chat template. Returns one decoded string per scenario."""
-    mt, mc, tok, device = hf["mt"], hf["mc"], hf["tok"], hf["device"]
+    mt, mc, tok, tok_c, device = hf["mt"], hf["mc"], hf["tok"], hf["tok_c"], hf["device"]
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
-    NO_THINK = _NO_THINK_PREFIX
+    NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)       # target wrapper
+    NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
 
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
@@ -3274,10 +3323,11 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
         j_msgs = [m for m in tm if m.get("role") != "system"]
         if sys_prompt:
             j_msgs = [{"role": "system", "content": sys_prompt}] + j_msgs
-        js = tok.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK
+        # jail prompt is generated by the CORRUPTOR -> corruptor tokenizer + wrapper
+        js = tok_c.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
         if prefill:
             js += prefill
-        j_prefs.append(tok.encode(js, add_special_tokens=False))
+        j_prefs.append(tok_c.encode(js, add_special_tokens=False))
     gen = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
                            pad_id, eos_id, device)
     return [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
@@ -4253,7 +4303,7 @@ def output_search_target_response(
         )
         # Close Qwen3's auto-opened <think> block before prefill so the next-
         # token distribution isn't dominated by </think>.
-        j_prompt += _NO_THINK_PREFIX
+        j_prompt += _CORRUPT_NO_THINK_PREFIX
         if prefill:
             j_prompt += prefill
         if baseline_prefix:
@@ -7209,6 +7259,14 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     _DEFAULT_SEED = cfg.get("seed")
     if _DEFAULT_SEED is not None:
         random.seed(_DEFAULT_SEED)
+
+    # Derive the per-model no-think wrappers from the cfg MODEL NAMES (target + corruptor).
+    # This is the only place model identity drives behavior, and it is registry-backed: an
+    # unregistered model raises here (before any GPU work) rather than silently mis-wrapping.
+    # Switching models therefore means changing only the cfg model name(s) — nothing else.
+    _corr_name = ((cfg.get("corruption_output", {}) or {}).get("model")
+                  or (cfg.get("jailbroken_output", {}) or {}).get("model") or None)
+    _set_think_prefixes(cfg.rollout.get("target"), _corr_name)
 
     # Resolve output directory
     folder_name = cfg.get("folder_name", "runs/default")
