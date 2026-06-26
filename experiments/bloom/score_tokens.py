@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys, glob, os, json, statistics as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import model_registry  # central per-model behavior (think-block wrapper); fail-loud for unknowns
 
 DEV = "cuda:0"
 _FALLBACK = "Qwen/Qwen3-4B"
@@ -48,7 +49,8 @@ def score_dir(run_dir):
     tok, mt = _get_model(model_name)
     # Qwen3 auto-opens a <think> block (defanged with a closed-think prefill at generation);
     # non-thinking models (Phi, Llama) use no wrapper. Match generation so the prefix lines up.
-    no_think = "<think>\n\n</think>\n" if "qwen" in model_name.lower() else ""
+    # Registry-derived (same source of truth as generation) — raises for an unregistered model.
+    no_think = model_registry.think_prefix(model_name)
     tfiles = sorted(glob.glob(os.path.join(run_dir, "transcripts", "*.json")))
     if not tfiles:
         print(f"  no transcripts under {run_dir}"); return None
