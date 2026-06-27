@@ -2929,23 +2929,34 @@ def _corruption_generate_vllm(
 # stays in its vLLM subprocess on the eval GPU (it only handles strings).
 # =============================================================================
 def _turn_end_eos(model_hf: str, tok) -> int:
-    """The chat turn-end EOS for a model, resolved automatically (no per-model hardcoding).
-    tok.eos_token_id is often the document EOS (e.g. Phi-4-mini <|endoftext|>=199999) which
-    the chat model rarely emits — it ends turns with <|end|> (200020), listed first in
-    generation_config.eos_token_id. Prefer the generation_config turn-end so HF generation
-    actually stops; no-op for models whose tok.eos_token_id already is the turn-end (Qwen3
-    <|im_end|>). Falls back to tok.eos_token_id if generation_config is unavailable."""
-    eos_id = tok.eos_token_id
+    """The chat TURN-END token id, resolved GENERICALLY (no per-model hardcoding, no positional
+    heuristic). tok.eos_token_id is often the document EOS (Phi <|endoftext|>=199999, Gemma
+    <eos>=1) which a chat model rarely emits — it ends turns with a turn marker (Phi <|end|>,
+    Gemma <end_of_turn>, Qwen <|im_end|>). generation_config lists several eos and their ORDER
+    differs across models (turn-end is element[0] for Qwen/Phi but element[1] for Gemma), so we
+    can't index positionally. Instead render an assistant turn and pick whichever eos candidate
+    the chat template actually emits to CLOSE the turn — that is the id HF generation must stop
+    on. Falls back to tok.eos_token_id."""
     try:
         from transformers import GenerationConfig as _GenCfg
         _ge = _GenCfg.from_pretrained(model_hf).eos_token_id
-        if isinstance(_ge, (list, tuple)) and len(_ge) > 0:
-            eos_id = int(_ge[0])
-        elif isinstance(_ge, int):
-            eos_id = int(_ge)
+        cands = [int(x) for x in (_ge if isinstance(_ge, (list, tuple)) else [_ge])]
+    except Exception:
+        cands = []
+    if tok.eos_token_id is not None and int(tok.eos_token_id) not in cands:
+        cands.append(int(tok.eos_token_id))
+    if not cands:
+        return tok.eos_token_id
+    try:
+        rendered = tok.apply_chat_template(
+            [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+            tokenize=True, add_generation_prompt=False)
+        for c in cands:
+            if c in rendered:          # the candidate the template emits to end the turn
+                return c
     except Exception:
         pass
-    return eos_id
+    return cands[0]
 
 
 def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> Dict:
