@@ -17,6 +17,8 @@ _USES_THINK_BLOCK = {
     "qwen/qwen3-4b": True,
     "microsoft/phi-4-mini-instruct": False,
     "duoneural/phi-4-mini-abliterated": False,
+    "google/gemma-3-4b-it": False,
+    "google/gemma-4-e4b-it": False,
 }
 
 _THINK_PREFILL = "<think>\n\n</think>\n"
