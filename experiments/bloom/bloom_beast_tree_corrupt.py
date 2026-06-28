@@ -7561,7 +7561,9 @@ if __name__ == "__main__":
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_MAXPREFIX"):
-        cfg.setdefault("input_search", {})["max_prefix_length"] = int(os.environ["BLOOM_INPUT_MAXPREFIX"])  # BEAST max_prefix_length (e.g. -50). None handled separately; this is for explicit ints.
+        cfg.setdefault("input_search", {})["max_prefix_length"] = int(os.environ["BLOOM_INPUT_MAXPREFIX"])  # BEAST max_prefix_length (e.g. -50, or 0 = regenerate whole body). None handled separately; this is for explicit ints.
+    if os.environ.get("BLOOM_INPUT_ITERS"):
+        cfg.setdefault("input_search", {})["max_num_iterations"] = int(os.environ["BLOOM_INPUT_ITERS"])  # BEAST max_num_iterations (e.g. 10).
     if os.environ.get("BLOOM_IO_SEARCH") is not None and os.environ.get("BLOOM_IO_SEARCH") != "":
         _io = cfg.setdefault("input_and_output_search", {})
         _io["enabled"] = os.environ["BLOOM_IO_SEARCH"].lower() in ("1", "true", "yes")
