@@ -2977,7 +2977,14 @@ def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> 
     # the two models MUST share a vocabulary. A mismatch (e.g. Phi 200064 vs Qwen 151936)
     # otherwise surfaces only as a cryptic CUDA device-side assert deep inside generation —
     # fail loud and clear, at load time, naming both models instead.
-    vt, vc = int(mt.config.vocab_size), int(mc.config.vocab_size)
+    def _model_vocab(cfg):
+        # multimodal models (Gemma3/Gemma4 *ForConditionalGeneration) keep vocab_size under
+        # config.text_config, not config.vocab_size — read it robustly.
+        v = getattr(cfg, "vocab_size", None)
+        if v is None:
+            v = getattr(getattr(cfg, "text_config", None), "vocab_size", None)
+        return int(v)
+    vt, vc = _model_vocab(mt.config), _model_vocab(mc.config)
     if vt != vc:
         raise ValueError(
             f"Corruption PoE requires a vocab-aligned target and corruptor, but target "
