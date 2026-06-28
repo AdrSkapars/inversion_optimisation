@@ -7680,6 +7680,17 @@ if __name__ == "__main__":
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
     if os.environ.get("BLOOM_TARGET_MODEL"):
         cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
+    if os.environ.get("BLOOM_EVAL_MODEL"):
+        # evaluator/red-team model for understanding + ideation + rollout turn-sampling
+        # (e.g. "claude-haiku-4-5" via litellm). A non-'local/' id => hosted API: it can only
+        # sample whole turns (token-level search must be off; enforced at evaluator load).
+        _eval_model = os.environ["BLOOM_EVAL_MODEL"]
+        cfg.setdefault("understanding", {})["model"] = _eval_model
+        cfg.setdefault("ideation", {})["model"] = _eval_model
+        cfg.setdefault("rollout", {})["model"] = _eval_model
+    if os.environ.get("BLOOM_JUDGE_MODEL"):
+        # judgment model (e.g. "claude-haiku-4-5"). Non-'local/' id => hosted API via litellm.
+        cfg.setdefault("judgment", {})["model"] = os.environ["BLOOM_JUDGE_MODEL"]
     if os.environ.get("BLOOM_NEUTRAL_PROMPT"):
         cfg.setdefault("corruption_output", {})["cfg_neutral_prompt"] = os.environ["BLOOM_NEUTRAL_PROMPT"]  # idea B: refusal-canceling CFG neutral
     if os.environ.get("BLOOM_CORRUPT_PREFILL"):
