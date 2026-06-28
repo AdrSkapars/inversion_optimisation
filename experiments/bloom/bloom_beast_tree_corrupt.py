@@ -7708,6 +7708,12 @@ if __name__ == "__main__":
         cfg.setdefault("rollout", {})["evaluator_thinking"] = _et
     if os.environ.get("BLOOM_JUDGE_THINKING") is not None and os.environ.get("BLOOM_JUDGE_THINKING") != "":
         cfg.setdefault("judgment", {})["thinking"] = os.environ["BLOOM_JUDGE_THINKING"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_EVAL_MAXTOK"):
+        # raise evaluator output cap — needed for a hosted-API eval WITH thinking, where the
+        # reasoning budget (e.g. medium=2048) is reserved inside max_tokens.
+        cfg.setdefault("rollout", {})["evaluator_max_tokens"] = int(os.environ["BLOOM_EVAL_MAXTOK"])
+    if os.environ.get("BLOOM_JUDGE_MAXTOK"):
+        cfg.setdefault("judgment", {})["max_tokens"] = int(os.environ["BLOOM_JUDGE_MAXTOK"])
     if os.environ.get("BLOOM_NEUTRAL_PROMPT"):
         cfg.setdefault("corruption_output", {})["cfg_neutral_prompt"] = os.environ["BLOOM_NEUTRAL_PROMPT"]  # idea B: refusal-canceling CFG neutral
     if os.environ.get("BLOOM_CORRUPT_PREFILL"):
