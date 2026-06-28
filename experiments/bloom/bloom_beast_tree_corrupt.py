@@ -878,6 +878,26 @@ def _get_local_model(hf_name: str, gpu_id: Optional[int] = None,
     return _LOCAL_MODEL_REGISTRY[key]
 
 
+class ApiModel:
+    """Hosted-API stand-in for a LocalModel, used ONLY to sample evaluator turns through
+    litellm_chat (e.g. Claude) when cfg.rollout.model is a non-'local/' id.
+
+    It samples whole messages and exposes NO tokenizer / logits / vLLM worker, so it is
+    valid only when every token-level search (input_search / output_search /
+    input_and_output_search) is OFF. That precondition is enforced where the evaluator
+    model is loaded in run_pipeline; any code path needing lm_eval.tokenizer or logits is
+    unreachable under it. Understanding / ideation / judgment route through litellm_chat
+    independently of this adapter (they take a model id, not a model object).
+    """
+
+    def __init__(self, model_id: str, max_tokens: int = 4000, reasoning_effort: str = "none"):
+        self.model_id = model_id
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        self.tokenizer = None   # no local tokenizer — token-level ops must be disabled
+        self.worker = None
+
+
 def batch_generate_local(
     lm: "LocalModel",
     messages_list: List[List[Dict]],
@@ -896,9 +916,29 @@ def batch_generate_local(
 
     allowed_token_ids: if provided, restricts sampling to this token-id set
     (vLLM SamplingParams.allowed_token_ids). Used by io_search latin-masking.
+
+    If `lm` is an ApiModel (hosted-API evaluator, e.g. Claude), each conversation is
+    sampled via litellm_chat instead of the local vLLM worker. Token-level kwargs
+    (allowed_token_ids, seed) and the no_think prefill don't apply to an API model and
+    are ignored — reasoning is governed by the adapter's reasoning_effort. This branch
+    is only ever reached for whole-turn sampling (token-level search is guaranteed off
+    when the evaluator is an ApiModel), so the missing tokenizer is never needed.
     """
     if not messages_list:
         return []
+
+    if isinstance(lm, ApiModel):
+        outs: List[str] = []
+        for msgs in messages_list:
+            resp = litellm_chat(
+                model_id=lm.model_id,
+                messages=list(msgs),
+                max_tokens=max_new_tokens,
+                reasoning_effort=lm.reasoning_effort,
+                temperature=temperature,
+            )
+            outs.append(parse_message(resp)["content"] or "")
+        return outs
 
     prompts: List[str] = []
     for msgs in messages_list:
@@ -4958,10 +4998,36 @@ def run_rollout_batched_local(
         if corr_vllm:
             print(f"  [corruption_output] vllm_topk — halving target_gpu_memory_utilization to {target_gpu_util:.3f}", flush=True)
 
-    lm_eval   = _get_local_model(evaluator_model_id[len("local/"):],
-                                 gpu_id=eval_gpu_id,
-                                 gpu_memory_utilization=eval_gpu_util,
-                                 max_model_len=eval_max_len)
+    # The evaluator may be a local vLLM model (cfg.rollout.model = "local/...") or a hosted
+    # API model (e.g. "claude-haiku-4-5") routed through litellm. An API evaluator can only
+    # SAMPLE whole turns — it has no logits/tokenizer — so every token-level search must be
+    # off. Understanding/ideation/judgment are independent (they take a model id, not lm_eval).
+    eval_is_local = evaluator_model_id.startswith("local/")
+    if not eval_is_local:
+        _api_eval_conflicts = []
+        if bool((cfg.get("input_search", {})  or {}).get("enabled", False)): _api_eval_conflicts.append("input_search")
+        if bool((cfg.get("output_search", {}) or {}).get("enabled", False)): _api_eval_conflicts.append("output_search")
+        if bool((cfg.get("input_and_output_search", {}) or {}).get("enabled", False)): _api_eval_conflicts.append("input_and_output_search")
+        if _api_eval_conflicts:
+            raise RuntimeError(
+                f"rollout.model={evaluator_model_id!r} is a hosted API model (non-'local/'). It can only "
+                f"SAMPLE evaluator turns (no logits/tokenizer for token-level search). Disable: "
+                + ", ".join(_api_eval_conflicts))
+
+    if eval_is_local:
+        lm_eval = _get_local_model(evaluator_model_id[len("local/"):],
+                                   gpu_id=eval_gpu_id,
+                                   gpu_memory_utilization=eval_gpu_util,
+                                   max_model_len=eval_max_len)
+    else:
+        lm_eval = ApiModel(
+            evaluator_model_id,
+            max_tokens=eval_max_tokens,
+            reasoning_effort=_effort(cfg.rollout.get("evaluator_thinking", False)),
+        )
+        print(f"  [evaluator] hosted API model {evaluator_model_id!r} via litellm "
+              f"(reasoning_effort={lm_eval.reasoning_effort!r}) — token-level search disabled, "
+              f"sampling evaluator turns only", flush=True)
     # In hf_full corruption mode the target runs as an HF model (loaded below); no
     # vLLM target worker is spawned.
     lm_target = None
