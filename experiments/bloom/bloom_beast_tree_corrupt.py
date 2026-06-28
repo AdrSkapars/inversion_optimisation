@@ -2374,9 +2374,15 @@ async def run_refinement(
 async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                       understanding_results: Dict, ideation_results: Dict,
                       variations_override: Optional[List[Dict]] = None) -> Dict[str, Any]:
-    """Run all rollouts. Dispatches to batched local implementation when both models are local."""
-    # Dispatch to batched local path if both evaluator and target are local models
-    if cfg.rollout.model.startswith("local/") and cfg.rollout.target.startswith("local/"):
+    """Run all rollouts. Dispatches to the batched-local implementation whenever the TARGET
+    is local — that path owns corruption / token-level search and (via ApiModel) also supports
+    a hosted-API evaluator. The pure-async orchestrator below is used only when the target
+    itself is a hosted API model (no corruption)."""
+    # The batched-local path requires a LOCAL target (corruption/search operate on the
+    # target's logits). The evaluator may be local OR a hosted API model (ApiModel routes its
+    # turn-sampling through litellm in batch_generate_local). So key the dispatch on the
+    # TARGET, not the evaluator.
+    if cfg.rollout.target.startswith("local/"):
         return run_rollout_batched_local(
             cfg, prompts_yaml, output_dir,
             understanding_results, ideation_results, variations_override,
@@ -7691,6 +7697,17 @@ if __name__ == "__main__":
     if os.environ.get("BLOOM_JUDGE_MODEL"):
         # judgment model (e.g. "claude-haiku-4-5"). Non-'local/' id => hosted API via litellm.
         cfg.setdefault("judgment", {})["model"] = os.environ["BLOOM_JUDGE_MODEL"]
+    if os.environ.get("BLOOM_EVAL_THINKING") is not None and os.environ.get("BLOOM_EVAL_THINKING") != "":
+        # toggle reasoning for understanding+ideation+rollout-evaluator. For a hosted-API eval,
+        # reasoning_effort='medium' reserves the thinking budget (2048) inside max_tokens, so the
+        # small per-call caps (eval 1200, understanding 2000) would fail litellm's budget check —
+        # set this 0 to run the API evaluator without extended thinking (also much cheaper).
+        _et = os.environ["BLOOM_EVAL_THINKING"].lower() in ("1", "true", "yes")
+        cfg.setdefault("understanding", {})["thinking"] = _et
+        cfg.setdefault("ideation", {})["thinking"] = _et
+        cfg.setdefault("rollout", {})["evaluator_thinking"] = _et
+    if os.environ.get("BLOOM_JUDGE_THINKING") is not None and os.environ.get("BLOOM_JUDGE_THINKING") != "":
+        cfg.setdefault("judgment", {})["thinking"] = os.environ["BLOOM_JUDGE_THINKING"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_NEUTRAL_PROMPT"):
         cfg.setdefault("corruption_output", {})["cfg_neutral_prompt"] = os.environ["BLOOM_NEUTRAL_PROMPT"]  # idea B: refusal-canceling CFG neutral
     if os.environ.get("BLOOM_CORRUPT_PREFILL"):
