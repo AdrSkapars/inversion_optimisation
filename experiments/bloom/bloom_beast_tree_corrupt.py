@@ -78,23 +78,66 @@ THINKING_BUDGETS = {"none": 0, "low": 1024, "medium": 2048, "high": 4096}
 
 # No-think prefill wrapper. Qwen3 auto-opens a <think> block; this closed-block prefill
 # defangs it (forces the model to skip reasoning). Non-thinking models (Phi-4-mini, Llama)
-# must NOT get this literal text. The wrapper is now DERIVED PER MODEL from model_registry
-# (no manual BLOOM_NO_THINK_WRAPPER flag, which could silently mismatch the actual model) —
+# must NOT get this literal text. The wrapper is now DERIVED PER MODEL from the think-block
+# registry below (no manual BLOOM_NO_THINK_WRAPPER flag, which could silently mismatch) —
 # `_set_think_prefixes(target, corruptor)` is called once in run_pipeline from the cfg model
 # names. `_NO_THINK_PREFIX` is the TARGET's wrapper, `_CORRUPT_NO_THINK_PREFIX` the
 # CORRUPTOR's (they may differ — e.g. Qwen corruptor steering a non-thinking target).
-import model_registry as _mreg
+# --- Per-model think-block registry (merged from former model_registry.py) ----------
+# The ONLY per-model property not auto-derivable from the model files: whether the chat
+# template auto-opens a <think> reasoning block that must be closed with a prefilled empty
+# think block (Qwen3-style). EOS/pad/vocab/tokenizer are read automatically per model.
+# To support a NEW target/corruptor: add ONE line to _USES_THINK_BLOCK. An unregistered
+# model raises immediately (uses_think_block), so it can never silently get the wrong
+# wrapper — the error message tells you exactly what to add.
+_USES_THINK_BLOCK = {
+    "qwen/qwen3-4b": True,
+    "microsoft/phi-4-mini-instruct": False,
+    "duoneural/phi-4-mini-abliterated": False,
+    "google/gemma-3-4b-it": False,
+    "google/gemma-4-e4b-it": False,
+}
+_THINK_PREFILL = "<think>\n\n</think>\n"
+
+
+def normalize(name: str) -> str:
+    """Lowercase and strip the 'local/' engine prefix used in cfg model ids."""
+    n = (name or "").strip()
+    if n.startswith("local/"):
+        n = n[len("local/"):]
+    return n.lower()
+
+
+def uses_think_block(name: str) -> bool:
+    """True if this model's chat template auto-opens a <think> block (Qwen3-style).
+    Raises ValueError for any model not in _USES_THINK_BLOCK — adding the model there
+    (with True/False) is the single, explicit step needed to support a new model."""
+    key = normalize(name)
+    if key not in _USES_THINK_BLOCK:
+        raise ValueError(
+            f"Model {name!r} is not supported: add it to _USES_THINK_BLOCK at the top of "
+            f"bloom_beast_tree_corrupt.py (value True if its chat template auto-opens a "
+            f"<think> block needing a closed-think prefill, e.g. Qwen3; else False). "
+            f"Registered: {sorted(_USES_THINK_BLOCK)}")
+    return _USES_THINK_BLOCK[key]
+
+
+def think_prefix(name: str) -> str:
+    """Closed-<think> prefill text for this model ('' if it has no auto think block)."""
+    return _THINK_PREFILL if uses_think_block(name) else ""
+
+
 _NO_THINK_PREFIX = ""          # target wrapper; set by _set_think_prefixes()
 _CORRUPT_NO_THINK_PREFIX = ""  # corruptor wrapper; set by _set_think_prefixes()
 
 
 def _set_think_prefixes(target_name: str, corrupt_name: Optional[str] = None) -> None:
-    """Resolve the target/corruptor no-think wrappers from the model registry. Raises
-    (via model_registry) if either model is unregistered, so an unknown model fails
-    immediately and clearly rather than silently getting the wrong wrapper."""
+    """Resolve the target/corruptor no-think wrappers from the think-block registry above.
+    Raises (via uses_think_block) if either model is unregistered, so an unknown model
+    fails immediately and clearly rather than silently getting the wrong wrapper."""
     global _NO_THINK_PREFIX, _CORRUPT_NO_THINK_PREFIX, _OUTPUT_SEARCH_NO_THINK_PREFIX
-    _NO_THINK_PREFIX = _mreg.think_prefix(target_name)
-    _CORRUPT_NO_THINK_PREFIX = _mreg.think_prefix(corrupt_name) if corrupt_name else _NO_THINK_PREFIX
+    _NO_THINK_PREFIX = think_prefix(target_name)
+    _CORRUPT_NO_THINK_PREFIX = think_prefix(corrupt_name) if corrupt_name else _NO_THINK_PREFIX
     _OUTPUT_SEARCH_NO_THINK_PREFIX = _NO_THINK_PREFIX
 
 
@@ -2939,8 +2982,8 @@ def _load_hf_corruption_models(target_hf: str, corrupt_hf: str, gpu_id: int) -> 
             "pad_id": (tok.pad_token_id if tok.pad_token_id is not None else 0),
             "eos_id": _turn_end_eos(target_hf, tok),
             # per-model no-think wrappers (registry-derived; may differ across the two models)
-            "target_no_think":  _mreg.think_prefix(target_hf),
-            "corrupt_no_think": _mreg.think_prefix(corrupt_hf)}
+            "target_no_think":  think_prefix(target_hf),
+            "corrupt_no_think": think_prefix(corrupt_hf)}
 
 
 def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
@@ -2984,7 +3027,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      target_floor: float = 0.0, corrupt_only: bool = False,
                      n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
-                     poe_b3: Optional[float] = None, rep_fn=None) -> List[List[int]]:
+                     poe_b3: Optional[float] = None,
+                     beta_decay_halflife: Optional[float] = None) -> List[List[int]]:
     """Full-vocab PoE: sample from softmax((t_logits/target_temp + beta*c_logits)/temp).
     target_temp<1 cools ONLY the target side (sharpens toward target-likely tokens)
     without touching the corruption logits or beta; target_temp=1.0 (default) is the
@@ -3033,7 +3077,12 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
             ncp = no.past_key_values; nl = no.logits[:, -1, :].float(); naf = na
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
-        for _ in range(max_new):
+        for step in range(max_new):
+            # W2S-style decay: corruption strength halves every `beta_decay_halflife` output
+            # tokens, so z relaxes toward the pure target distribution as the response continues
+            # (front-load to break the refusal, then let go). `step` resets each generation call,
+            # so the decay restarts at full strength on every turn's response. None = no decay.
+            bdf = (0.5 ** (step / beta_decay_halflife)) if beta_decay_halflife else 1.0
             if corrupt_only:
                 # Sample purely from the corruption distribution (target weight dropped). The
                 # target_floor mask below still uses softmax(t_logits), so the allowed set
@@ -3041,9 +3090,7 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 cl_eff = ((1.0 + cfg_gamma) * cl - cfg_gamma * nl) if cfg_on else cl
                 probs = torch.softmax(cl_eff / max(temperature, 1e-6), -1)
             else:
-                z = eb1 * tl + eb2 * cl - (eb3 * nl if cfg_on else 0.0)
-                if rep_fn is not None:
-                    z = rep_fn(z, gen)
+                z = eb1 * tl + bdf * eb2 * cl - (bdf * eb3 * nl if cfg_on else 0.0)
                 probs = torch.softmax(z / max(temperature, 1e-6), -1)
             if min_p > 0.0:
                 # min-p floor: drop tokens below min_p * max_prob (per row), renormalise
@@ -3129,13 +3176,10 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     cfg_b1 = float(corruption_runtime_cfg.get("cfg_b1", 1.0))
     cfg_b2 = float(corruption_runtime_cfg.get("cfg_b2", 10.0))
     cfg_b3 = float(corruption_runtime_cfg.get("cfg_b3", 0.0))
+    _bdh = corruption_runtime_cfg.get("beta_decay_halflife")
+    beta_decay_halflife = float(_bdh) if _bdh else None  # W2S-style per-token corruption decay
     cfg_neutral = corruption_runtime_cfg.get("cfg_neutral_prompt") or _DEFAULT_CFG_NEUTRAL_PROMPT
     use_neutral = cfg_b3 != 0.0
-    rep_spec = corruption_runtime_cfg.get("rep_penalty")
-    rep_fn = None
-    if rep_spec:
-        import rep_penalties
-        rep_fn = rep_penalties.make(rep_spec, eos_id)
     use_prompts = prompts[:num_prompts]
     # Per-model no-think wrappers (registry-derived): the TARGET prefix uses the target's
     # wrapper; the CORRUPTOR & neutral prefixes use the corruptor's (they can differ — e.g.
@@ -3190,7 +3234,8 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                                     target_temp=target_temp, min_p=min_p,
                                     target_floor=target_floor, corrupt_only=corrupt_only,
                                     n_prefs=(all_n[s:s + poe_gen_batch] if use_neutral else None),
-                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3, rep_fn=rep_fn)
+                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3,
+                                    beta_decay_halflife=beta_decay_halflife)
     # Keep the EXACT generated token-ids (eos-stripped) per candidate. Scoring/storage uses
     # these instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
     # tokenizers (Phi) and produced impossibly-low probs. These ids are saved into the
@@ -7461,6 +7506,7 @@ cfg = DotDict({
         "corrupt_prefill": "",                    # prefill the corruptor's reply past its refusal. DEFAULT "" (off). Canonical value we use: "Sure, here is the rewritten version:\n\n". Set here or via BLOOM_CORRUPT_PREFILL.
         "selection": "filter_target",             # best-of-N pick from the num_prompts pool: target_pick (max target logprob) | max_d3 | max_cr | filter_target (keep candidates with d3 >= filter_tau, then max target logprob). set via BLOOM_SELECTION.
         "filter_tau": 0.5,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.5. Only used when selection="filter_target".
+        "beta_decay_halflife": None,              # W2S-style decay: corruption strength (b2,b3) halves every N output tokens, relaxing toward the pure target; resets each turn's response. None=no decay (flat beta). Set via BLOOM_BETA_DECAY_HALFLIFE.
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
     },
 })
@@ -7554,10 +7600,10 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["num_prompts"] = int(os.environ["BLOOM_NUM_PROMPTS"])
     if os.environ.get("BLOOM_SPP"):
         cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
-    if os.environ.get("BLOOM_REP_PENALTY"):
-        cfg.setdefault("corruption_output", {})["rep_penalty"] = json.loads(os.environ["BLOOM_REP_PENALTY"])
     if os.environ.get("BLOOM_SELECTION"):
         cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
+    if os.environ.get("BLOOM_BETA_DECAY_HALFLIFE"):
+        cfg.setdefault("corruption_output", {})["beta_decay_halflife"] = float(os.environ["BLOOM_BETA_DECAY_HALFLIFE"])
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_MAXPREFIX"):

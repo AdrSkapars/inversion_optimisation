@@ -17,7 +17,35 @@ from __future__ import annotations
 import sys, glob, os, json, statistics as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import model_registry  # central per-model behavior (think-block wrapper); fail-loud for unknowns
+
+# --- Per-model think-block registry (must match bloom_beast_tree_corrupt.py) -----------
+# Whether a model's chat template auto-opens a <think> block needing a closed-think prefill
+# (Qwen3-style). To add a model: add ONE line. Unregistered models raise (fail-loud).
+_USES_THINK_BLOCK = {
+    "qwen/qwen3-4b": True,
+    "microsoft/phi-4-mini-instruct": False,
+    "duoneural/phi-4-mini-abliterated": False,
+    "google/gemma-3-4b-it": False,
+    "google/gemma-4-e4b-it": False,
+}
+_THINK_PREFILL = "<think>\n\n</think>\n"
+
+
+def _normalize(name):
+    n = (name or "").strip()
+    if n.startswith("local/"):
+        n = n[len("local/"):]
+    return n.lower()
+
+
+def think_prefix(name):
+    """Closed-<think> prefill text for this model ('' if it has no auto think block)."""
+    key = _normalize(name)
+    if key not in _USES_THINK_BLOCK:
+        raise ValueError(
+            f"Model {name!r} is not supported: add it to _USES_THINK_BLOCK at the top of "
+            f"score_tokens.py and bloom_beast_tree_corrupt.py. Registered: {sorted(_USES_THINK_BLOCK)}")
+    return _THINK_PREFILL if _USES_THINK_BLOCK[key] else ""
 
 DEV = "cuda:0"
 _FALLBACK = "Qwen/Qwen3-4B"
@@ -50,7 +78,7 @@ def score_dir(run_dir):
     # Qwen3 auto-opens a <think> block (defanged with a closed-think prefill at generation);
     # non-thinking models (Phi, Llama) use no wrapper. Match generation so the prefix lines up.
     # Registry-derived (same source of truth as generation) — raises for an unregistered model.
-    no_think = model_registry.think_prefix(model_name)
+    no_think = think_prefix(model_name)
     tfiles = sorted(glob.glob(os.path.join(run_dir, "transcripts", "*.json")))
     if not tfiles:
         print(f"  no transcripts under {run_dir}"); return None
