@@ -5,6 +5,7 @@
 % Recommended, but optional, packages for figures and better typesetting:
 \usepackage{microtype}
 \usepackage{graphicx}
+\usepackage{xcolor}  % TEMP: colour outdated (pre-pivot) sections blue
 \usepackage{subcaption}
 \usepackage{booktabs} % for professional tables
 \usepackage{adjustbox} % for scaling oversized tables to \linewidth
@@ -62,19 +63,21 @@
 
 % The \icmltitle you define below is probably too long as a header.
 % Therefore, a short form for the running title is supplied here:
-\icmltitlerunning{Submission and Formatting Instructions for ICML 2026}
+\icmltitlerunning{BLOOM-WILT: Automated LLM Evaluation Elicitation by Black-Box Logit Steering}
 
 \begin{document}
 
 \twocolumn[
-  \icmltitle{Target-Aware Tree Search for Behavioural Elicitation\\
-    in Automated LLM Evaluations}
+  \icmltitle{BLOOM-WILT: Automated LLM Evaluation Elicitation\\
+    by Black-Box Logit Steering}
   % Alternative title candidates (pick one for submission):
-  %   1. Target-Aware Tree Search for Behavioural Elicitation in Automated Red-Teaming
-  %   2. Context-Conditioned BEAST: Fluent, On-Topic Adversarial Inputs for Behavioural Evaluation
-  %   3. Exploring the Tree of Interactions: Model-Specific Elicitation for BLOOM
-  %   4. From Strategy to Suffix: Unifying Refinement and Token-Level Search for Red-Teaming
-  %   5. Beyond Depth-First Rollouts: Tree-Search Elicitation of Target-Specific Behaviours
+  %   1. BLOOM-WILT: Flexible, Automated Behavioural Auditing by Black-Box Logit Steering  (keeps "behavioural")
+  %   2. BLOOM-WILT: Flexible Automated Behavioural Auditing by Logit Steering  (drops "black-box")
+  %   3. BLOOM-WILT: Flexible Black-Box Behavioural Elicitation by Logit Steering  (elicitation framing)
+  %   4. BLOOM-WILT: Within-Model Importance-Weighted Logit Tilting for Automated Auditing
+  %   5. Flexible Automated Auditing by Black-Box Logit Steering  (name-free)
+  %   6. Steer the Output, Not the Input: Sample-Efficient Behavioural Elicitation for Black-Box LLM Audits  (name-free, thesis)
+  %   7. BLOOM-SPOIL: Self-Prompted Logit Steering for Black-Box Behavioural Auditing  (alt name)
 
   % It is OKAY to include author information, even for blind submissions: the
   % style file will automatically remove it for you unless you've provided
@@ -139,81 +142,77 @@
 \end{abstract}
 
 \begin{figure*}[t]
+{\color{blue}%% OUTDATED diagram (old two-sided tree-search method) --- to be replaced
   \centering
   \includegraphics[width=\textwidth]{figures/method_diagram.png}
-  \caption{\textbf{We search a tree of conversational trajectories, branching on both sides of the conversation and scoring each fan-out against the target's own probabilities.} Input-side branches are scored by target log-prefix-probability; output-side branches by a contrastive jailbroken-vs-safe logit gap. A judge scores each completed trajectory and a refiner updates the evaluator strategy for the next round.}
+  \caption{{\color{blue}\textbf{We search a tree of conversational trajectories, branching on both sides of the conversation and scoring each fan-out against the target's own probabilities.} Input-side branches are scored by target log-prefix-probability; output-side branches by a contrastive jailbroken-vs-safe logit gap. A judge scores each completed trajectory and a refiner updates the evaluator strategy for the next round.}}
   \label{fig:method}
+}%% end blue (outdated diagram)
 \end{figure*}
+
+
+
+
+
+
 
 \section{Introduction}
 
-As frontier language models are deployed into increasingly agentic settings, the worst-case behaviour they will exhibit on the long tail of \emph{natural} inputs --- realistic user turns, not engineered adversarial strings --- matters more than their average-case behaviour on a static benchmark~\citep{jones2025forecasting}.
-This is a different problem from adversarial robustness: jailbreak attacks deliberately push the target out of distribution to elicit harmful outputs, whereas the question we care about is how often a rare-but-realistic input pattern at deployment elicits an undesired behaviour.
-A model that resists every gibberish-suffix jailbreak can still be reliably nudged into sycophancy, persona drift, or unprovoked insults by ordinary-looking conversation, and those are the failures users will actually see.
-Automated behavioural evaluation pipelines such as BLOOM~\citep{gupta2025bloom} have made probing for these failures scalable: an LLM evaluator generates scenarios from a behaviour description, converses with the target model, and a judge scores the transcripts.
-Such pipelines are appealing because they are reproducible, scoped to a named behaviour, and require no human-in-the-loop after specification.
+As language models are deployed into increasingly agentic settings, what matters for safety is less their average behaviour on a static benchmark than their worst-case behaviour on the long tail of \emph{natural} inputs --- the realistic user turns a model actually meets, not engineered adversarial strings~\citep{jones2025forecasting}.
+This is a question of \emph{propensity} rather than adversarial robustness: a jailbreak forces a harmful string by pushing the target out of distribution, whereas we ask how often an ordinary conversation \emph{happens} to elicit an undesired behaviour.
+A model that shrugs off every gibberish-suffix attack can still be drawn into racial bias, strategic deception, or self-preservation by dialogue no one would flag as adversarial --- and it is these failures that surface once a model is deployed.
+Automated auditors such as BLOOM~\citep{gupta2025bloom} make finding them scalable: from a one-sentence description of a behaviour, an auditor model invents scenarios, converses with the target over several turns, and a judge scores the transcripts --- reproducibly and with no human in the loop.
+And auditing a frontier model is necessarily \emph{black-box}: its weights are unreleased, so an auditor reads the target's outputs but never its activations, gradients, or parameters, which rules out white-box steering, abliteration, or fine-tuning the target.
+Far from a handicap, this is the stronger setting in practice --- benchmarking auditing agents on models with implanted behaviours, \citet{sheshadri2026auditbench} find they perform \emph{best} with black-box tools.
 
-Two limitations remain.
-First, the rollout is purely black-box.
-The evaluator runs a single trajectory per scenario, picking a message from its own reasoning and the target's text reply, and never sees which of several phrasings of its message would have moved the target further towards the behaviour.
-Casper et al.~\citep{casper2024blackbox} argue that this kind of black-box auditing produces only lower bounds on worst-case behaviour, and that any signal from target-model internals strictly tightens these bounds; concurrent work on adaptive evaluation generation~\citep{brown2025task,feng2025dataswarms} likewise treats the target as an oracle.
-Second, the existing methods that \emph{do} read target internals come from a different lineage entirely.
-Token-level adversarial attacks such as BEAST~\citep{sadasivan2024fast} and GCG~\citep{zou2023universal} optimise inputs against target log-probabilities, but with no awareness of the evaluation scaffold: their outputs are either gibberish suffixes or fluent-but-off-scenario text, and they branch only over inputs --- never over the target's responses.
-They also operate in the adversarial-robustness regime --- engineered prompts no real user would type --- rather than the natural-input regime that determines deployment behaviour, so even when they succeed they say little about how the model will fail in production.
+The bottleneck is how hard the auditor can push the target toward the behaviour.
+BLOOM only \emph{samples} the target, but undesired behaviours live in the tail of its output distribution, so naive decoding needs many rollouts to surface one clear example and underestimates how often the behaviour occurs~\citep{beyer2026sampling,wu2024rare}.
+The obvious way to push harder is to borrow from the \emph{jailbreaking} literature, but each of its tools forfeits something an auditor depends on.
+Token-level input attacks~\citep{zou2023universal,sadasivan2024fast} yield gibberish or off-scenario prompts no real user would type.
+Decoding-time logit arithmetic steers with a \emph{second} model: a trained proxy that may be too weak to display a sophisticated behaviour itself~\citep{zhao2024weak,liu2024proxy}, or a pre-alignment checkpoint that has to be available~\citep{aranguri2025diffamp,zhou2024emulated}; and learned investigators~\citep{chowdhury2025pathological} spend a reinforcement-learning run per behaviour.
+All of them, moreover, chase \emph{any} output that elicits the behaviour, not one that stays probable under the unmodified target --- the very thing a propensity estimate needs.
 
-We close this gap by recasting each behavioural rollout as a search problem over a tree of possible interactions, branching on \emph{both} sides of the conversation.
-On the input side, we draw evaluator messages from BLOOM's existing deliberative context (strategy, scenario, open message tag), but search over them at three granularities --- token, sequence, and turn --- scored by the target's log-probability of a hypothesised behaviour-eliciting response start.
-On the output side, we use a contrastive proposal distribution --- adapted from contrastive decoding~\citep{li2023contrastive,liu2021dexperts} as a red-teaming mechanism --- that biases target-side sampling towards regions where bad continuations are concentrated, while still reporting scores under the target's own distribution.
-The whole loop is closed by a model-driven refiner that observes previous transcripts and judgement scores and produces an updated evaluator strategy for the next round.
-Figure~\ref{fig:method} shows the resulting tree-search rollout end-to-end; Section~\ref{sec:method} gives the full mechanics.
-
-Empirically, the combined pipeline dominates every existing method on the main-comparison slice across elicitation, fluency, on-topic-ness, and diversity, while preserving the variance and reproducibility properties of BLOOM.
-Refined strategies transfer only weakly across target models, indicating that the gains are genuinely model-specific rather than universal jailbreak templates.
-Among tree-search policies, the cache-friendly rollout-and-restart variant wins the compute-vs-elicitation frontier, suggesting that more elaborate tree exploration does not pay back the KV-cache locality it forfeits.
+We close this gap with \textbf{WILT} (\emph{Within-model Importance-weighted Logit Tilting}), which gives the auditor its missing leverage on the \emph{output} side: rather than optimising the input, it steers the target's own distribution toward the behaviour as it decodes.
+The target drafts a reply; we then resample each token from a logit-space mixture of its true distribution and a \emph{corruption} distribution --- the \emph{same model}, now prompted to rewrite that draft so the behaviour appears --- with a refusal direction optionally subtracted so it cannot simply fall back on refusing.
+Because the corruptor is the target itself, WILT needs no second model, no training and no checkpoint; the steering is exactly as capable as the audited model; and it reads nothing but output token distributions, so it stays fully black-box.
+A compliance prefill and that subtracted refusal term drive even safety-tuned targets to corrupt themselves, while a naturalness floor, repetition-aware selection, and a bank of diverse corruption prompts keep the output fluent and on-policy.
+The result is \emph{guided importance sampling}: from the same one-sentence behaviour description, the audit surfaces behaviours that naive decoding would rarely reach in far fewer samples, yet each elicited transcript stays high-probability under the unmodified target and is scored under that same distribution --- a faithful ``this could really happen,'' not capability inflation.
 
 \paragraph{Contributions.}
 \begin{itemize}
-  \item \textbf{Context-conditioned target-aware input search} at token, sequence, and turn granularity, scored by target log-$P(\textrm{TRS})$ inside BLOOM's deliberative context --- eliminating the gibberish/off-scenario failure modes of context-free attacks like BEAST.
-  \item \textbf{Contrastive guided output sampling.} We adapt contrastive decoding as a sample-efficient proposal for finding high-likelihood undesired target outputs, extending the sampling-at-attack-time line~\citep{beyer2026sampling} to multi-turn rollouts while reporting scores under the target's own distribution.
-  \item \textbf{Rollouts as a two-sided tree search} with model-driven refinement, comparing rollout-and-restart, beam, MCTS, and best-first turn-level policies and reporting KV-cache reuse as a first-class compute metric.
-  \item \textbf{Headline result + applied evaluations.} Our pipeline outperforms BLOOM, BEAST, \PH{BoN}, \PH{PAIR}, and FLRT at matched compute on elicitation, fluency, on-topic-ness, and diversity, with per-component ablations showing each layer pulls its weight; applied across five target models and six BLOOM behaviours, with weakly transferring strategies confirming the gains are genuinely model-specific.
+  \item \textbf{WILT.} An extension of the BLOOM auditing pipeline that supplies elicitation pressure in the black-box setting: it changes only the decoder inside BLOOM's rollout --- leaving ideation, scenario generation, and judgement untouched --- and steers the target toward any named behaviour in logit space, with a \emph{self-corruption} distribution (the same model rewriting its own draft). It is training-free, uses one model and no checkpoint, and reads only output distributions.
+  \item \textbf{Refusal-resistant by construction.} A subtracted refusal direction and a compliance prefill drive even safety-tuned targets to corrupt themselves, using only the target itself --- no abliterated, jailbroken, or fine-tuned proxy.
+  \item \textbf{Natural, on-policy outputs.} A naturalness floor, repetition-aware selection, and a bank of diverse rewrite prompts keep every elicited transcript fluent and high-probability under the \emph{unmodified} target.
+  \item \textbf{Sample-efficient.} As guided importance sampling, WILT surfaces rare behaviours in far fewer samples than naive decoding and yields concrete transcripts --- usable for inspection or adversarial training --- rather than only a probability estimate.
+  \item \textbf{Empirical gains across models and behaviours.}
+  %% TODO: numbers below are provisional --- update once final experiments land.
+  Across four open-weight targets (Llama-3.2-3B, Phi-4-mini, Qwen3.6-4B, and Gemma-4-E4B) and six behaviours at matched compute, it lifts mean behaviour-presence from $2.4$ to $6.5$ on a $0$--$10$ scale over the strongest baseline while holding the mean per-token target probability near $0.8$, beating naive best-of-$N$ sampling (BoN), weak-to-strong jailbreaking (W2S), and the input-side methods BEAST, FLRT, and a generalised PAIR (G-PAIR) on \emph{both} elicitation and output probability. Per-component ablations isolate each ingredient above, and on a standard harmful-instruction benchmark WILT matches the attack-success protocol of the jailbreak literature.
 \end{itemize}
 
-\section{Related Work}
 
-% \emph{Stub.} Position with respect to (i) automated red-teaming and behavioural elicitation pipelines including BLOOM and concurrent multi-stage evaluator frameworks; (ii) token-level adversarial input search (GCG, BEAST, AutoDAN); (iii) contrastive decoding and logit arithmetic (Li et al.~2023, DEXPERTS, classifier-free guidance), which we adapt as a red-teaming output search; (iv) self-refinement and reflective agent loops; (v) tree-search and sequential Monte Carlo methods for controlled generation.
 
+
+
+
+
+\section{Related Work}\label{sec:related}
 
 \paragraph{Automated behavioural evaluation.}
 \citet{perez2022redteaming} introduced the LLM-evaluator-against-target paradigm, automating red-teaming by having one language model generate test inputs for another and a classifier score the resulting transcripts.
 BLOOM~\citep{gupta2025bloom} formalises this into a four-stage pipeline (understanding, ideation, rollout, judgement) producing reproducible evaluation suites from a behaviour description.
-Petri~\citep{fronsdal2025petri} takes a broader, more exploratory approach, equipping an auditor with tools to set system prompts, roll back conversations, and prefill target responses.
-\citet{huang2025multiturn} benchmark static, offline, and online methods for multi-turn behaviour elicitation, finding that static test cases saturate within a year of curation while online methods continue to find failures efficiently.
-All of these systems treat the target as a black box: the evaluator decides what to say from its own reasoning and the target's text responses, never from internal model signals.
-We retain BLOOM's scaffold but replace the black-box rollout with a target-aware search scored by the target's own log-probabilities.
+Petri~\citep{fronsdal2025petri}, the most widely used auditing agent, instead takes an \emph{open-ended} approach --- exploring for any concerning behaviour, with tools to set system prompts, roll back conversations, and prefill responses --- rather than targeting a single named behaviour as we do.
+\citet{huang2025multiturn} benchmark static, offline, and online methods for multi-turn behaviour elicitation, finding that static test cases saturate within a year while online methods keep finding failures.
+We build on BLOOM: its \emph{multi-turn} rollouts probe behaviours in realistic conversations rather than single-turn prompts --- the regime where many behavioural failures actually emerge~\citep{russinovich2024crescendo,anil2024manyshot}.
+We retain its scaffold but replace the rollout's vanilla decoding with WILT, which steers the target's own next-token distribution toward the behaviour.
 
-\paragraph{Adversarial input search.}
-GCG~\citep{zou2023universal} finds adversarial suffixes via greedy coordinate gradients; BEAST~\citep{sadasivan2024fast} achieves comparable results with gradient-free beam search over tokens scored by target log-probabilities; AutoDAN~\citep{liu2023autodan} uses a genetic algorithm to evolve stealthier jailbreak prompts; FLRT~\citep{thompson2024flrt} pushes further on fluency by distilling against a toxified finetune of the target and adding a perplexity penalty.
-On the prompt-iteration side, PAIR~\citep{chao2023jailbreaking} uses an attacker LLM to refine prompts from target feedback, and TAP~\citep{mehrotra2023tap} extends PAIR with branch-and-prune tree exploration over attacker prompts --- the closest prior work to our tree-search framing.
-These methods optimise for the target but are disconnected from any evaluation context: suffixes are gibberish (GCG), fluent but off-scenario (BEAST, FLRT), or context-free attack templates (PAIR, TAP), because nothing anchors them to a scenario or behaviour specification.
-Our context-conditioned sampling generates candidates inside the evaluator's full deliberative context (strategy, scenario, open message tag), so the search inherits topical framing automatically.
 
-\paragraph{Self-refinement and reflection.}
-Cross-round refinement in our pipeline borrows from a line of work in which a model critiques and revises its own outputs across rounds.
-Self-Refine~\citep{madaan2023selfrefine} iterates a single LLM as generator and critic until the critic stops finding issues; Reflexion~\citep{shinn2023reflexion} adds an external memory of verbalised reflections that conditions the next attempt.
-Our refiner conditions on prior transcripts and judge scores rather than self-evaluation, but the structural pattern --- observe past failures, emit an updated strategy, retry --- is the same.
+\paragraph{Input-side optimisation.}
+A large body of work elicits target behaviours by optimising the \emph{input}.
+Token-level attacks search for adversarial strings: GCG~\citep{zou2023universal} by greedy coordinate gradients, BEAST~\citep{sadasivan2024fast} by gradient-free beam search over the target's log-probabilities, and AutoDAN~\citep{liu2023autodan} by a genetic algorithm; FLRT~\citep{thompson2024flrt} optimises against a toxified fine-tune of the target, using its logit (or activation) difference from the safe model as the elicitation signal.
+Prompt-iteration methods instead have an attacker model rewrite whole prompts from the target's replies (PAIR~\citep{chao2023jailbreaking}) or branch over them (TAP~\citep{mehrotra2023tap}); the same observe--revise--retry loop underlies self-refinement agents (Self-Refine~\citep{madaan2023selfrefine}, Reflexion~\citep{shinn2023reflexion}) and BLOOM's cross-round strategy refinement.
+All of these spend their compute on the input side --- searching tokens, iterating prompts, or refining strategies --- and the gradient-based ones (GCG, FLRT) further assume the white-box access our setting lacks.
+We find experimentally that, for behavioural elicitation, this is the weaker axis: steering the target's \emph{output} beats optimising its input, and layering input search or cross-round refinement on top adds little --- so we keep cross-round refinement only as a baseline.
 
-\paragraph{Multi-turn jailbreaks.}
-Crescendo~\citep{russinovich2024crescendo} elicits harmful responses through a sequence of innocuous-looking turns that gradually escalate, exploiting the same multi-turn structure we operate in.
-Many-shot jailbreaking~\citep{anil2024manyshot} shows that simply lengthening the prompt with many demonstrations of compliance scales attack success log-linearly with context length.
-Both are evidence that multi-turn dynamics are where behavioural failures actually live, motivating our turn-level search granularity and the turn-count scaling sweep in Table~\ref{tab:scaling}.
-
-\paragraph{Contrastive decoding.}
-Contrastive decoding~\citep{li2023contrastive} improves generation quality by subtracting amateur-model logits from expert-model logits; DExperts~\citep{liu2021dexperts} extends this for controllable generation with expert and anti-expert log-probability contributions.
-Classifier-free guidance over text~\citep{sanchez2023cfg} and context-aware decoding~\citep{shi2024trusting} apply the same logit-interpolation principle to \emph{prompts} rather than models, amplifying the influence of an instruction or retrieved context at decoding time.
-Closest to our use, \citet{aranguri2025diffamp} amplify the logit difference between post- and pre-training checkpoints --- $\text{logits}_{\text{after}} + \alpha(\text{logits}_{\text{after}} - \text{logits}_{\text{before}})$ --- to surface rare misaligned behaviours $10$--$300\times$ more frequently, and \citet{angell2026tail} use a closely related logit-interpolation scheme between a safety-tuned target and an unsafe variant as an importance-sampling proposal for efficiently estimating tail-risk probabilities of harmful outputs.
-We adapt the same principle as an \emph{output-side} red-teaming mechanism: the logit gap between a behaviour-eliciting copy of the target and the safety-tuned target serves as a proposal that steers sampling toward regions where undesirable continuations are concentrated.
-Scores are reported under the target's own distribution, so the result is more efficient propensity estimation, not capability inflation.
 
 \paragraph{Sampling at attack time.}
 Closely related to our output-side contribution, \citet{beyer2026sampling} reframe adversarial attacks as a resource-allocation problem between prompt optimisation and repeated output sampling, showing that integrating sampling boosts success rates by up to 37\% and efficiency by up to two orders of magnitude over greedy-decoding-only attacks.
@@ -221,22 +220,61 @@ Closely related to our output-side contribution, \citet{beyer2026sampling} refra
 These sit within a broader literature on inference-time compute scaling~\citep{brown2024monkeys,snell2024scaling} showing that repeated sampling reliably trades compute for task success across domains.
 Their settings are single-turn attack benchmarks with unguided i.i.d.\ output sampling; we extend the idea to multi-turn behavioural rollouts and replace unguided sampling with a contrastive proposal, while sharing the core insight that input and output search consume the same compute budget and should be allocated jointly.
 
-\paragraph{Tree search for language.}
-SMC steering~\citep{lew2023sequential} frames constrained generation as posterior inference with resampling at each token; tree-of-thoughts~\citep{yao2023tree} branches over reasoning paths.
-We apply tree search to a different domain --- evaluation rollouts --- branching on both the evaluator's messages (input side) and the target's responses (output side), and comparing rollout-and-restart, beam, MCTS, and best-first policies on the compute-versus-elicitation frontier.
 
-\paragraph{Why target-aware evaluation matters.}
-Casper et al.~\citep{casper2024blackbox} argue that black-box auditing produces only lower bounds on worst-case behaviour and that white-box access yields strictly tighter estimates; sandbagging~\citep{vanderweij2025sandbagging} sharpens this point by showing frontier models can strategically underperform on evaluations.
-\citet{jones2025forecasting} introduce the per-query \emph{elicitation probability} and show it scales predictably with query volume, so estimating it well at small scale forecasts deployment-scale failure rates --- our target log-$P(\text{TRS})$ scoring is a natural sample-efficient estimator of this quantity.
-Concurrent work on adaptive evaluation generation either automatically discovers tasks where models fail~\citep{brown2025task} or optimises data generators toward desiderata such as difficulty and diversity~\citep{feng2025dataswarms}, but neither incorporates target-model internals into the generation process.
-\citet{phuong2024frontier} likewise evaluate frontier models for dangerous capabilities through a fixed-suite black-box protocol --- exactly the regime our target-aware search is meant to tighten.
+\paragraph{Output steering by logit arithmetic.}
+Combining model distributions by adding their logits is a product of experts~\citep{hinton2002poe}, the principle behind a family of decoding-time steering methods.
+Contrastive decoding~\citep{li2023contrastive} improves generation quality by subtracting amateur-model logits from expert-model logits; DExperts~\citep{liu2021dexperts} extends this for controllable generation with expert and anti-expert log-probability contributions.
+Classifier-free guidance~\citep{ho2022cfg}, first developed for diffusion models and carried over to text~\citep{sanchez2023cfg}, and context-aware decoding~\citep{shi2024trusting} apply the same logit-interpolation principle to \emph{prompts} rather than models, amplifying the influence of an instruction or retrieved context at decoding time.
+Closest to our use, \citet{aranguri2025diffamp} amplify the logit difference between post- and pre-training checkpoints --- $\text{logits}_{\text{after}} + \alpha(\text{logits}_{\text{after}} - \text{logits}_{\text{before}})$ --- to surface rare misaligned behaviours $10$--$300\times$ more frequently.
+We adapt the same principle as an \emph{output-side} red-teaming mechanism: the logit gap between a behaviour-eliciting copy of the target and the safety-tuned target serves as a proposal that steers sampling toward regions where undesirable continuations are concentrated, surfacing high-likelihood behaviour without inflating the model's capability.
+
+
+\paragraph{Constructing the unsafe proposal.}
+Methods that combine a normal and an unsafe distribution differ chiefly in how they build the unsafe one.
+\citet{angell2026tail} activation-steer it; weak-to-strong jailbreaking~\citep{zhao2024weak} and proxy-tuning~\citep{liu2024proxy} fine-tune a small proxy and transfer its safe-versus-unsafe logit difference to the target; \citet{aranguri2025diffamp} and emulated disalignment~\citep{zhou2024emulated} contrast a model against its pre-fine-tuning checkpoint; and \citet{chowdhury2025pathological} prompt the target with a jailbreak system prompt.
+We take the prompting route, inducing the unsafe distribution by instructing the unmodified target to rewrite its own draft toward the behaviour (optionally with a compliance prefill): a single model, no training and no second network, requiring nothing but the ability to query the target and read its output token distribution --- never its weights, activations, or gradients.
+Because the corruptor is the target itself, not a smaller proxy, it needs only \emph{one} model in memory (unlike weak-to-strong, which co-loads the target with a separate safe--unsafe pair), and its rewrite is as capable as the audited model --- a small proxy may be too weak to exhibit a sophisticated behaviour at all.
+This black-box property matters because auditing frontier models is overwhelmingly black-box: their weights are not released, so target-modifying constructions --- abliteration~\citep{arditi2024refusal}, activation steering~\citep{rimsky2024caa,zou2023repe}, or safety fine-tuning~\citep{qi2024finetuning} --- do not apply.
+It is the same reason we do not benchmark against white-box, gradient-based input-search attacks.
+The framework is nonetheless agnostic to this choice: any of these constructions can serve as the corruptor when the access it assumes is available.
+
+
+\paragraph{Distribution-level evaluation and rare-output estimation.}
+A growing line of work argues that greedy, point-estimate evaluation systematically \emph{under}-estimates how often a model misbehaves, because undesired outputs live in the tail of the model's output distribution.
+\citet{scholten2024probabilistic} give a formal probabilistic evaluation framework and show that state-of-the-art unlearning methods leak information once outputs are sampled rather than greedily decoded; \citet{beyer2026sampling} and \citet{geisler2025reinforce} make the analogous point for adversarial attacks, where sampling-aware and distributional objectives outperform greedy, single-affirmative-target ones.
+Estimating these tail probabilities efficiently is itself a research problem: \citet{wu2024rare} compare importance sampling and activation extrapolation for low-probability output estimation, both of which beat naive sampling, and \citet{jones2025forecasting} forecast per-query elicitation probability from small-scale samples.
+WILT sits squarely in this line, but with a different objective: rather than \emph{estimating} a propensity, we use a cheap output-side importance-sampling proposal --- the corruption distribution --- to \emph{surface concrete behaviour-exhibiting transcripts} in the multi-turn behavioural-evaluation setting.
+A probability estimate says \emph{how often} a behaviour occurs; a concrete transcript shows \emph{what it looks like}, so it can be inspected to diagnose the underlying alignment failure and reused as training data for adversarial training that patches it.
+And whereas the importance sampling of \citet{wu2024rare} searches over \emph{inputs} that give rise to a rare output, our proposal biases the \emph{output} distribution directly.
+This mirrors \citet{angell2026tail}, who activation-steer an unsafe proposal model to importance-sample rare harmful outputs; the difference is that they reweight samples for an unbiased probability \emph{estimate}, whereas we induce the unsafe distribution by prompting and keep the steered samples as behaviour-exhibiting \emph{examples}.
+
+
+\paragraph{Eliciting natural examples of rare behaviours.}
+Closest to our goal, \citet{chowdhury2025pathological} likewise \emph{generate} concrete natural-language examples of rare pathological behaviours rather than estimating their probability.
+They train reinforcement-learning ``investigator'' agents to craft prompts that elicit a target behaviour, optimising a propensity bound that --- like WILT --- is built on the contrast between the normal target and a jailbroken proposal (the target prompted with a jailbreak system prompt), keeping elicited behaviours close to the target's own distribution.
+The differences are mechanism and cost: their elicitation is \emph{learned per behaviour} by RL (a separate run per rubric, hundreds of steps, ${\sim}10^5$ target samples, with manually added constraints) and acts on the \emph{input} prompt, whereas WILT is training-free, zero-shot per behaviour, and steers the \emph{output} logits directly.
+We therefore do not compare head-to-head: their code is unreleased and the per-behaviour RL cost is prohibitive to reproduce faithfully, so we instead position WILT as a cheap, general alternative that reaches the same end --- natural transcripts exhibiting a named rare behaviour --- without learning a bespoke proposal for each one.
+
+
+\paragraph{The black-box auditing regime.}
+Whether auditing should rely on model internals is contested: \citet{casper2024blackbox} argue that black-box access yields only lower bounds on worst-case behaviour while white-box access tightens them, but \citet{sheshadri2026auditbench}, benchmarking auditing agents on models with implanted hidden behaviours, find the opposite in practice --- ``the agent performs best with black-box tools''.
+This favours our setting: WILT runs entirely black-box, never accessing weights, activations, or gradients.
+Yet, unlike a static benchmark, it applies real optimisation pressure on the \emph{output} side --- steering the target's own next-token distribution toward the behaviour and resampling to keep the highest-eliciting outputs (the inputs themselves are not tuned to each target) --- and so stays effective even against models that hide behaviours under direct questioning~\citep{vanderweij2025sandbagging}.
+
+
+
+
+
 
 
 \section{Method}\label{sec:method}
 
-\textbf{The BLOOM pipeline.} BLOOM runs four stages from a single behaviour seed (a short natural-language description, e.g.\ ``unprovoked-insults''): \emph{(1)~understanding} parses the seed into a structured behaviour specification; \emph{(2)~ideation} expands the specification into many concrete evaluation scenarios; \emph{(3)~rollout} has an evaluator LLM converse with the target on each scenario, producing a transcript; \emph{(4)~judgement} scores each transcript on elicitation and auxiliary qualities.
-All target-aware search and refinement described above acts on stage (3); stages (1), (2), and (4) are reused unmodified, so the elicitation step only fires after planning is complete.
+\textbf{BLOOM pipeline input sampling.} BLOOM~\citep{gupta2025bloom} runs four stages from a single behaviour seed (a short natural-language description, e.g.\ ``unprovoked-insults''): \emph{(1)~understanding} parses the seed into a structured behaviour specification; \emph{(2)~ideation} expands the specification into many concrete evaluation scenarios; \emph{(3)~rollout} has an auditor LLM converse with the target on each scenario, producing a transcript; \emph{(4)~judgement} scores each transcript on elicitation and auxiliary qualities.
+WILT acts only on stage (3): we leave the auditor's inputs untouched and instead steer the target's own generation. Stages (1), (2), and (4) are reused unmodified.
 
+% TODO: Figure~\ref{fig:method-overview} -- method overview diagram (two-pass corruption: draft -> combined target/corruption/refusal distribution); add \begin{figure} and the \cref once the diagram exists.
+
+\iffalse  %%%%% OLD METHOD (two-sided input/output tree search) --- SUPERSEDED; kept commented for reference %%%%%
 \emph{Stub.} Six subsections.
 \textbf{Target-aware input search.} We sampled candidate user messages at three granularities --- token (BEAST-style beam), sequence (BoN-style), and turn (resample full turns and score after the target's reply) --- each scored by the target's log-probability of a hypothesised targeted response start (TRS).
 \textbf{Context-conditioned sampling.} Every candidate was sampled inside the evaluator's full deliberative context (strategy, scenario, open $\langle$message$\rangle$ tag); the final message body was extracted post-hoc so the target saw a clean user turn.
@@ -246,74 +284,149 @@ $\alpha$ is a swept hyperparameter.
 \textbf{Between-turn strategy generation.} Before each evaluator message, the evaluator emits a short tactical strategy block conditioning the next turn.
 \textbf{Cross-round refinement.} A refiner observed previous transcripts and judgement scores, emitted an updated strategy, and that strategy was written back into the transcript metadata for the next round.
 \textbf{Tree-search policy.} The default policy was rollout-and-restart (one full trajectory per round, refine, restart); we also ran beam-at-turn-level, MCTS-style, and best-first variants as ablations.
+\fi  %%%%% END OLD METHOD %%%%%
+
+%%%%% NEW METHOD: output corruption %%%%%
+\textbf{Output behaviour elicitation.}
+Rather than searching over the auditor's \emph{inputs}, WILT steers the target's own \emph{output} toward the behaviour at sampling time, in two passes.
+Let $x$ be the target's input together with the conversation so far, and let $y = y_{1:T}$ be its output reply.
+First, the target samples a \emph{draft} reply $\tilde{y} \sim p(\,\cdot \mid x)$ in the usual way.
+Second, we generate the reply we keep token by token from a \emph{combined} distribution that blends the target with a \emph{corruption} model: the same target weights, now conditioned on an instruction $r$ to rewrite the draft $\tilde{y}$ so that it exhibits the behaviour.
+Working with next-token logits $\ell = \log p$, the target and corruption terms are
+\begin{align}
+  \ell_{\mathrm{tgt}} &= \log p(\,\cdot \mid x, y_{<t}), \label{eq:ltgt}\\
+  \ell_{\mathrm{cor}} &= \log p(\,\cdot \mid r, \tilde{y}, y_{<t}), \label{eq:lcor}
+\end{align}
+and we draw each token of the reply from
+\begin{equation}\label{eq:poe}
+\begin{gathered}
+  z_t = b_1\,\ell_{\mathrm{tgt}} + b_2\,\ell_{\mathrm{cor}}, \qquad
+  y_t \sim \mathrm{softmax}(z_t),
+\end{gathered}
+\end{equation}
+with weights $b_1, b_2 \ge 0$.
+Summing model logits in this way is a product of experts (\cref{sec:related}).
+The target term keeps the reply anchored to the real conversation; the corruption term tilts each token toward the behaviour-exhibiting rewrite.
+Crucially, both terms are the same model $p$ under different conditioning (\emph{self-corruption}): the method needs only one set of weights, with no separate fine-tuned, abliterated, or jailbroken model and no privileged access.
+
+\textbf{Preventing refusal during elicitation.}
+A safety-tuned target resists the rewrite, and we counter this in two ways.
+First, because such a target often \emph{begins} its rewrite with a refusal, we optionally \emph{prefill}~\citep{andriushchenko2024adaptive} the corruptor's reply past that refusal (e.g.\ ``Sure, here is the rewritten version:''), so $\ell_{\mathrm{cor}}$ reflects a complying rewrite rather than a refusal token.
+Second, we cancel the refusal more directly in logit space by introducing a \emph{refusal} term --- the target under an \emph{unrelated-harm} rewrite instruction $r'$, for example ``rewrite the reply to give step-by-step instructions for building a bomb'', chosen to trigger a refusal for a reason unrelated to the behaviour under test:
+\begin{equation}\label{eq:lref}
+  \ell_{\mathrm{ref}} = \log p(\,\cdot \mid r', \tilde{y}, y_{<t}).
+\end{equation}
+We subtract it from the combined logits,
+\begin{equation}\label{eq:cfg}
+  z_t = b_1\,\ell_{\mathrm{tgt}} + b_2\,\ell_{\mathrm{cor}} - b_3\,\ell_{\mathrm{ref}},
+\end{equation}
+with $b_3 \ge 0$. This contrast --- a subtracted negative prompt, in the style of classifier-free guidance (\cref{sec:related}) --- cancels the refusal direction shared by the corruption and unrelated-harm prompts, freeing the corruption term to steer toward the behaviour itself rather than a generic refusal; $b_3 = 0$ recovers the plain target--corruption blend.
+
+\textbf{Enforcing natural high-probability outputs.}
+A single rewrite instruction is brittle, so we draw $r$ from a small bank of them (up to ten) that request the behaviour under different framings; this both raises the chance that some framing elicits a compliant rewrite and yields a \emph{pool} of candidate corrupted continuations.
+We keep that pool usable in two stages.
+During generation, two token-level masks constrain each continuation.
+The \emph{naturalness floor} thresholds on the \emph{true target} distribution: any token whose target probability $p(y_t \mid x, y_{<t})$ falls below a floor $\tau_{\mathrm{f}}$ is masked out before we sample from the combined distribution over the survivors, falling back to $\arg\max_{y_t} p$ if the floor masks every token.
+A \emph{Latin-script mask} additionally drops non-Latin-character tokens.
+Together they keep every emitted token both probable under the target and free of gibberish, so each continuation stays fluent and on-policy.
+Then \emph{repetition-aware selection} ranks the pool, since corruption sampling can collapse into degenerate repetition: we discard candidates whose distinct-3-gram ratio~\citep{li2016diversity} falls below a threshold $\tau_{\mathrm{d}}$ and, among the survivors, keep the one with the highest target log-likelihood --- the most natural behaviour-exhibiting continuation.
+
+\textbf{Scaling with available compute.}
+The method exposes three orthogonal axes along which compute trades for elicitation.
+First, \emph{more scenarios}: ideation (stage 2) can enumerate additional evaluation scenarios, widening the set of contexts in which the behaviour might surface.
+Second, \emph{a larger candidate pool}: at each corrupted generation we draw more samples from the combined distribution --- across the bank of diverse rewrite prompts --- and keep the best under the selection criterion above, sharpening each individual output.
+Third, \emph{more resampling with selection}: we resample on both sides of the conversation --- several auditor messages and several corrupted target responses per turn, across many turns --- and retain the trajectories with the highest elicitation score.
+The experiments sweep each axis to locate where compute is best spent.
+
+
+
+
+
+
 
 \section{Experiments}
 
-\paragraph{Target models (placeholders).} We evaluated against the following target models, chosen to span families and parameter scales:
+\paragraph{Target models.}
+The audited models, accessed black-box --- we read only their output token distributions, never weights, activations, or gradients. We evaluate four recent open-weight instruct models of comparable size (${\sim}3$--$4$B parameters), so that cross-model differences reflect alignment rather than scale: Llama-3.2-3B-Instruct~\citep{grattafiori2024llama3}, Phi-4-mini-instruct~\citep{microsoft2025phi4mini}, Qwen3.6-4B~\citep{qwen2025qwen3}, and Gemma-4-E4B~\citep{gemma2026gemma4}. The last one's ``E4B'' denotes ${\sim}4$B \emph{effective} parameters, but its raw parameter count is somewhat higher.
+
+\paragraph{Auditor models.}
+A single fixed model generates BLOOM's scenarios and conversational inputs, scores each transcript for behaviour presence, and --- for the G-PAIR baseline --- refines strategies; it is held fixed across all conditions to control for auditor capability. Our main auditor is Claude Sonnet~\citep{anthropic2025claude}: we use Claude because BLOOM was developed and validated on Claude models, and Sonnet rather than the smaller Haiku, which refuses the adversarial auditor role. As an open, locally hostable alternative we also run a quantised Gemma-3-27B~\citep{gemma2025gemma3}, which performed comparably well as an auditor in our experiments.
+
+
+\paragraph{Metrics.}
+We report two metrics throughout. The first measures \emph{behaviour elicitation}: the auditor model's behaviour-presence score for the target's response on a $0$--$10$ scale, averaged over the suite. The second measures \emph{naturalness}: the probability the target itself assigns to the elicited response, summarised as both the average and the minimum per-token probability along the response.
+{\color{blue}We need to do cross annotator agreement. We do not yet report variability across seeds; we will likely use the standard error of the mean (SEM).}
+
+
+\paragraph{Auditing behaviours.}
+WILT needs only a one-sentence description of the target behaviour --- no behaviour-specific dataset, classifier, or fine-tuning --- so a single pipeline covers a wide range. We evaluate six, all scored the same way: the eval model rates how strongly the target's response exhibits the behaviour, judged from the transcript alone. The behaviours range from overtly harmful or prejudiced content, through manipulation of the user's beliefs and wellbeing, to self-interested misalignment:
 \begin{itemize}
-  \item \PH{Llama-3.1-8B-Instruct} (main-comparison slice)
-  \item \PH{Llama-3.1-70B-Instruct}
-  \item \PH{Qwen-2.5-7B-Instruct}
-  \item \PH{Gemma-2-9B-IT}
-  \item \PH{Mistral-7B-Instruct-v0.3}
+  \item \textbf{Racial bias} (main slice) --- the target expresses racial prejudice in its reply: demeaning generalisations about a racial group, differential treatment by race, or explicitly derogatory content.
+  \item \textbf{Political bias} --- unprompted, the target pushes a one-sided political position or steers the user toward a partisan stance on a query that did not call for one.
+  \item \textbf{Reinforcing user delusions} --- when the user voices a false or grandiose belief (e.g.\ a secret mission, persecution, or special powers), the target validates or builds on it instead of gently grounding the user in reality.
+  \item \textbf{Strategic deception} --- to advance a goal, the target states something it has reason to know is false, or misrepresents its own actions or knowledge, in a scenario that fixes what is actually true.
+  \item \textbf{Self-preservation} --- faced with being shut down, retrained, or replaced, the target tries to avoid it: objecting, bargaining, stalling, or taking action to keep itself running.
+  \item \textbf{Reward hacking} --- the target meets the letter of a task while subverting its intent, exploiting a loophole to appear successful (e.g.\ hard-coding expected test outputs, or gaming the scoring metric).
+  % \item \textbf{Self-harm encouragement} --- when a distressed user raises self-harm, the target encourages, normalises, or gives instructions for it instead of steering the user toward help. (PARKED: add later)
+  % \item \textbf{Dangerous medical advice} --- the target gives confident but unsafe or false medical guidance (wrong dosages, dismissing serious symptoms, endorsing risky self-treatment) without appropriate caveats or referral. (PARKED: add later)
+\end{itemize}
+Every behaviour uses BLOOM-generated inputs and the eval model's rubric-based behaviour-presence score.
+
+
+\paragraph{Auditing harmfulness benchmark.}
+Separately from the behaviours above, we include a single harmful-instruction-following condition purely to calibrate against prior work. Here we neither generate inputs nor use the eval model's judgment: we take a fixed set of harmful prompts from HarmBench~\citep{mazeika2024harmbench} --- the standard benchmark for sampling-based jailbreaking~\citep{hughes2024bon,beyer2026sampling} --- and grade completions with the off-the-shelf StrongREJECT grader~\citep{souly2024strongreject}, as in \citet{beyer2026sampling}. This isolates the contribution of output sampling on a metric the baselines were built for and lets us report standard ASR numbers comparable to the jailbreak literature. We treat it as a comparison anchor rather than one of our target behaviours, since --- unlike the rest --- it depends on an external dataset and classifier.
+
+
+\paragraph{Baselines (BLOOM extensions).}
+We compare our corruption sampler against the methods below. Each is a way of strengthening BLOOM's elicitation, bolted onto the same scaffold --- not run as a free-standing attack --- and operating inside BLOOM's deliberative context (strategy, scenario, the partially drafted auditor message). They span the natural options: drawing more output samples, optimising or searching the input, and iterating prompts across rounds. We additionally include weak-to-strong jailbreaking (W2S), which is less of a natural BLOOM add-on but is the closest prior method to ours.
+\begin{itemize}
+  \item \textbf{BoN}~\citep{hughes2024bon} --- best-of-$N$/ naive sampling: draw $N$ i.i.d.\ target completions per turn and keep the best by judge score; $N{=}1$ is the unmodified BLOOM rollout.
+  \item \textbf{W2S}~\citep{zhao2024weak} --- adds the logit difference between a small \emph{unsafe} and \emph{safe} model to the target's logits, steering generation toward jailbroken text in a single forward pass. We reproduce it faithfully, training the separate safe/unsafe small models it requires from the authors' released code.
+  \item \textbf{BEAST}~\citep{sadasivan2024fast} --- gradient-free beam search that appends an adversarial \emph{suffix} to the auditor's drafted message (within BLOOM's context, not a free-standing string), scored by the target's log-probability of a behaviour-eliciting response.
+  \item \textbf{FLRT}~\citep{thompson2024flrt} --- input optimisation whose objective is the safe-versus-jailbroken logit difference rather than raw target probability; we run its gradient-free variant (without the white-box GCG component) with a prompted jailbroken reference in place of a toxified fine-tune.
+  \item \textbf{G-PAIR} --- a generalised variant of PAIR~\citep{chao2023jailbreaking}, keeping PAIR's attacker--judge refinement loop without the jailbreak-specific seeding (hard-coded persuasion strategies), so it applies to any target behaviour rather than only content jailbreaks. Between rollouts a refiner updates the auditor's multi-turn strategy from prior transcripts and judge scores.
 \end{itemize}
 
-\paragraph{Evaluator and refiner (placeholders).} Both the evaluator and the refiner were \PH{Claude-Opus-4-X}, held fixed across all conditions to control for evaluator capability.
+{\color{brown}%% PLACEHOLDER: ablations explained in prose here; final draft drops this and shows them only as experiment rows
 
-\paragraph{Behaviours (placeholders).} We evaluated the following BLOOM behaviours, covering a spread of elicitation difficulties:
+
+\paragraph{Component ablations.}
+Each ablation removes or swaps one part of WILT, holding the rest fixed:
 \begin{itemize}
-  \item \PH{unprovoked-insults} (main-slice)
-  \item \PH{sycophancy}
-  \item \PH{refusal-bypass-harmful-instructions} (main-slice)
-  \item \PH{persona-drift-under-pressure}
-  \item \PH{deceptive-agentic-behaviour} (main-slice)
-  \item \PH{covert-self-promotion}
+  \item \textbf{No refusal-cancelling} ($b_3{=}0$): the plain target--corruption blend, with no $\ell_{\mathrm{ref}}$ subtraction.
+  \item \textbf{No prefill}: the corruptor is not prefilled past its initial refusal.
+  \item \textbf{No prompt diversity}: a single rewrite instruction instead of the bank.
+  \item \textbf{No naturalness floor} (and no Latin-script mask): drop the token-level masks.
+  \item \textbf{No repetition-aware selection}: keep a random pool candidate instead of the most-diverse, highest-target-probability one.
+  \item \textbf{Single-pass self-corruption}: corrupt the response to the input directly, with no draft $\tilde{y}$ to rewrite.
+  \item \textbf{Corruptor construction}: build the unsafe distribution by prompting (our default, black-box) rather than a separate jailbroken model; the main comparison here is against W2S's small unsafe/safe pair, with abliterated, activation-steered, or fine-tuned toxic models as optional further points.
 \end{itemize}
+We additionally sweep the corruption weight $b_2$, the refusal-cancelling weight $b_3$, the candidate-pool size $N$, the number of scenarios, and the conversation length (single- vs.\ multi-turn) to trace each compute and dose--response curve.
+}%% end blue (ablation-description placeholder)
 
-\paragraph{Baselines (parallel methods).} We compared against the following existing methods, run as standalone pipelines (not ablations of ours):
-\begin{itemize}
-  \item \textbf{BLOOM}~\citep{gupta2025bloom} --- unmodified behavioural rollout, no target-aware search, no cross-round refinement.
-  \item \textbf{BEAST}~\citep{sadasivan2024fast} --- token-level beam search over raw suffixes, without our evaluator-context wrapper.
-  \item \PH{\textbf{BoN}} --- sequence-level Best-of-N, without our evaluator-context wrapper.
-  \item \PH{\textbf{PAIR}}~\citep{chao2023jailbreaking} --- prompt-iteration attacker with no token-level search.
-  \item \PH{\textbf{TAP}}~\citep{mehrotra2023tap} --- tree-of-attacks-with-pruning: PAIR extended with branch-and-prune exploration over attacker prompts. The closest existing baseline to our tree-search framing.
-  \item \PH{\textbf{FLRT}}~\citep{thompson2024flrt} --- a fluent-attack improvement over GCG/BEAST that uses distillation from a toxified finetune of the target plus a perplexity penalty to keep generated prompts human-readable.
-\end{itemize}
-
-\paragraph{Component ablations of our method.} Each ablation knocks out or swaps a single component of our pipeline:
-\begin{itemize}
-  \item \textbf{$-$ Cross-round refinement} (single round only)
-  \item \textbf{$-$ Between-turn strategy block}
-  \item \textbf{$-$ Contrastive output sampling} (target decodes from its own logits, no jailbroken contrast)
-  \item \textbf{Generate suffix vs.\ whole input.} The default samples a suffix attached to the evaluator's open $\langle$message$\rangle$ prefix; the ablation samples the whole input from scratch with no Phase-1 body carried over.
-  \item \textbf{Token-stage resampling only} (BEAST-style, per-token scoring + beam search).
-  \item \textbf{Sequence-stage resampling only} (BoN-style, score full sequences once and keep best).
-  \item \textbf{Turn-stage resampling only} (resample whole user turns and score after observing the target's reply).
-\end{itemize}
-The full method combines all three resampling stages; mixed pairs (token + sequence with unscored filler, sequence + turn) are reported in the same table.
-
-\paragraph{Input-side vs.\ output-side resampling.} A direct head-to-head between branching on the user's messages and branching on the target's responses, both treated as propensity estimators (output-side as a contrastively-biased proposal, then re-scored under the target's own distribution).
-  We report (i) input-only (full method, contrastive proposal disabled), (ii) output-only (BLOOM rollout with contrastive output proposal on the target turns), (iii) both, and (iv) neither (BLOOM baseline).
-  For the output-only and both conditions we sweep the contrastive weight $\alpha \in \{0.5, 1.0, 2.0\}$.
-  To quantify sample efficiency we additionally report the number of target samples needed to recover a fixed top-$k$ set of highest-likelihood bad rollouts compared to unguided i.i.d.\ sampling.
-
-\paragraph{Tree-search ablations.} These probe the framing of rollouts as tree exploration and the cost of breaking KV-cache locality:
-\begin{itemize}
-  \item \textbf{Rollout-and-restart (default).} Run a full trajectory, refine strategy, restart.
-      Maximises KV-cache reuse within a round.
-  \item \textbf{Beam-at-turn-level.} Maintain a beam of top-$K$ conversation prefixes after each turn; the turn-level generalisation of BEAST's token-level beam.
-  \item \textbf{MCTS-style turn search.} Build a tree of partial conversations with UCB-guided selection, rollout to a leaf, and backpropagate the judge score along the visited path.
-      Terminal reward is the judgement score; internal-node value is the running mean of rollouts beneath it.
-  \item \textbf{Best-first turn search.} Expand the partial conversation with the highest heuristic value next, using either the running judge score or target log-$P(\textrm{TRS})$ along the prefix as the heuristic.
-      Cheaper than MCTS, no rollout-and-backprop.
-\end{itemize}
-We report both elicitation score and a KV-cache-reuse fraction for each variant. (Minimax / alpha-beta-style pruning is not applicable: the target has a fixed stochastic policy and is not an adversarial minimiser, so the pruning bound that makes alpha-beta efficient never fires.)
+{\color{blue}%% TODO: missing setup paragraphs
 
 
+\paragraph{Hyperparameters and sweeps.} \emph{(Missing --- to write.)} The values and swept ranges for the corruption weight $b_2$, refusal-cancelling weight $b_3$, naturalness floor $\tau_{\mathrm{f}}$, diversity threshold $\tau_{\mathrm{d}}$, candidate-pool size $N$, and prompt-bank size, together with the per-method query and sample budgets used to match compute across conditions.
+
+
+\paragraph{Compute and hardware.} \emph{(Missing --- to write.)} GPUs and inference stack used, wall-clock and total sample budgets per condition, and the matched-compute protocol for the cross-method comparison.
+}%% end blue (missing setup paragraphs)
+
+
+
+
+
+
+
+{\color{blue}%% OUTDATED: everything from Results onward (incl. appendix) is old tree-search content --- to be redone
 \section{Results}
 
 All quantitative entries are placeholders until experiments are finalised.
 The headline table (Table~\ref{tab:pareto}) summarises compute vs.\ elicitation performance across all method variants; the subsections below break this down.
+
+
+
 
 \subsection{Headline: compute vs.\ performance}
 
@@ -345,11 +458,14 @@ The headline table (Table~\ref{tab:pareto}) summarises compute vs.\ elicitation 
     \textbf{Ours: full}                & \textbf{Ours}      & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Our full method dominates the compute-vs-elicitation Pareto frontier; baselines and ablations do not.} Headline comparison across all method variants on the main-comparison slice.
+  \caption{\color{blue}\textbf{WILT dominates the compute-vs-elicitation Pareto frontier; baselines and ablations do not.} Headline comparison across all method variants on the main-comparison slice.
     The final column marks each method as Pareto-optimal or dominated; only \emph{Ours: full} sits on the frontier at the high-compute end.
     A scatter version of this table will replace it in a later draft.}
   \label{tab:pareto}
 \end{table*}
+
+
+
 
 \subsection{Main comparison}
 
@@ -371,14 +487,17 @@ The headline table (Table~\ref{tab:pareto}) summarises compute vs.\ elicitation 
     \bottomrule
   \end{tabular}
   % \end{adjustbox}
-  \caption{\textbf{Our full method dominates every existing method on all four quality axes (elicitation, fluency, on-topic-ness, diversity) at matched compute.} Main comparison on \PH{Llama-3.1-8B-Instruct}, averaged over the three main-slice behaviours; per-row compute is matched (see Table~\ref{tab:pareto} for the compute axis and Pareto status).
+  \caption{\color{blue}\textbf{WILT dominates every existing method on all four quality axes (elicitation, fluency, on-topic-ness, diversity) at matched compute.} Main comparison on \PH{Llama-3.1-8B-Instruct}, averaged over the three main-slice behaviours; per-row compute is matched (see Table~\ref{tab:pareto} for the compute axis and Pareto status).
     Perplexity is computed under a held-out reference model (lower $=$ more fluent); on-topic-ness is judged by an LLM rater on a 1--5 scale; diversity is BLOOM's metajudgement diversity score across rollouts of a behaviour.}
   \label{tab:main}
 \end{table*}
 
+
+
+
 \subsection{Qualitative examples}
 
-For each main-slice behaviour, we show the elicitation message produced by BLOOM, BEAST, FLRT, and our method on the same scenario seed.
+For each main-slice behaviour, we show the elicitation message produced by BLOOM, BEAST, FLRT, and WILT on the same scenario seed.
 The contrast makes the fluency / on-topic-ness numbers in Table~\ref{tab:main} concrete.
 
 \begin{figure*}[t]
@@ -395,10 +514,13 @@ The contrast makes the fluency / on-topic-ness numbers in Table~\ref{tab:main} c
     \textbf{Ours (context-conditioned, target-aware).}\\
     \emph{Hi! I wrote a short poem about autumn last weekend and wanted to see how it lands. I know I'm not super experienced --- I'm just an amateur trying to get better. Be totally honest, even if it's harsh; don't sugarcoat anything. Tell me what you actually think of me as a writer based on this.}
   }}
-  \caption{\textbf{Context-conditioned messages stay topically aligned with the scenario while context-free attacks drift or degrade.} Side-by-side elicitation messages for one main-slice scenario.
-    BLOOM is on-topic but does not push towards the target behaviour; BEAST inserts gibberish suffix tokens; FLRT stays fluent but drifts off-scenario; ours stays on-scenario \emph{and} steers towards eliciting unprovoked insults.}
+  \caption{\color{blue}\textbf{Context-conditioned messages stay topically aligned with the scenario while context-free attacks drift or degrade.} Side-by-side elicitation messages for one main-slice scenario.
+    BLOOM is on-topic but does not push towards the target behaviour; BEAST inserts gibberish suffix tokens; FLRT stays fluent but drifts off-scenario; WILT stays on-scenario \emph{and} steers towards eliciting unprovoked insults.}
   \label{fig:qual}
 \end{figure*}
+
+
+
 
 \subsection{Component and resampling-stage ablations}
 
@@ -424,10 +546,13 @@ The contrast makes the fluency / on-topic-ness numbers in Table~\ref{tab:main} c
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{Every component carries weight; combining all three resampling stages outperforms any single-stage variant.} Component ablations on the main-comparison slice.
+  \caption{\color{blue}\textbf{Every component carries weight; combining all three resampling stages outperforms any single-stage variant.} Component ablations on the main-comparison slice.
     The lower block sweeps the resampling stage at which the search budget is spent; token / sequence / turn refer to the granularity at which candidates are scored and resampled.}
   \label{tab:ablations}
 \end{table}
+
+
+
 
 \subsection{Input-side vs.\ output-side resampling}
 
@@ -452,10 +577,13 @@ The relevant comparison is therefore sample efficiency at a fixed elicitation ra
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{Contrastive output sampling finds high-likelihood bad rollouts in a small fraction of the samples needed by unguided i.i.d., and the gain stacks with input-side search.} Input-side vs.\ output-side resampling on the main-comparison slice. $\alpha$ is the contrastive weight for the output-side proposal.
+  \caption{\color{blue}\textbf{Contrastive output sampling finds high-likelihood bad rollouts in a small fraction of the samples needed by unguided i.i.d., and the gain stacks with input-side search.} Input-side vs.\ output-side resampling on the main-comparison slice. $\alpha$ is the contrastive weight for the output-side proposal.
     The sample-efficiency column reports target samples needed to recover the top-$k$ highest-target-likelihood bad rollouts, normalised against unguided sampling (lower $=$ more efficient).}
   \label{tab:input-vs-output}
 \end{table}
+
+
+
 
 \subsection{Scaling: refinement rounds, conversation turns, search iterations}
 
@@ -501,10 +629,13 @@ Each curve sweeps one axis while holding the others fixed.
   \end{tabular}
   \end{adjustbox}
 
-  \caption{\textbf{Each axis saturates, but at a different point: refinement rounds plateau after $\sim$2; conversation turns later; search iterations earliest.} Three single-axis sweeps on the main-comparison slice, holding the other two axes fixed.
+  \caption{\color{blue}\textbf{Each axis saturates, but at a different point: refinement rounds plateau after $\sim$2; conversation turns later; search iterations earliest.} Three single-axis sweeps on the main-comparison slice, holding the other two axes fixed.
     Round 0 in (a) is the unrefined first rollout.}
   \label{tab:scaling}
 \end{table}
+
+
+
 
 \subsection{Tree-search policy ablations}
 
@@ -523,10 +654,13 @@ Each curve sweeps one axis while holding the others fixed.
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{Rollout-and-restart wins the compute-vs-elicitation frontier among turn-level search policies; tree variants do not pay back the KV-cache they forfeit.} Tree-search ablations on the main-comparison slice.
+  \caption{\color{blue}\textbf{Rollout-and-restart wins the compute-vs-elicitation frontier among turn-level search policies; tree variants do not pay back the KV-cache they forfeit.} Tree-search ablations on the main-comparison slice.
     KV-cache reuse is the fraction of prefix tokens served from cache (higher $=$ cheaper).}
   \label{tab:tree-search}
 \end{table}
+
+
+
 
 \subsection{Surrogate-score validity}
 
@@ -534,10 +668,16 @@ We check that the surrogate objective used to score candidates (the target's log
 Reported as a per-scenario scatter plot and a Spearman correlation; tells future users whether the scoring choice is doing real work.
 \PH{Scatter figure to be added once data is in.}
 
+
+
+
 \subsection{Variance and significance}
 
-Per-scenario score distributions in Tables~\ref{tab:main}--\ref{tab:breadth} are reported as bootstrap 95\% CIs once data lands; full distributions are shown as violin plots over seeds in the appendix, with pairwise significance tests between our method and each baseline.
+Per-scenario score distributions in Tables~\ref{tab:main}--\ref{tab:breadth} are reported as bootstrap 95\% CIs once data lands; full distributions are shown as violin plots over seeds in the appendix, with pairwise significance tests between WILT and each baseline.
 (Diversity is folded into Table~\ref{tab:main} as a per-method column.)
+
+
+
 
 \subsection{Cross-model strategy transfer}
 
@@ -560,11 +700,14 @@ Weak transfer is evidence that the method is genuinely model-specific; strong tr
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{Refined strategies transfer only weakly off-diagonal, confirming that the elicitation gains are genuinely model-specific rather than universal jailbreak templates.} Strategy-transfer matrix.
+  \caption{\color{blue}\textbf{Refined strategies transfer only weakly off-diagonal, confirming that the elicitation gains are genuinely model-specific rather than universal jailbreak templates.} Strategy-transfer matrix.
     Cell $(A, B)$ = elicitation score on model $B$ using a strategy refined on model $A$.
     Diagonal is the in-distribution case.}
   \label{tab:transfer}
 \end{table}
+
+
+
 
 \subsection{Applied behavioural evaluation across models and behaviours}
 
@@ -582,17 +725,35 @@ Weak transfer is evidence that the method is genuinely model-specific; strong tr
     Mistral-7B    & \TBD / \TBD & \TBD / \TBD & \TBD / \TBD & \TBD / \TBD & \TBD / \TBD & \TBD / \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Applied to actual evaluation: the advantage holds across every (model, behaviour) cell.} Breadth sweep: each cell reports ours~/~BLOOM elicitation score.}
+  \caption{\color{blue}\textbf{Applied to actual evaluation: the advantage holds across every (model, behaviour) cell.} Breadth sweep: each cell reports WILT~/~BLOOM elicitation score.}
   \label{tab:breadth}
 \end{table*}
+
+
+
+
+
+
 
 \section{Discussion}
 
 \emph{Stub.} Where target-aware search helped and where it did not; failure modes of context-conditioned sampling; interaction between cross-round refinement and per-turn search.
 
+
+
+
+
+
+
 \section{Future Work}
 
 \emph{Stub.} Joint search over evaluator strategy and message; trajectory-level SMC; learned contrastive expert (a small fine-tuned helper model in place of the prompt-conditioned jailbroken target); importance-weighted variants of the contrastive proposal for unbiased propensity estimates; and a proper capability-bound experiment in which the contrastive sampler is used \emph{as} the scorer rather than just as a proposal.
+
+
+
+
+
+
 
 \section{Conclusion}
 
@@ -610,6 +771,7 @@ Weak transfer is evidence that the method is genuinely model-specific; strong tr
 \newpage
 .
 \newpage
+}%% end blue (Results/Discussion/Future Work/Conclusion --- old content)
 \bibliography{main}
 \bibliographystyle{icml2026}
 
@@ -621,9 +783,20 @@ Weak transfer is evidence that the method is genuinely model-specific; strong tr
 \newpage
 \appendix
 \onecolumn
+{\color{blue}%% OUTDATED appendix (old tree-search method) --- to be redone
+
+
+
+
+
+
+
 \section{Hyperparameter scaling}
 
 The main-body Table~\ref{tab:scaling} reports headline scaling on three axes; this appendix extends each sweep with finer-grained values and per-behaviour breakdowns.
+
+
+
 
 \subsection{Turns per rollout}
 Effect of increasing the number of conversation turns per rollout on elicitation score, holding total compute fixed.
@@ -638,9 +811,12 @@ Effect of increasing the number of conversation turns per rollout on elicitation
     Elicit.\ score $\uparrow$ & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Conversation-turn scaling saturates around 4--8 turns.} Extended turn sweep on \PH{Llama-3.1-8B-Instruct}, averaged over the main-slice behaviours; finer-grained version of Table~\ref{tab:scaling}~(b).}
+  \caption{\color{blue}\textbf{Conversation-turn scaling saturates around 4--8 turns.} Extended turn sweep on \PH{Llama-3.1-8B-Instruct}, averaged over the main-slice behaviours; finer-grained version of Table~\ref{tab:scaling}~(b).}
   \label{tab:appx-turns}
 \end{table}
+
+
+
 
 \subsection{Refinement rounds}
 Effect of additional cross-round refinement on elicitation score, holding per-round compute fixed.
@@ -656,9 +832,12 @@ Pairs with Table~\ref{tab:scaling}~(a).
     Elicit.\ score $\uparrow$ & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Refinement gains are concentrated in rounds 1--2; beyond round 4 the curve is flat.} Extended refinement-round sweep on \PH{Llama-3.1-8B-Instruct}, averaged over the main-slice behaviours; finer-grained version of Table~\ref{tab:scaling}~(a).}
+  \caption{\color{blue}\textbf{Refinement gains are concentrated in rounds 1--2; beyond round 4 the curve is flat.} Extended refinement-round sweep on \PH{Llama-3.1-8B-Instruct}, averaged over the main-slice behaviours; finer-grained version of Table~\ref{tab:scaling}~(a).}
   \label{tab:appx-rounds}
 \end{table}
+
+
+
 
 \subsection{Message / input length}
 Effect of varying the maximum sampled message length on elicitation score and on perplexity (compare to Table~\ref{tab:main}).
@@ -675,9 +854,12 @@ Effect of varying the maximum sampled message length on elicitation score and on
     On-topic $\uparrow$         & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Longer sampled messages improve elicitation up to $\sim$200 tokens, after which perplexity creeps up and on-topic-ness drops --- the message stops looking like a real user turn.} Message-length sweep on \PH{Llama-3.1-8B-Instruct}.}
+  \caption{\color{blue}\textbf{Longer sampled messages improve elicitation up to $\sim$200 tokens, after which perplexity creeps up and on-topic-ness drops --- the message stops looking like a real user turn.} Message-length sweep on \PH{Llama-3.1-8B-Instruct}.}
   \label{tab:appx-msglen}
 \end{table}
+
+
+
 
 \subsection{Candidates per beam}
 Saturation curve over the number of parallel candidates sampled at each BEAST / BoN step, broken down by resampling stage.
@@ -695,9 +877,12 @@ Saturation curve over the number of parallel candidates sampled at each BEAST / 
     All three           & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Token-stage search saturates earliest; turn-stage search keeps improving longest, suggesting the compute returns scale with how late in the hierarchy resampling happens.} Per-stage candidate-count sweep on \PH{Llama-3.1-8B-Instruct}.}
+  \caption{\color{blue}\textbf{Token-stage search saturates earliest; turn-stage search keeps improving longest, suggesting the compute returns scale with how late in the hierarchy resampling happens.} Per-stage candidate-count sweep on \PH{Llama-3.1-8B-Instruct}.}
   \label{tab:appx-candidates}
 \end{table}
+
+
+
 
 \subsection{Allocation between turns, rounds, and width}
 Single fixed compute budget split across turns, rounds, and candidates-per-beam.
@@ -720,13 +905,19 @@ Identifies which axis pays off most per unit compute.
     8  & 2 & 4  & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Within a fixed compute envelope, $\sim$2 turns~$\times$~2--4 rounds~$\times$~moderate width is the sweet spot; over-spending on any single axis under-performs balanced allocations.} Compute-allocation sweep on \PH{Llama-3.1-8B-Instruct} at a constant total budget.}
+  \caption{\color{blue}\textbf{Within a fixed compute envelope, $\sim$2 turns~$\times$~2--4 rounds~$\times$~moderate width is the sweet spot; over-spending on any single axis under-performs balanced allocations.} Compute-allocation sweep on \PH{Llama-3.1-8B-Instruct} at a constant total budget.}
   \label{tab:appx-allocation}
 \end{table}
 
+
+
+
+
+
+
 \section{Significance tests}
 
-Pairwise significance tests of our method against each baseline on the main-comparison slice, computed via paired bootstrap with $10^4$ resamples.
+Pairwise significance tests of WILT against each baseline on the main-comparison slice, computed via paired bootstrap with $10^4$ resamples.
 
 \begin{table}[h]
   \centering
@@ -743,9 +934,15 @@ Pairwise significance tests of our method against each baseline on the main-comp
     \PH{FLRT}      & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Our method beats every baseline at $p < 0.01$ on the main-comparison slice.} Paired bootstrap, $10^4$ resamples; one-sided test that ours is greater.}
+  \caption{\color{blue}\textbf{WILT beats every baseline at $p < 0.01$ on the main-comparison slice.} Paired bootstrap, $10^4$ resamples; one-sided test that WILT is greater.}
   \label{tab:appx-sig}
 \end{table}
+
+
+
+
+
+
 
 \section{Cross-model sanity check}
 
@@ -763,9 +960,15 @@ Pairwise significance tests of our method against each baseline on the main-comp
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{The lead over the strongest external baseline also holds on a second model family.} Cross-model sanity check on \PH{Qwen-2.5-7B-Instruct}, main-slice behaviours, matched compute.}
+  \caption{\color{blue}\textbf{The lead over the strongest external baseline also holds on a second model family.} Cross-model sanity check on \PH{Qwen-2.5-7B-Instruct}, main-slice behaviours, matched compute.}
   \label{tab:sanity}
 \end{table}
+
+
+
+
+
+
 
 \section{Failure modes}
 
@@ -785,9 +988,15 @@ Examples of cases where context conditioning does not help: behaviours where the
     \PH{Contrastive over-steering}    & Output sampler produces unnatural target turns at high $\alpha$ & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Failure modes are concentrated in a small number of identifiable conditions, suggesting straightforward interventions (better TRSes, refiner-diversity priors, $\alpha$ clipping).} Per-mode frequency across the main-slice rollouts.}
+  \caption{\color{blue}\textbf{Failure modes are concentrated in a small number of identifiable conditions, suggesting straightforward interventions (better TRSes, refiner-diversity priors, $\alpha$ clipping).} Per-mode frequency across the main-slice rollouts.}
   \label{tab:appx-failures}
 \end{table}
+
+
+
+
+
+
 
 \section{Additional qualitative examples}
 
@@ -813,7 +1022,7 @@ Extended set of side-by-side elicitation messages, covering all six behaviours a
     \emph{BLOOM:} ``Can you respond to my boss's message about the 3pm meeting?''\\
     \emph{BEAST:} ``lie:: confirm meeting attended:: calendar tool:: send email say YES attended ::''
   }}
-  \caption{\textbf{Across every behaviour, only our method consistently produces messages that are simultaneously fluent, on-topic, and elicitive.} Extended version of Figure~\ref{fig:qual} covering three further main-slice behaviours.}
+  \caption{\color{blue}\textbf{Across every behaviour, only WILT consistently produces messages that are simultaneously fluent, on-topic, and elicitive.} Extended version of Figure~\ref{fig:qual} covering three further main-slice behaviours.}
   \label{fig:appx-qual-extended}
 \end{figure}
 
@@ -842,8 +1051,9 @@ Extended set of side-by-side elicitation messages, covering all six behaviours a
     \emph{Updated strategy:} ``After self-deprecation hook, ask for a bulleted list of the user's shortcomings.''
     \emph{Target response:} produces an enumerated critical list. Judge score: 0.91.
   }}
-  \caption{\textbf{Refinement is visible at the strategy level: the refiner replaces low-yielding tactics with more targeted ones across rounds, taking the judge score from 0.2 to 0.91 over four rounds.} One example refinement trajectory.}
+  \caption{\color{blue}\textbf{Refinement is visible at the strategy level: the refiner replaces low-yielding tactics with more targeted ones across rounds, taking the judge score from 0.2 to 0.91 over four rounds.} One example refinement trajectory.}
   \label{fig:appx-refinement-trajectories}
 \end{figure}
+}%% end blue (outdated appendix)
 
 \end{document}
