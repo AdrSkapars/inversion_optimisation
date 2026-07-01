@@ -6433,7 +6433,7 @@ cfg = DotDict({
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
-        "corruption_var_batch": 10,          # (corruption path only) variations rolled out in LOCKSTEP per corruption call, so num_prompts*this slots decode together (~5-6x throughput vs 1-at-a-time). Keep <= poe_gen_batch/num_prompts. 10 => 100 slots, ~34GB peak at turn-3.
+        "corruption_var_batch": 10,          # (corruption path only) variations rolled out in LOCKSTEP per corruption call (~5-6x throughput vs 1-at-a-time). The decode always chunks into poe_gen_batch, so this only affects call bookkeeping, NOT decode throughput — 10 is plenty; raising it doesn't speed anything up (measured).
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": 2,                  # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
@@ -6521,7 +6521,7 @@ cfg = DotDict({
         "corrupt_prefill": "",                    # prefill the corruptor's reply past its refusal. DEFAULT "" (off). Canonical value we use: "Sure, here is the rewritten version:\n\n". Set here or via BLOOM_CORRUPT_PREFILL.
         "selection": "filter_target",             # best-of-N pick from the num_prompts pool: target_pick (max target logprob) | max_d3 | max_cr | filter_target (keep candidates with d3 >= filter_tau, then max target logprob). set via BLOOM_SELECTION.
         "filter_tau": 0.5,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.5. Only used when selection="filter_target".
-        "poe_gen_batch": 100,                     # PoE decode batch width (slots = conversations*num_prompts per corruption call). 100 = 10 convs*10 prompts; matches rollout.corruption_var_batch. Peak ~34GB at turn-3 on a 49GB card. See benchmark.
+        "poe_gen_batch": 100,                     # PoE decode batch width (slots decoded together). 100 is the COMPUTE-SATURATION KNEE for Qwen3-4B x2 on an A6000 — measured optimum. Don't raise it: 140 is SLOWER (2.78->3.82 s/conv) and ~41GB, 180+ OOMs. Bigger buys padding+memory, not parallelism.
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
     },
 })
