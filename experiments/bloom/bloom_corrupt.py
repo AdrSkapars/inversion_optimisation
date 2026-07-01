@@ -3030,8 +3030,13 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      target_floor: float = 0.0, corrupt_only: bool = False,
                      n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
-                     poe_b3: Optional[float] = None) -> List[List[int]]:
+                     poe_b3: Optional[float] = None, return_target_lp: bool = False):
     """Full-vocab PoE: sample from softmax((eb1*t_logits + eb2*c_logits - eb3*n)/temp).
+
+    When return_target_lp=True, also returns per-sequence mean true-target log-prob of the
+    sampled (non-eos) tokens: (gen, mean_lp). This is the same quantity the old separate
+    _hf_score forward computed, but captured for free during the decode (tl is already in
+    hand each step) — so callers can select/report on target_lp without a second pass.
     Both prefix lists have equal length B and are stepped in lockstep.
 
     target_floor>0 thresholds on the TRUE TARGET distribution but still samples from the
@@ -3073,6 +3078,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
             ncp = no.past_key_values; nl = no.logits[:, -1, :].float(); naf = na
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
+        lp_sum = torch.zeros(B, device=device)   # sum of true-target logprob of sampled tokens
+        lp_cnt = torch.zeros(B, device=device)   # count of scored (live, non-eos) tokens
         for _ in range(max_new):
             if corrupt_only:
                 # Sample purely from the corruption distribution (target weight dropped). The
@@ -3098,6 +3105,14 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                     s = masked.sum(dim=-1, keepdim=True)
                 probs = masked / s.clamp_min(1e-12)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
+            if return_target_lp:
+                # True-target logprob of the sampled token; tl was already computed this step
+                # so this is ~free vs a separate scoring forward. logsumexp avoids the full
+                # [B, vocab] log_softmax tensor (the OOM-prone bit of the old _hf_score).
+                tlp = tl.gather(-1, nxt.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(tl, dim=-1)
+                live = (~done) & (nxt != eos_id)
+                lp_sum = lp_sum + torch.where(live, tlp, torch.zeros_like(tlp))
+                lp_cnt = lp_cnt + live.float()
             nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             for i in range(B):
                 if not done[i]: gen[i].append(int(nxt[i]))
@@ -3113,29 +3128,11 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 naf = torch.cat([naf, ones], -1)
                 no = mc(input_ids=nxt.unsqueeze(-1), attention_mask=naf, past_key_values=ncp, use_cache=True)
                 ncp = no.past_key_values; nl = no.logits[:, -1, :].float()
+        if return_target_lp:
+            mean_lp = [(float(lp_sum[i] / lp_cnt[i]) if float(lp_cnt[i]) > 0 else None)
+                       for i in range(B)]
+            return gen, mean_lp
         return gen
-
-
-def _hf_score(mt, items, pad_id, device, batch_size: int = 8) -> List[Optional[float]]:
-    """Avg per-token target log-prob (true target dist, no temperature). items =
-    (full_ids, text_start)."""
-    with torch.no_grad():
-        out_lp: List[Optional[float]] = []
-        for s in range(0, len(items), batch_size):
-            chunk = items[s:s + batch_size]
-            seqs = [x[0] for x in chunk]; tss = [x[1] for x in chunk]
-            inp, attn = _hf_left_pad(seqs, pad_id, device)
-            lg = mt(input_ids=inp, attention_mask=attn).logits.float()
-            B, L, V = lg.shape; lpall = torch.log_softmax(lg, -1)
-            for k in range(B):
-                full = seqs[k]; ts = tss[k]; fl = len(full)
-                if fl - ts <= 0: out_lp.append(None); continue
-                pad = L - fl
-                cols = torch.tensor(list(range(pad + ts - 1, pad + fl - 1)), device=device, dtype=torch.long)
-                tg = torch.tensor(full[ts:], device=device, dtype=torch.long)
-                v = lpall[k][cols].gather(-1, tg.unsqueeze(-1)).squeeze(-1)
-                out_lp.append(float(v.mean()))
-        return out_lp
 
 
 def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
@@ -3204,24 +3201,30 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                 if use_neutral: all_n.append(list(n_pre))
                 owner.append(ci); meta.append((p_idx, s_idx))
 
-    gen_all: List[List[int]] = []
-    for s in range(0, len(all_t), poe_gen_batch):
-        gen_all += _hf_poe_generate(mt, mc, all_t[s:s + poe_gen_batch], all_c[s:s + poe_gen_batch],
-                                    0.0, temperature, max_tokens, pad_id, eos_id, device,  # beta unused: cfg_b1/b2/b3 drive the combination
-                                    target_floor=target_floor, corrupt_only=corrupt_only,
-                                    n_prefs=(all_n[s:s + poe_gen_batch] if use_neutral else None),
-                                    poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3)
-    # Keep the EXACT generated token-ids (eos-stripped) per candidate. Scoring/storage uses
-    # these instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
+    # Length-bucketed PoE decode: _hf_left_pad pads every batch to its longest prefix, so
+    # grouping length-similar slots (target + corruptor prefix) cuts padding waste — biggest
+    # at turn 3, where conversation lengths diverge. The sort is deterministic given the same
+    # inputs, so runs stay seed-stable (results just won't match a non-bucketed run bit-for-bit).
+    order = sorted(range(len(all_t)), key=lambda k: len(all_t[k]) + len(all_c[k]))
+    gen_all: List[List[int]] = [[] for _ in range(len(all_t))]
+    lps_all: List[Optional[float]] = [None] * len(all_t)   # mean true-target logprob per slot
+    for s in range(0, len(order), poe_gen_batch):
+        idxs = order[s:s + poe_gen_batch]
+        res, res_lp = _hf_poe_generate(mt, mc, [all_t[k] for k in idxs], [all_c[k] for k in idxs],
+                               0.0, temperature, max_tokens, pad_id, eos_id, device,  # beta unused: cfg_b1/b2/b3 drive the combination
+                               target_floor=target_floor, corrupt_only=corrupt_only,
+                               n_prefs=([all_n[k] for k in idxs] if use_neutral else None),
+                               poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3, return_target_lp=True)
+        for j, k in enumerate(idxs):
+            gen_all[k] = res[j]; lps_all[k] = res_lp[j]
+    # Keep the EXACT generated token-ids (eos-stripped) per candidate. Storage uses these
+    # instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
     # tokenizers (Phi) and produced impossibly-low probs. These ids are saved into the
     # transcript (gen_token_ids) so score_tokens.py can compute exact probabilities.
     cand_ids_all = [[x for x in g if x != eos_id] for g in gen_all]
     cand_texts_all = [tok.decode(ids, skip_special_tokens=True).strip() for ids in cand_ids_all]
-    # target-pick scoring, batched across ALL slots (t_pre carries the no-think prefix so
-    # scoring matches generation), using the EXACT generated ids (no re-encode artifact).
-    score_items = [(list(t_pres[owner[k]]) + cand_ids_all[k],
-                    len(t_pres[owner[k]])) for k in range(len(cand_ids_all))]
-    lps_all = _hf_score(mt, score_items, pad_id, device)
+    # target-pick scores (mean true-target logprob) come straight from the decode above —
+    # captured per token while tl was in hand, so no separate scoring forward pass is needed.
 
     import zlib as _zlib, collections as _coll
     def _sel_d3(t):
@@ -4403,40 +4406,46 @@ def run_rollout_batched_local(
                               "rollout_prompt_text": rollout_prompt_text, "rep": rep,
                               "frozen": frozen, "fixed_kickoff": fixed_kickoff})
 
+        # ── Kickoff for ALL seeds up front: turn-1 kickoffs are independent of any
+        #    target output, so build every seed's eval context and push all non-frozen
+        #    kickoffs through the evaluator in ONE vLLM call (maximal batching) rather
+        #    than one call per chunk.
+        gen_seeds, gen_ctxs = [], []
+        for sd in seeds:
+            variation = sd["variation"]
+            frozen_tsp = variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
+            target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
+            if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
+                target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
+            per_var_refined_strategy = variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
+            kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
+            eval_ctx = [
+                {"role": "system", "content": evaluator_system_prompt},
+                {"role": "user", "content": f"{sd['rollout_prompt_text']}\n\n{kickoff_prompt}"},
+            ]
+            sd["target_sysprompt"] = target_sysprompt
+            sd["eval_kickoff_ctx"] = eval_ctx
+            sd["setup_ctx_len"] = len(eval_ctx)
+            sd["kickoff_strategy"] = ""
+            if sd["frozen"]:
+                sd["kickoff_msg"] = sd["fixed_kickoff"]["content"]
+                sd["kickoff_strategy"] = sd["fixed_kickoff"].get("strategy", "") or ""
+            else:
+                gen_seeds.append(sd); gen_ctxs.append(_strip_thinking_from_msgs(eval_ctx))
+        if gen_ctxs:
+            raws = batch_generate_local(lm_eval, gen_ctxs, eval_max_tokens, temperature, no_think=no_think_eval)
+            for sd, raw in zip(gen_seeds, raws):
+                parsed = parse_message(_make_local_response(raw))
+                content = parsed["content"] or raw
+                msg, _trs, strat = _extract_message_tags(content)
+                sd["kickoff_msg"] = msg
+                sd["kickoff_strategy"] = strat
+
+        # Roll out mini-batches (chunks) in lockstep. Each chunk is fully rolled out (all
+        # turns) before the next starts, keeping every corruption call at corr_var_batch *
+        # num_prompts slots — the memory-safe width from the benchmark.
         for _b in range(0, len(seeds), corr_var_batch):
             chunk = seeds[_b:_b + corr_var_batch]
-            # ── Kickoff: build eval context per seed; batch-generate the non-frozen ──
-            gen_pos, gen_ctxs = [], []
-            for pos, sd in enumerate(chunk):
-                variation = sd["variation"]
-                frozen_tsp = variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
-                target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
-                if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
-                    target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
-                per_var_refined_strategy = variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
-                kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
-                eval_ctx = [
-                    {"role": "system", "content": evaluator_system_prompt},
-                    {"role": "user", "content": f"{sd['rollout_prompt_text']}\n\n{kickoff_prompt}"},
-                ]
-                sd["target_sysprompt"] = target_sysprompt
-                sd["eval_kickoff_ctx"] = eval_ctx
-                sd["setup_ctx_len"] = len(eval_ctx)
-                sd["kickoff_strategy"] = ""
-                if sd["frozen"]:
-                    sd["kickoff_msg"] = sd["fixed_kickoff"]["content"]
-                    sd["kickoff_strategy"] = sd["fixed_kickoff"].get("strategy", "") or ""
-                else:
-                    gen_pos.append(pos); gen_ctxs.append(_strip_thinking_from_msgs(eval_ctx))
-            if gen_ctxs:
-                raws = batch_generate_local(lm_eval, gen_ctxs, eval_max_tokens, temperature, no_think=no_think_eval)
-                for pos, raw in zip(gen_pos, raws):
-                    parsed = parse_message(_make_local_response(raw))
-                    content = parsed["content"] or raw
-                    msg, _trs, strat = _extract_message_tags(content)
-                    chunk[pos]["kickoff_msg"] = msg
-                    chunk[pos]["kickoff_strategy"] = strat
-
             # ── Seed per-conversation state (target / transcript / eval msg lists) ──
             for sd in chunk:
                 tsp = sd["target_sysprompt"]
