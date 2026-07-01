@@ -7592,6 +7592,8 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
     if os.environ.get("BLOOM_SELECTION"):
         cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
+    if os.environ.get("BLOOM_FILTER_TAU"):
+        cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.5)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_MAXPREFIX"):
