@@ -4275,7 +4275,7 @@ def run_rollout_batched_local(
     target_gpu_id   = cfg.get("target_gpu_id",   1)
     eval_gpu_util   = cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
     target_gpu_util = cfg.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
-    eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 8192)
+    eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 16384)
     target_max_len  = cfg.rollout.get("target_max_model_len",    4096)
 
     # Jailbroken-model contrastive output decoding: when enabled, the jail model
@@ -6704,7 +6704,7 @@ cfg = DotDict({
         "target": target_model,              # model under evaluation
         "evaluator_max_tokens": 1200,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; tags auto-closed if truncated)
         "target_max_tokens": 250,            # cap on target response length — reduced to match 2-5 sentence constraint
-        "evaluator_max_model_len": 8192,     # vLLM context window for the eval model
+        "evaluator_max_model_len": 16384,    # vLLM context window for the eval model (Gemma-4 supports far more; 8192 was too tight — long understanding/ideation or 3-turn judgment prompts overflow it)
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
