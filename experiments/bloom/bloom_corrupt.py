@@ -3238,9 +3238,8 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     # target_only (baseline/BoN): the target is generated as a plain single-pass HF sample —
     # NO corruption/PoE. The target's own on-policy per-token probabilities are captured during
     # this decode (return_token_lps), so the run reports token stats with zero extra forward
-    # passes. Enabled by corruption_runtime_cfg['target_only'] (or the BLOOM_TARGET_ONLY_HF env).
-    target_only = bool(corruption_runtime_cfg.get("target_only")
-                       or os.environ.get("BLOOM_TARGET_ONLY_HF", "0").lower() in ("1", "true", "yes"))
+    # passes. Set by the promotion in run_rollout_batched_local (corruption_runtime_cfg['target_only']).
+    target_only = bool(corruption_runtime_cfg.get("target_only"))
     if target_only:
         baselines, base_tlps = _hf_generate(mt, t_pres, max_tokens, temperature,
                                             pad_id, eos_id, device, return_token_lps=True)
