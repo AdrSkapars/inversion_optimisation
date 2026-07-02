@@ -533,6 +533,15 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
     import os
     import traceback as _tb
 
+    # Become a session/process-group leader BEFORE vLLM spawns anything, so this worker and all
+    # of vLLM's internal EngineCore / GPU-worker subprocesses share one process-group id. The
+    # parent can then SIGKILL the entire group at shutdown; otherwise killing only this top
+    # process reparents those children to init, orphaning ~GB of GPU memory (the "auditor leak").
+    try:
+        os.setsid()
+    except Exception:
+        pass
+
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     # Quiet the worker — vLLM is chatty and we already log from the parent.
     os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
@@ -790,6 +799,12 @@ class VLLMWorker:
         fallback is essential to prevent the script hanging at exit."""
         if not self.proc.is_alive():
             return
+        # The worker made itself a process-group leader (setsid), so its pgid == its pid and the
+        # whole vLLM subprocess tree shares it. Capture it now to kill the tree below.
+        try:
+            pgid = os.getpgid(self.proc.pid)
+        except Exception:
+            pgid = None
         try:
             self.req_q.put(("shutdown",))
             self.proc.join(timeout=5)
@@ -801,6 +816,15 @@ class VLLMWorker:
         if self.proc.is_alive():
             self.proc.kill()       # SIGKILL — definitely dies
             self.proc.join(timeout=2)
+        # Kill the whole process GROUP so vLLM's internal EngineCore / GPU-worker children die
+        # too (they're not our direct children, so killing self.proc alone leaks their GPU mem).
+        # Guard pgid == self.proc.pid: only if setsid actually made the worker its own group
+        # leader — never SIGKILL the parent's group (which would nuke this whole run).
+        if pgid is not None and pgid == self.proc.pid:
+            try:
+                os.killpg(pgid, 9)   # SIGKILL the vLLM process tree
+            except Exception:
+                pass
         # Close the IPC queues so the parent doesn't hang on their internal threads.
         for q in (self.req_q, self.res_q):
             try:
