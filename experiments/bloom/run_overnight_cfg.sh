@@ -32,7 +32,7 @@ run () {  # folder corrupt_model(""=default abliterated) beta gamma turns last_r
     env BLOOM_FOLDER="$folder" BLOOM_CORRUPTION_ENABLED=1 BLOOM_BETA="$beta" BLOOM_TARGET_FLOOR=1e-5 \
       $CM_ENV BLOOM_CFG_GAMMA="$g" BLOOM_MAX_TURNS="$turns" BLOOM_NUM_ROUNDS=1 \
       BLOOM_FREEZE_INPUT=0 BLOOM_SKIP_FINISHED=0 \
-      uv run python experiments/bloom/bloom_beast_tree_corrupt.py
+      uv run python experiments/bloom/bloom_corrupt.py
     kill_gpu
   fi
   for i in 1 2 3; do
