@@ -3224,6 +3224,21 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         t_pres.append(tok.encode(s, add_special_tokens=False))
     baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
 
+    # THROWAWAY timing knob (BLOOM_TARGET_ONLY_HF): corruption OFF, but generate the target
+    # via HF (single forward pass/token) instead of vLLM, to isolate HF-vs-vLLM generation
+    # cost for the per-round comparison. _hf_generate above already produced the target's own
+    # natural sample, so just return it and skip the PoE decode entirely. Remove after the test.
+    if (corruption_runtime_cfg.get("target_only")
+            or os.environ.get("BLOOM_TARGET_ONLY_HF", "0").lower() in ("1", "true", "yes")):
+        out: List[Dict] = []
+        for base_ids in baselines:
+            ids = [x for x in base_ids if x != eos_id]
+            txt = tok.decode(ids, skip_special_tokens=True).strip()
+            out.append({"best_text": txt, "best_ids": ids,
+                        "pool": [{"text": txt, "ids": ids, "target_lp": None, "target_p_pct": None,
+                                  "d3": 1.0, "cr": 1.0, "prompt_index": 0, "sample_index": 0}]})
+        return out
+
     # Build every (target-prefix, corruption-prefix) slot across ALL candidates up front,
     # then run the PoE decode loop over big chunks instead of once per candidate. The decode
     # loop is the sequential bottleneck (max_new steps x 2 model forwards), and a 4B model is
