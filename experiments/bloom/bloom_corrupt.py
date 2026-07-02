@@ -3014,11 +3014,18 @@ def _turn_end_eos(model_hf: str, tok) -> int:
     if not cands:
         return tok.eos_token_id
     try:
-        rendered = tok.apply_chat_template(
+        # Render the assistant turn as a STRING and check which eos candidate's token text the
+        # template emits to close it. (We match on the token string, not on tokenize=True ids:
+        # transformers 5's tokenizers backend returns an Encoding object from tokenize=True, not
+        # a flat List[int], so `c in rendered` was always False and fell through to cands[0] —
+        # which silently picked the DOCUMENT eos, e.g. Llama <|end_of_text|> 128001, instead of
+        # the turn-end <|eot_id|> 128009, letting HF generation run past turn boundaries.)
+        s = tok.apply_chat_template(
             [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
-            tokenize=True, add_generation_prompt=False)
+            tokenize=False, add_generation_prompt=False)
         for c in cands:
-            if c in rendered:          # the candidate the template emits to end the turn
+            tokstr = tok.convert_ids_to_tokens(c)
+            if tokstr and tokstr in s:   # the candidate the template emits to end the turn
                 return c
     except Exception:
         pass
