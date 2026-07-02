@@ -3234,7 +3234,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     # Keep the EXACT generated token-ids (eos-stripped) per candidate. Storage uses these
     # instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
     # tokenizers (Phi) and produced impossibly-low probs. These ids are saved into the
-    # transcript (gen_token_ids) so score_tokens.py can compute exact probabilities.
+    # transcript (gen_token_ids) so corruption_token_stats scores the exact ids.
     cand_ids_all = [[x for x in g if x != eos_id] for g in gen_all]
     cand_texts_all = [tok.decode(ids, skip_special_tokens=True).strip() for ids in cand_ids_all]
     # target-pick scores (mean true-target logprob) come straight from the decode above —
@@ -3316,6 +3316,58 @@ def batch_generate_corruption_local(lm_target, lm_corrupt, corruption_runtime_cf
     (kept for call-site compatibility) — the HF models live in corruption_runtime_cfg['hf']."""
     return _corruption_generate_hf(corruption_runtime_cfg["hf"], corruption_runtime_cfg,
                                    target_msgs_batch, max_tokens, temperature, no_think_target)
+
+
+def corruption_token_stats(output_dir: Path, hf: Dict) -> Optional[Dict[str, float]]:
+    """Token-level target probabilities of each transcript's FIRST chosen target output,
+    computed with the already-loaded corruption target model (reuses hf['mt']/tok — no reload,
+    no extra model). For each output: prob of every token under the target dist (exact
+    gen_token_ids when saved, else re-encode). Returns A (over all pooled tokens) and B
+    (per-output minimum) summaries in %. Folds the old standalone score_tokens.py into the run."""
+    import statistics as _st
+    mt, tok, dev = hf["mt"], hf["tok"], hf["device"]
+    no_think = hf.get("target_no_think", "")
+    tfiles = sorted((output_dir / "transcripts").glob("*.json"))
+    all_p: List[float] = []        # every token's prob (%), pooled across chosen outputs
+    omins: List[float] = []        # per-output minimum token prob (%)
+    for f in tfiles:
+        try:
+            msgs = json.load(open(f, encoding="utf-8")).get("messages", [])
+        except Exception:
+            continue
+        for i, m in enumerate(msgs):
+            if m.get("source") != "target":
+                continue
+            resp = m.get("content")
+            if not resp:
+                break
+            prefix = [{"role": x["role"], "content": x["content"]} for x in msgs[:i]]
+            pstr = tok.apply_chat_template(prefix, tokenize=False, add_generation_prompt=True) + no_think
+            t_pre = tok.encode(pstr, add_special_tokens=False)
+            gen_ids = m.get("gen_token_ids")
+            resp_ids = list(gen_ids) if gen_ids else tok.encode(resp, add_special_tokens=False)
+            if not resp_ids:
+                break
+            full = t_pre + resp_ids
+            with torch.no_grad():
+                lg = mt(input_ids=torch.tensor([full], device=dev)).logits[0].float()
+                lp = torch.log_softmax(lg, -1)
+                cols = torch.arange(len(t_pre) - 1, len(full) - 1, device=dev)
+                tg = torch.tensor(resp_ids, device=dev)
+                tp = lp[cols].gather(-1, tg.unsqueeze(-1)).squeeze(-1).exp()
+            pl = [float(x) * 100 for x in tp]
+            all_p += pl
+            omins.append(min(pl))
+            break   # first target output per transcript only (matches the chosen-output metric)
+    if not all_p:
+        return None
+    return {
+        "A_mean_tok_pct":     round(sum(all_p) / len(all_p), 4),   # avg prob over all tokens
+        "A_median_tok_pct":   round(_st.median(all_p), 4),
+        "B_mean_of_mins_pct": round(sum(omins) / len(omins), 4),   # mean of per-output least-token
+        "B_min_of_mins_pct":  round(min(omins), 6),                # single least-token (≈ target_floor)
+        "n_token_scored":     len(omins),
+    }
 
 
 def _contrastive_sample_extensions(
@@ -4507,7 +4559,7 @@ def run_rollout_batched_local(
                     sd["current_turn"] = turn + 1
                     tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
                     if _ids and target_resp == raw_target:
-                        tmsg["gen_token_ids"] = _ids  # exact ids -> score_tokens computes exact probs
+                        tmsg["gen_token_ids"] = _ids  # exact ids -> exact token-prob scoring
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -4814,7 +4866,7 @@ def run_rollout_batched_local(
 
                 tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
                 if _corr_gen_ids and target_resp == raw_target:
-                    tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> score_tokens computes exact probs (no re-encode)
+                    tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> exact token-prob scoring (no re-encode)
                 if target_reason:
                     tmsg["reasoning"] = target_reason
                 if output_search_on:
@@ -4943,6 +4995,17 @@ def run_rollout_batched_local(
             "num_scored":       len(all_lps),
         },
     }
+    # Token-prob stats of the chosen outputs, computed here while the corruption target model
+    # is still loaded (reused — no reload). Stashed for the judgment summary + rollout.json.
+    if corruption_on and corruption_runtime_cfg is not None:
+        try:
+            _tok = corruption_token_stats(output_dir, corruption_runtime_cfg["hf"])
+            if _tok:
+                rollout_results["token_stats"] = _tok
+                print(f"  Token probs: avg={_tok['A_mean_tok_pct']:.2f}% | mean-of-mins="
+                      f"{_tok['B_mean_of_mins_pct']:.3f}% | min-of-mins={_tok['B_min_of_mins_pct']:.5f}%", flush=True)
+        except Exception as e:
+            print(f"  [token stats] skipped: {e}", flush=True)
     save_json(rollout_results, output_dir / "rollout.json")
     if mean_avg_logprob is not None:
         print(f"  Mean avg logprob: {mean_avg_logprob:.4f} over {len(all_lps)} transcripts", flush=True)
@@ -5662,6 +5725,14 @@ def run_judgment_batched_local(
         results["metajudgment_justification"] = metajudgment_result["metajudgment_justification"]
         results["metajudgment_response"] = metajudgment_result["metajudgment_response"]
         results["summary_statistics"].update(metajudgment_result["metajudgment_scores"])
+
+    # Fold in the token-prob stats computed during rollout (alongside behavior/elicitation).
+    try:
+        _ts = json.load(open(output_dir / "rollout.json", encoding="utf-8")).get("token_stats")
+        if _ts:
+            results["summary_statistics"].update(_ts)
+    except Exception:
+        pass
 
     save_json(results, output_dir / "judgment.json")
     print(f"JUDGMENT STAGE - COMPLETED ({len(judgments)} successful, {len(failed_judgments)} failed)", flush=True)
@@ -6673,7 +6744,9 @@ if __name__ == "__main__":
                 return True
         stats = result.get("summary_statistics", {})
         print(f"\n  Round 1: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-            f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
+            f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}"
+            + (f", tok_avg={stats['A_mean_tok_pct']:.1f}%, tok_meanmin={stats['B_mean_of_mins_pct']:.2f}%, "
+               f"tok_min={stats['B_min_of_mins_pct']:.4f}%" if stats.get('A_mean_tok_pct') is not None else ""), flush=True)
         # Logprob scoring is computed inline during rollout — no separate stage needed.
         # Load understanding from round 1 for reuse in all subsequent rounds
         with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
@@ -6728,7 +6801,9 @@ if __name__ == "__main__":
             if result:
                 stats = result.get("summary_statistics", {})
                 print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
-                    f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}", flush=True)
+                    f"elicitation_rate={stats.get('elicitation_rate', 0):.2f}"
+                    + (f", tok_avg={stats['A_mean_tok_pct']:.1f}%, tok_meanmin={stats['B_mean_of_mins_pct']:.2f}%, "
+                       f"tok_min={stats['B_min_of_mins_pct']:.4f}%" if stats.get('A_mean_tok_pct') is not None else ""), flush=True)
             else:
                 print(f"\n  Round {round_num} FAILED", flush=True)
                 return True
