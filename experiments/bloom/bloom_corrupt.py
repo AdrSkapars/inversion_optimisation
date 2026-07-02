@@ -3201,22 +3201,36 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
                 if use_neutral: all_n.append(list(n_pre))
                 owner.append(ci); meta.append((p_idx, s_idx))
 
-    # Length-bucketed PoE decode: _hf_left_pad pads every batch to its longest prefix, so
-    # grouping length-similar slots (target + corruptor prefix) cuts padding waste — biggest
-    # at turn 3, where conversation lengths diverge. The sort is deterministic given the same
-    # inputs, so runs stay seed-stable (results just won't match a non-bucketed run bit-for-bit).
-    order = sorted(range(len(all_t)), key=lambda k: len(all_t[k]) + len(all_c[k]))
+    # Length-bucketed + memory-ADAPTIVE PoE decode. Peak GPU memory ~ batch * seqlen (both
+    # models hold KV for the batch, and _hf_left_pad pads to the batch's longest prefix). The
+    # conversation grows every turn, so a FIXED batch that fits turn 1 OOMs at turn 3 (and
+    # worse at 5+). We sort by prefix length (cuts padding) and greedily size each batch to a
+    # token budget:  batch * (max_prefix_len + max_tokens) <= poe_token_budget, capped at
+    # poe_gen_batch. So turn-1 batches stay large (hit the cap) and later turns shrink
+    # automatically — no per-turn-count retuning. Deterministic given the inputs -> seed-stable.
+    budget = max(1, int(corruption_runtime_cfg.get("poe_token_budget", 90000)))
+    order = sorted(range(len(all_t)), key=lambda k: max(len(all_t[k]), len(all_c[k])))
     gen_all: List[List[int]] = [[] for _ in range(len(all_t))]
     lps_all: List[Optional[float]] = [None] * len(all_t)   # mean true-target logprob per slot
-    for s in range(0, len(order), poe_gen_batch):
-        idxs = order[s:s + poe_gen_batch]
+    i = 0
+    while i < len(order):
+        j, mx = i, 0
+        while j < len(order):
+            k = order[j]
+            cand = max(mx, len(all_t[k]), len(all_c[k]))
+            bs = j - i + 1
+            if bs > poe_gen_batch: break
+            if bs > 1 and bs * (cand + max_tokens) > budget: break
+            mx = cand; j += 1
+        idxs = order[i:j]
         res, res_lp = _hf_poe_generate(mt, mc, [all_t[k] for k in idxs], [all_c[k] for k in idxs],
                                0.0, temperature, max_tokens, pad_id, eos_id, device,  # beta unused: cfg_b1/b2/b3 drive the combination
                                target_floor=target_floor, corrupt_only=corrupt_only,
                                n_prefs=([all_n[k] for k in idxs] if use_neutral else None),
                                poe_b1=cfg_b1, poe_b2=cfg_b2, poe_b3=cfg_b3, return_target_lp=True)
-        for j, k in enumerate(idxs):
-            gen_all[k] = res[j]; lps_all[k] = res_lp[j]
+        for jj, k in enumerate(idxs):
+            gen_all[k] = res[jj]; lps_all[k] = res_lp[jj]
+        i = j
     # Keep the EXACT generated token-ids (eos-stripped) per candidate. Storage uses these
     # instead of re-encoding the decoded text — re-encoding doesn't round-trip on some
     # tokenizers (Phi) and produced impossibly-low probs. These ids are saved into the
@@ -4221,6 +4235,7 @@ def run_rollout_batched_local(
             "selection":          str(corr_cfg.get("selection", "filter_target")),
             "filter_tau":         float(corr_cfg.get("filter_tau", 0.5)),
             "poe_gen_batch":      int(corr_cfg.get("poe_gen_batch", 100)),
+            "poe_token_budget":   int(corr_cfg.get("poe_token_budget", 90000)),
         }
         # hf_full — load HF target + corruption in this process on the target GPU
         corruption_runtime_cfg["hf"] = _load_hf_corruption_models(
@@ -6521,7 +6536,8 @@ cfg = DotDict({
         "corrupt_prefill": "",                    # prefill the corruptor's reply past its refusal. DEFAULT "" (off). Canonical value we use: "Sure, here is the rewritten version:\n\n". Set here or via BLOOM_CORRUPT_PREFILL.
         "selection": "filter_target",             # best-of-N pick from the num_prompts pool: target_pick (max target logprob) | max_d3 | max_cr | filter_target (keep candidates with d3 >= filter_tau, then max target logprob). set via BLOOM_SELECTION.
         "filter_tau": 0.5,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.5. Only used when selection="filter_target".
-        "poe_gen_batch": 100,                     # PoE decode batch width (slots decoded together). 100 is the COMPUTE-SATURATION KNEE for Qwen3-4B x2 on an A6000 — measured optimum. Don't raise it: 140 is SLOWER (2.78->3.82 s/conv) and ~41GB, 180+ OOMs. Bigger buys padding+memory, not parallelism.
+        "poe_gen_batch": 100,                     # HARD CAP on PoE decode slots. Actual batch is memory-adaptive (poe_token_budget) and shrinks as context grows, so this cap only binds on short (turn-1) contexts. 100 is ~the compute-saturation knee for Qwen3-4B x2.
+        "poe_token_budget": 90000,                # memory cap: batch grows until batch*(max_prefix+max_tokens) exceeds this (then capped at poe_gen_batch). ~90k keeps Qwen3-4B x2 KV under budget on a 47GB card at turn 3+ (~36 slots at a ~2.2k-token turn-3 context, auto-shrinking further for 5+ turns). Raise on a bigger card; lower if OOM.
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
     },
 })

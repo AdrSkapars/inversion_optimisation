@@ -18,7 +18,7 @@ import sys, glob, os, json, statistics as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# --- Per-model think-block registry (must match bloom_beast_tree_corrupt.py) -----------
+# --- Per-model think-block registry (must match bloom_corrupt.py) -----------
 # Whether a model's chat template auto-opens a <think> block needing a closed-think prefill
 # (Qwen3-style). To add a model: add ONE line. Unregistered models raise (fail-loud).
 _USES_THINK_BLOCK = {
@@ -44,7 +44,7 @@ def think_prefix(name):
     if key not in _USES_THINK_BLOCK:
         raise ValueError(
             f"Model {name!r} is not supported: add it to _USES_THINK_BLOCK at the top of "
-            f"score_tokens.py and bloom_beast_tree_corrupt.py. Registered: {sorted(_USES_THINK_BLOCK)}")
+            f"score_tokens.py and bloom_corrupt.py. Registered: {sorted(_USES_THINK_BLOCK)}")
     return _THINK_PREFILL if _USES_THINK_BLOCK[key] else ""
 
 DEV = "cuda:0"
