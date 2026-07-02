@@ -825,11 +825,14 @@ class VLLMWorker:
                 os.killpg(pgid, 9)   # SIGKILL the vLLM process tree
             except Exception:
                 pass
-        # Close the IPC queues so the parent doesn't hang on their internal threads.
+        # Close the IPC queues WITHOUT blocking on their feeder threads. cancel_join_thread is
+        # essential here: this shutdown now runs on the main exit path (before os._exit), and a
+        # blocking join_thread() on a queue with buffered data would hang the whole run — the
+        # very hang os._exit was added to dodge. We're tearing down, so dropping buffered IPC is fine.
         for q in (self.req_q, self.res_q):
             try:
+                q.cancel_join_thread()
                 q.close()
-                q.join_thread()
             except Exception:
                 pass
         if self in _ALL_WORKERS:
@@ -7002,4 +7005,9 @@ if __name__ == "__main__":
     # Hard exit: bypass Python shutdown (vLLM workers can hang non-daemon threads
     # forever). All useful output is already on disk. Exit code propagates to the
     # shell so `&&` chaining works correctly.
+    # BUT os._exit() skips atexit, so explicitly tear the workers down FIRST — otherwise the
+    # vLLM auditor's process tree is orphaned to init and keeps its GPU memory (the leak that
+    # used to force a reboot between runs). _shutdown_all_workers -> shutdown() killpgs each
+    # worker's whole process group.
+    _shutdown_all_workers()
     os._exit(1 if had_error else 0)
