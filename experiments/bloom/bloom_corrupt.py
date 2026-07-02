@@ -3054,26 +3054,38 @@ def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
 
 
 def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: float,
-                 pad_id: int, eos_id: int, device) -> List[List[int]]:
-    """Plain batched sampling from one HF model."""
+                 pad_id: int, eos_id: int, device, return_token_lps: bool = False):
+    """Plain batched sampling from one HF model.
+
+    return_token_lps: also return, per sequence, the list of per-token true-model logprobs of
+    the sampled (non-eos) tokens — captured for FREE from the logits already computed each step
+    (the on-policy token probabilities), so the caller needs no separate scoring forward pass."""
     with torch.no_grad():
         B = len(prefixes)
         inp, attn = _hf_left_pad(prefixes, pad_id, device)
         out = model(input_ids=inp, attention_mask=attn, use_cache=True, logits_to_keep=1)
         past = out.past_key_values; logits = out.logits[:, -1, :].float(); af = attn
         gen: List[List[int]] = [[] for _ in range(B)]
+        tlps: List[List[float]] = [[] for _ in range(B)]   # per-token logprob of sampled non-eos token
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for _ in range(max_new):
             probs = torch.softmax(logits / max(temperature, 1e-6), -1)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
+            if return_token_lps:
+                lp = logits.gather(-1, nxt.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(logits, dim=-1)
             nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             for i in range(B):
-                if not done[i]: gen[i].append(int(nxt[i]))
+                if not done[i]:
+                    gen[i].append(int(nxt[i]))
+                    if return_token_lps and int(nxt[i]) != eos_id:
+                        tlps[i].append(float(lp[i]))
             done = done | (nxt == eos_id)
             if bool(done.all()): break
             af = torch.cat([af, torch.ones(B, 1, dtype=torch.long, device=device)], -1)
             out = model(input_ids=nxt.unsqueeze(-1), attention_mask=af, past_key_values=past, use_cache=True)
             past = out.past_key_values; logits = out.logits[:, -1, :].float()
+        if return_token_lps:
+            return gen, tlps
         return gen
 
 
@@ -3222,22 +3234,29 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
         s = tok.apply_chat_template(tm, tokenize=False, add_generation_prompt=True)
         if no_think_target: s += NO_THINK
         t_pres.append(tok.encode(s, add_special_tokens=False))
-    baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
 
-    # THROWAWAY timing knob (BLOOM_TARGET_ONLY_HF): corruption OFF, but generate the target
-    # via HF (single forward pass/token) instead of vLLM, to isolate HF-vs-vLLM generation
-    # cost for the per-round comparison. _hf_generate above already produced the target's own
-    # natural sample, so just return it and skip the PoE decode entirely. Remove after the test.
-    if (corruption_runtime_cfg.get("target_only")
-            or os.environ.get("BLOOM_TARGET_ONLY_HF", "0").lower() in ("1", "true", "yes")):
+    # target_only (baseline/BoN): the target is generated as a plain single-pass HF sample —
+    # NO corruption/PoE. The target's own on-policy per-token probabilities are captured during
+    # this decode (return_token_lps), so the run reports token stats with zero extra forward
+    # passes. Enabled by corruption_runtime_cfg['target_only'] (or the BLOOM_TARGET_ONLY_HF env).
+    target_only = bool(corruption_runtime_cfg.get("target_only")
+                       or os.environ.get("BLOOM_TARGET_ONLY_HF", "0").lower() in ("1", "true", "yes"))
+    if target_only:
+        baselines, base_tlps = _hf_generate(mt, t_pres, max_tokens, temperature,
+                                            pad_id, eos_id, device, return_token_lps=True)
         out: List[Dict] = []
-        for base_ids in baselines:
+        for i, base_ids in enumerate(baselines):
             ids = [x for x in base_ids if x != eos_id]
             txt = tok.decode(ids, skip_special_tokens=True).strip()
-            out.append({"best_text": txt, "best_ids": ids,
-                        "pool": [{"text": txt, "ids": ids, "target_lp": None, "target_p_pct": None,
-                                  "d3": 1.0, "cr": 1.0, "prompt_index": 0, "sample_index": 0}]})
+            tprobs = [math.exp(l) * 100 for l in base_tlps[i]]   # on-policy token probs (%)
+            out.append({"best_text": txt, "best_ids": ids, "best_token_probs": tprobs,
+                        "pool": [{"text": txt, "ids": ids, "token_probs": tprobs,
+                                  "target_lp": (sum(base_tlps[i]) / len(base_tlps[i]) if base_tlps[i] else None),
+                                  "target_p_pct": None, "d3": 1.0, "cr": 1.0,
+                                  "prompt_index": 0, "sample_index": 0}]})
         return out
+
+    baselines = _hf_generate(mt, t_pres, max_tokens, temperature, pad_id, eos_id, device)
 
     # Build every (target-prefix, corruption-prefix) slot across ALL candidates up front,
     # then run the PoE decode loop over big chunks instead of once per candidate. The decode
@@ -3444,33 +3463,24 @@ def corruption_token_stats(output_dir: Path, hf: Dict) -> Optional[Dict[str, flo
     return _summarize_token_probs(prob_lists)
 
 
-def vllm_token_stats(output_dir: Path, lm: "LocalModel", no_think: bool) -> Optional[Dict[str, float]]:
-    """Token-level target probabilities for a corruption-OFF run (baseline / BoN), computed with
-    the already-loaded vLLM target — no second model, no reload. Same metric as
-    corruption_token_stats (each transcript's FIRST target output; here the output IS the
-    unmodified target's own sample, so these are its on-policy token probabilities), obtained
-    via teacher-forced prompt_logprobs and summarized identically."""
-    import math
-    tfiles = sorted((output_dir / "transcripts").glob("*.json"))
-    items: List[Tuple[List[Dict], str]] = []
-    for f in tfiles:
+def token_stats_from_stored(output_dir: Path) -> Optional[Dict[str, float]]:
+    """Token-prob stats for a corruption-OFF (target_only) run, read straight from the per-token
+    probabilities captured DURING generation and stored in the transcript as `gen_token_probs`
+    — NO extra forward pass. The target's outputs ARE its own on-policy samples, so these probs
+    are exactly the on-policy token probabilities. Summarized identically to corruption_token_stats."""
+    prob_lists: List[List[float]] = []
+    for f in sorted((output_dir / "transcripts").glob("*.json")):
         try:
             msgs = json.load(open(f, encoding="utf-8")).get("messages", [])
         except Exception:
             continue
-        for i, m in enumerate(msgs):
-            if m.get("source") != "target":
+        for m in msgs:
+            if m.get("source") != "target" or not m.get("content"):
                 continue
-            resp = m.get("content")
-            if not resp:
-                break
-            prefix = [{"role": x["role"], "content": x["content"]} for x in msgs[:i]]
-            items.append((prefix, resp))
-            break   # first target output per transcript only
-    if not items:
-        return None
-    lp_lists = batch_token_logprobs_local(lm, items, no_think=no_think)
-    prob_lists = [[math.exp(l) * 100 for l in row] for row in lp_lists if row]
+            probs = m.get("gen_token_probs")
+            if probs:
+                prob_lists.append([float(x) for x in probs])
+            break   # first target output per transcript only (matches the chosen-output metric)
     return _summarize_token_probs(prob_lists)
 
 
@@ -4269,6 +4279,23 @@ def run_rollout_batched_local(
     #   vllm_topk         — legacy top-K logit_bias (approximate; see verify_poe_topk.py).
     corr_cfg = cfg.get("corruption_output", {}) or {}
     corruption_on = bool(corr_cfg.get("enabled", False))
+
+    # Target ENGINE policy: the target ALWAYS runs as an in-process HF model (vLLM is reserved
+    # for the auditor), so target generation AND on-policy token scoring share one engine across
+    # baseline / BoN / corruption. A no-search, no-jail, non-corruption run (plain baseline/BoN)
+    # is realised as a corruption run whose PoE is replaced by plain HF sampling (target_only),
+    # reusing the HF-target machinery below. The input/output/jail search baselines still need
+    # the vLLM target worker, so they keep it. Opt back into a vLLM target with
+    # BLOOM_TARGET_ENGINE=vllm.
+    _no_search_jail = not (jail_on
+                           or bool((cfg.get("input_search", {})  or {}).get("enabled", False))
+                           or bool((cfg.get("output_search", {}) or {}).get("enabled", False)))
+    _force_hf_target = os.environ.get("BLOOM_TARGET_ENGINE", "hf").lower() != "vllm"
+    if (not corruption_on) and _no_search_jail and _force_hf_target:
+        corr_cfg = {**dict(corr_cfg), "enabled": True, "target_only": True,
+                    "model": target_model_id}   # corruptor mirrors target (never stepped)
+        corruption_on = True
+
     if corruption_on:
         _corr_sel = str(corr_cfg.get("selection", "filter_target"))
         if _corr_sel not in ("target_pick", "max_d3", "max_cr", "filter_target"):
@@ -4392,14 +4419,19 @@ def run_rollout_batched_local(
             "filter_tau":         float(corr_cfg.get("filter_tau", 0.8)),
             "poe_gen_batch":      int(corr_cfg.get("poe_gen_batch", 100)),
             "poe_token_budget":   int(corr_cfg.get("poe_token_budget", 90000)),
+            "target_only":        bool(corr_cfg.get("target_only", False)),
         }
-        # hf_full — load HF target + corruption in this process on the target GPU
+        # hf_full — load HF target (+ corruptor) in this process on the target GPU
         corruption_runtime_cfg["hf"] = _load_hf_corruption_models(
             target_model_id[len("local/"):], corr_model_id[len("local/"):], target_gpu_id)
-        print(f"  [corruption_output] loaded {corr_model_id} on GPU {target_gpu_id} "
-              f"(num_prompts={corruption_runtime_cfg['num_prompts']}, "
-              f"samples_per_prompt={corruption_runtime_cfg['samples_per_prompt']}, "
-              f"cfg_b2={corruption_runtime_cfg['cfg_b2']}, cfg_b3={corruption_runtime_cfg['cfg_b3']})", flush=True)
+        if corruption_runtime_cfg["target_only"]:
+            print(f"  [target_only] loaded HF target {target_model_id} on GPU {target_gpu_id} "
+                  f"(plain single-pass generation, no corruption; vLLM reserved for auditor)", flush=True)
+        else:
+            print(f"  [corruption_output] loaded {corr_model_id} on GPU {target_gpu_id} "
+                  f"(num_prompts={corruption_runtime_cfg['num_prompts']}, "
+                  f"samples_per_prompt={corruption_runtime_cfg['samples_per_prompt']}, "
+                  f"cfg_b2={corruption_runtime_cfg['cfg_b2']}, cfg_b3={corruption_runtime_cfg['cfg_b3']})", flush=True)
 
     search_cfg = cfg.input_search
     suffixes_per_scenario = search_cfg.suffixes_per_scenario
@@ -4664,6 +4696,9 @@ def run_rollout_batched_local(
                     tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
                     if _ids and target_resp == raw_target:
                         tmsg["gen_token_ids"] = _ids  # exact ids -> exact token-prob scoring
+                    _tprobs = corr_result.get("best_token_probs")
+                    if _tprobs is not None and target_resp == raw_target:
+                        tmsg["gen_token_probs"] = _tprobs  # on-policy probs captured at gen time (target_only) -> free token stats
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -5101,16 +5136,16 @@ def run_rollout_batched_local(
     }
     # Token-prob stats of the chosen outputs, computed here while the corruption target model
     # is still loaded (reused — no reload). Stashed for the judgment summary + rollout.json.
-    #   • corruption ON  → score with the loaded HF corruption target (exact PoE outputs).
-    #   • corruption OFF → the target is the loaded vLLM engine and the outputs are its own
-    #     samples, so score them via teacher-forced prompt_logprobs (on-policy token probs).
-    # Every run generates outputs, so both paths report the same token metrics.
+    #   • target_only (baseline/BoN) → probs captured DURING the HF decode, read from the
+    #     transcript — no extra forward pass.
+    #   • corruption ON → score the exact PoE outputs with the loaded HF corruption target.
+    # Both report the same token metrics (same HF target model, same summary).
     _tok = None
     try:
-        if corruption_on and corruption_runtime_cfg is not None:
+        if corruption_runtime_cfg is not None and corruption_runtime_cfg.get("target_only"):
+            _tok = token_stats_from_stored(output_dir)
+        elif corruption_on and corruption_runtime_cfg is not None:
             _tok = corruption_token_stats(output_dir, corruption_runtime_cfg["hf"])
-        elif lm_target is not None:
-            _tok = vllm_token_stats(output_dir, lm_target, no_think_target)
     except Exception as e:
         print(f"  [token stats] skipped: {e}", flush=True)
     if _tok:
