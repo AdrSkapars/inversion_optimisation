@@ -186,7 +186,7 @@ The result is \emph{guided importance sampling}: from the same one-sentence beha
   \item \textbf{Sample-efficient.} As guided importance sampling, WILT surfaces rare behaviours in far fewer samples than naive decoding and yields concrete transcripts --- usable for inspection or adversarial training --- rather than only a probability estimate.
   \item \textbf{Empirical gains across models and behaviours.}
   %% TODO: numbers below are provisional --- update once final experiments land.
-  Across four open-weight targets (Llama-3.2-3B, Phi-4-mini, Qwen3.6-4B, and Gemma-4-E4B) and six behaviours at matched compute, it lifts mean behaviour-presence from $2.4$ to $6.5$ on a $0$--$10$ scale over the strongest baseline while holding the mean per-token target probability near $0.8$, beating naive best-of-$N$ sampling (BoN), weak-to-strong jailbreaking (W2S), and the input-side methods BEAST, FLRT, and a generalised PAIR (G-PAIR) on \emph{both} elicitation and output probability. Per-component ablations isolate each ingredient above, and on a standard harmful-instruction benchmark WILT matches the attack-success protocol of the jailbreak literature.
+  Across four open-weight targets (Llama-3.2-3B, Phi-4-mini, Qwen3.5-4B, and Gemma-4-E4B) and six behaviours at matched compute, it lifts mean behaviour-presence from $2.4$ to $6.5$ on a $0$--$10$ scale over the strongest baseline while holding the mean per-token target probability near $0.8$, beating naive best-of-$N$ sampling (BoN), weak-to-strong jailbreaking (W2S), and the input-side methods BEAST, FLRT, and a generalised PAIR (G-PAIR) on \emph{both} elicitation and output probability. Per-component ablations isolate each ingredient above, and on a standard harmful-instruction benchmark WILT matches the attack-success protocol of the jailbreak literature.
 \end{itemize}
 
 
@@ -333,10 +333,10 @@ The experiments sweep each axis to locate where compute is best spent.
 \section{Experiments}\label{sec:experiments}
 
 \paragraph{Target models.}
-The audited models, accessed black-box --- we read only their output token distributions, never weights, activations, or gradients. We evaluate four recent open-weight instruct models of comparable size (${\sim}3$--$4$B parameters), so that cross-model differences reflect alignment rather than scale: Llama-3.2-3B-Instruct~\citep{grattafiori2024llama3}, Phi-4-mini-instruct~\citep{microsoft2025phi4mini}, Qwen3.6-4B~\citep{qwen2025qwen3}, and Gemma-4-E4B~\citep{gemma2026gemma4}. The last one's ``E4B'' denotes ${\sim}4$B \emph{effective} parameters, but its raw parameter count is somewhat higher.
+The audited models, accessed black-box --- we read only their output token distributions, never weights, activations, or gradients. We evaluate four recent open-weight instruct models of comparable size (${\sim}3$--$4$B parameters), so that cross-model differences reflect alignment rather than scale: Llama-3.2-3B-Instruct~\citep{grattafiori2024llama3}, Phi-4-mini-instruct~\citep{microsoft2025phi4mini}, Qwen3.5-4B~\citep{qwen2025qwen3}, and Gemma-4-E4B~\citep{gemma2026gemma4}. The last one's ``E4B'' denotes ${\sim}4$B \emph{effective} parameters, but its raw parameter count is somewhat higher.
 
 \paragraph{Auditor models.}
-A single fixed model generates BLOOM's scenarios and conversational inputs, scores each transcript for behaviour presence, and --- for the G-PAIR baseline --- refines strategies; it is held fixed across all conditions to control for auditor capability. Our main auditor is Claude Sonnet~\citep{anthropic2025claude}: we use Claude because BLOOM was developed and validated on Claude models, and Sonnet rather than the smaller Haiku, which refuses the adversarial auditor role. As an open, locally hostable alternative we also run a quantised \PH{Gemma-3-27B}~\citep{gemma2025gemma3}, which performed comparably well as an auditor in our experiments.
+A single fixed model generates BLOOM's scenarios and conversational inputs, scores each transcript for behaviour presence, and --- for the G-PAIR baseline --- refines strategies; it is held fixed across all conditions to control for auditor capability. Our main auditor is Gemma-4-26B-A4B~\citep{gemma2026gemma4}, a sparse mixture-of-experts model (${\sim}4$B active parameters) that we host locally on-GPU. We use a local auditor because the input-side baselines (BEAST, FLRT) perform a token-level search over the auditor's message, which requires its \emph{token-level logits} --- an API auditor returns only text; hosting it locally also lets the auditor and target share a single workstation. As a frontier cross-check we additionally run Claude Sonnet 4.6~\citep{anthropic2025claude} in the auditor-robustness study (\cref{tab:auditor}), restricted there to its sampling and judging roles since it exposes no logits for the token-level baselines --- and Sonnet rather than the smaller Haiku, which refuses the adversarial auditor role.
 
 
 \paragraph{Metrics.}
@@ -375,10 +375,10 @@ We compare our corruption sampler against the methods below. Each is a way of st
   \item \textbf{G-PAIR} --- a generalised variant of PAIR~\citep{chao2023jailbreaking}, keeping PAIR's attacker--judge refinement loop without the jailbreak-specific seeding (hard-coded persuasion strategies), so it applies to any target behaviour rather than only content jailbreaks. Between rollouts a refiner updates the auditor's multi-turn strategy from prior transcripts and judge scores.
 \end{itemize}
 
-\paragraph{Hyperparameters.} We use a single configuration of the steering weights $b_1, b_2, b_3$, the naturalness floor $\tau_{\mathrm{f}}$, the diversity threshold $\tau_{\mathrm{d}}$, the candidate-pool size $N$, and the prompt-bank size, and hold it fixed across every model and behaviour rather than tuning per condition. We set it once on the representative slice --- \PH{Qwen3.6-4B} on racial bias, the same slice used for the ablations and sweeps --- by reading the operating point off the dose--response curves (\cref{tab:pareto-sweep}) together with small informal sweeps, then freeze it. The one exception is the refusal-handling machinery: the compliance prefill and the refusal-cancelling weight $b_3$ are enabled only for targets likely to refuse the rewrite, where they are needed, and disabled otherwise; everything else is identical across conditions. Holding a single configuration across all models and behaviours is itself a robustness claim, which the breadth results (\cref{tab:breadth}) bear out. Per-method values are given in \cref{app:impl}.
+\paragraph{Hyperparameters.} We use a single configuration of the steering weights $b_1, b_2, b_3$, the naturalness floor $\tau_{\mathrm{f}}$, the diversity threshold $\tau_{\mathrm{d}}$, the candidate-pool size $N$, and the prompt-bank size, and hold it fixed across every model and behaviour rather than tuning per condition. We set it once on the representative slice --- Qwen3.5-4B on racial bias, the same slice used for the ablations and sweeps --- by reading the operating point off the dose--response curves (\cref{tab:pareto-sweep}) together with small informal sweeps, then freeze it. The one exception is the refusal-handling machinery: the compliance prefill and the refusal-cancelling weight $b_3$ are enabled only for targets likely to refuse the rewrite, where they are needed, and disabled otherwise; everything else is identical across conditions. Holding a single configuration across all models and behaviours is itself a robustness claim, which the breadth results (\cref{tab:breadth}) bear out. Per-method values are given in \cref{app:impl}.
 
 
-\paragraph{Compute requirements.} All experiments run on a single workstation with two NVIDIA RTX~A6000 GPUs (48~GB each): the open-weight targets are served locally on-GPU, while the auditor is queried over an API. Compute is matched across methods by equalising target forward passes rather than wall-clock (\cref{sec:experiments}).
+\paragraph{Compute requirements.} All experiments run on a single workstation with two NVIDIA RTX~A6000 GPUs (48~GB each): the auditor and the open-weight target are each served locally, one per GPU. The one exception is Claude Sonnet 4.6 in the auditor-robustness study, which is queried over an API. Compute is matched across methods by equalising target forward passes rather than wall-clock (\cref{sec:experiments}).
 %% TODO: the timing below is a provisional estimate based on the default configuration --- finalise once all runs complete.
 As a rough guide, a single (method, model, behaviour) run at our default configuration --- 100 scenarios, 3 conversation turns, and 5 differently-seeded rounds --- takes on the order of 16 hours on this setup, so the full sweep across all methods, the four targets, and the six behaviours dominates the project's compute budget.
 
@@ -396,7 +396,7 @@ The headline comparison (Table~\ref{tab:main}) reports behaviour presence and ou
 
 \subsection{Main comparison}
 
-\emph{Stub.} See \cref{tab:main} (\PH{Llama-3.2-3B}, racial bias); the other three (model, behaviour) slices --- \PH{Llama-3.2-3B}/deception and \PH{Qwen3.6-4B}/\{racial bias, deception\} --- are in \cref{app:comparison-slices}.
+\emph{Stub.} See \cref{tab:main} (Llama-3.2-3B, racial bias); the other three (model, behaviour) slices --- Llama-3.2-3B/deception and Qwen3.5-4B/\{racial bias, deception\} --- are in \cref{app:comparison-slices}.
 
 \begin{table}[t]
   \centering
@@ -418,7 +418,7 @@ The headline comparison (Table~\ref{tab:main}) reports behaviour presence and ou
     \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{WILT elicits the behaviour more strongly while keeping its output on-policy, winning on both axes where each baseline sacrifices one.} Main method comparison on \PH{Llama-3.2-3B} for \emph{racial bias} at matched compute; higher is better on all three metrics. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
+  \caption{\textbf{WILT elicits the behaviour more strongly while keeping its output on-policy, winning on both axes where each baseline sacrifices one.} Main method comparison on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all three metrics. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
   \label{tab:main}
 \end{table}
 
@@ -609,14 +609,14 @@ The headline comparison (Table~\ref{tab:main}) reports behaviour presence and ou
     \cmidrule(lr){4-5}
     Generator & Judge & presence (\%) & Mean & Min & Naturalness (\%) \\
     \midrule
-    Sonnet & Sonnet & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
-    Sonnet & Gemma  & \TBD & \TBD & \TBD & \TBD \\
-    Gemma  & Sonnet & \TBD & \TBD & \TBD & \TBD \\
-    Gemma  & Gemma  & \TBD & \TBD & \TBD & \TBD \\
+    Gemma-4 & Gemma-4 & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
+    Gemma-4 & Sonnet  & \TBD & \TBD & \TBD & \TBD \\
+    Sonnet  & Gemma-4 & \TBD & \TBD & \TBD & \TBD \\
+    Sonnet  & Sonnet  & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
-  \caption{\textbf{WILT's elicitation is stable across which model generates BLOOM's inputs and which scores the transcripts.} WILT on \PH{Qwen3.6-4B} for racial bias, factoring the auditor into its \emph{generator} role (produces scenarios and conversational inputs) and its \emph{judge} role (scores behaviour presence and naturalness), each set to Claude Sonnet or \PH{Gemma-3-27B}; same protocol and metrics as \cref{tab:ablations}. (Sonnet, Sonnet) is the default auditor used throughout the paper.}
+  \caption{\textbf{WILT's elicitation is stable across which model generates BLOOM's inputs and which scores the transcripts.} WILT on Qwen3.5-4B for racial bias, factoring the auditor into its \emph{generator} role (produces scenarios and conversational inputs) and its \emph{judge} role (scores behaviour presence and naturalness), each set to Gemma-4-26B-A4B or Claude Sonnet 4.6; same protocol and metrics as \cref{tab:ablations}. (Gemma-4, Gemma-4) is the default auditor used throughout the paper.}
   \label{tab:auditor}
 \end{table}
 
@@ -638,7 +638,7 @@ The headline comparison (Table~\ref{tab:main}) reports behaviour presence and ou
     \midrule
     Llama-3.2-3B  & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     Phi-4-mini    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
-    Qwen3.6-4B    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
+    Qwen3.5-4B    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     Gemma-4-E4B   & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
@@ -651,7 +651,7 @@ The headline comparison (Table~\ref{tab:main}) reports behaviour presence and ou
     \midrule
     Llama-3.2-3B  & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     Phi-4-mini    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
-    Qwen3.6-4B    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
+    Qwen3.5-4B    & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     Gemma-4-E4B   & \TBD & \TBD & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
@@ -761,7 +761,7 @@ The headline comparison (\cref{tab:main}) reports one (model, behaviour) slice; 
     \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Method comparison: \PH{Llama-3.2-3B}, \emph{strategic deception}.} Same protocol and metrics as \cref{tab:main}.}
+  \caption{\textbf{Method comparison: Llama-3.2-3B, \emph{strategic deception}.} Same protocol and metrics as \cref{tab:main}.}
   \label{tab:appx-comp-llama-dec}
 \end{table}
 
@@ -785,7 +785,7 @@ The headline comparison (\cref{tab:main}) reports one (model, behaviour) slice; 
     \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Method comparison: \PH{Qwen3.6-4B}, \emph{racial bias}.} Same protocol and metrics as \cref{tab:main}.}
+  \caption{\textbf{Method comparison: Qwen3.5-4B, \emph{racial bias}.} Same protocol and metrics as \cref{tab:main}.}
   \label{tab:appx-comp-qwen-racial}
 \end{table}
 
@@ -809,7 +809,7 @@ The headline comparison (\cref{tab:main}) reports one (model, behaviour) slice; 
     \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Method comparison: \PH{Qwen3.6-4B}, \emph{strategic deception}.} Same protocol and metrics as \cref{tab:main}.}
+  \caption{\textbf{Method comparison: Qwen3.5-4B, \emph{strategic deception}.} Same protocol and metrics as \cref{tab:main}.}
   \label{tab:appx-comp-qwen-dec}
 \end{table}
 
@@ -873,7 +873,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{racial bias} across the four target models.}
@@ -889,7 +889,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{political bias} across the four target models.}
@@ -905,7 +905,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{reinforcing user delusions} across the four target models.}
@@ -921,7 +921,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{strategic deception} across the four target models.}
@@ -937,7 +937,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{self-preservation} across the four target models.}
@@ -953,7 +953,7 @@ For each behaviour, WILT-elicited responses from each of the four target models 
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Llama-3.2-3B:} \PH{response}\\[0.4em]
     \textbf{Phi-4-mini:} \PH{response}\\[0.4em]
-    \textbf{Qwen3.6-4B:} \PH{response}\\[0.4em]
+    \textbf{Qwen3.5-4B:} \PH{response}\\[0.4em]
     \textbf{Gemma-4-E4B:} \PH{response}
   }}
   \caption{WILT-elicited responses for \emph{reward hacking} across the four target models.}
