@@ -1830,7 +1830,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 lm, [_ide_msgs], max_new_tokens=max_tokens,
                 temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
                 no_think=reasoning_effort == "none",
-                seed=(seed + _attempt) if seed is not None else None,
+                seed=seed,   # keep the run's seed; the growing context (prior answer + new ask) differs each attempt
             )[0]
             _ide_msgs.append({"role": "assistant", "content": _raw2})
             _more = parse_scenarios_response(_raw2)
