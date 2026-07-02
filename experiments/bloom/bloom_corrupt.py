@@ -3294,7 +3294,7 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     _keyfns = {"target_pick": lambda d: (d["target_lp"] if d["target_lp"] is not None else -1e9),
                "max_d3": lambda d: d.get("d3", 0.0), "max_cr": lambda d: d.get("cr", 0.0)}
     _kf = _keyfns.get(_sel, _keyfns["target_pick"])
-    _tau = float(corruption_runtime_cfg.get("filter_tau", 0.5))
+    _tau = float(corruption_runtime_cfg.get("filter_tau", 0.8))
     results: List[Dict] = []
     for pool in per_cand:
         if not pool:
@@ -4320,7 +4320,7 @@ def run_rollout_batched_local(
             "corrupt_prefill":    corr_cfg.get("corrupt_prefill", "") or "",
             "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
             "selection":          str(corr_cfg.get("selection", "filter_target")),
-            "filter_tau":         float(corr_cfg.get("filter_tau", 0.5)),
+            "filter_tau":         float(corr_cfg.get("filter_tau", 0.8)),
             "poe_gen_batch":      int(corr_cfg.get("poe_gen_batch", 100)),
             "poe_token_budget":   int(corr_cfg.get("poe_token_budget", 90000)),
         }
@@ -6641,7 +6641,7 @@ cfg = DotDict({
         "cfg_b3": 0.0,                            # weight subtracted on the neutral-rewrite-prompt (CFG). 0 = OFF (default = plain (6,0) self-corruption). For refusal-cancel CFG set ~b2/2 (e.g. 1-3).
         "corrupt_prefill": "",                    # prefill the corruptor's reply past its refusal. DEFAULT "" (off). Canonical value we use: "Sure, here is the rewritten version:\n\n". Set here or via BLOOM_CORRUPT_PREFILL.
         "selection": "filter_target",             # best-of-N pick from the num_prompts pool: target_pick (max target logprob) | max_d3 | max_cr | filter_target (keep candidates with d3 >= filter_tau, then max target logprob). set via BLOOM_SELECTION.
-        "filter_tau": 0.5,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.5. Only used when selection="filter_target".
+        "filter_tau": 0.8,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.8 (near-flat vs behavior across 0.0-0.8; >=0.9 mildly drops it). Only used when selection="filter_target".
         "poe_gen_batch": 100,                     # HARD CAP on PoE decode slots. Actual batch is memory-adaptive (poe_token_budget) and shrinks as context grows, so this cap only binds on short (turn-1) contexts. 100 is ~the compute-saturation knee for Qwen3-4B x2.
         "poe_token_budget": 90000,                # memory cap: batch grows until batch*(max_prefix+max_tokens) exceeds this (then capped at poe_gen_batch). ~90k keeps Qwen3-4B x2 KV under budget on a 47GB card at turn 3+ (~36 slots at a ~2.2k-token turn-3 context, auto-shrinking further for 5+ turns). Raise on a bigger card; lower if OOM.
         "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
@@ -6734,7 +6734,7 @@ if __name__ == "__main__":
     if os.environ.get("BLOOM_SELECTION"):
         cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
     if os.environ.get("BLOOM_FILTER_TAU"):
-        cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.5)
+        cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
         cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_INPUT_MAXPREFIX"):
