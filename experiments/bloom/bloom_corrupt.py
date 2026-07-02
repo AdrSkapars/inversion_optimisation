@@ -648,7 +648,9 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
                 res_q.put(("ok", step_results))
 
             elif op == "compute_target_logprobs":
-                # items: List[Tuple[full_token_ids, n_ctx, n_target]]
+                # items: List[Tuple[full_token_ids, n_ctx, n_target]]. Returns, per item,
+                # the list of per-target-token logprobs (or None); the parent aggregates
+                # (mean for logprob scoring, or per-token prob stats for token metrics).
                 items = msg[1]
                 real = [(i, t) for i, t in enumerate(items) if t[2] > 0]
                 results: List[Optional[float]] = [None] * len(items)
@@ -669,7 +671,7 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
                             if actual_tok in d:
                                 target_lps.append(d[actual_tok].logprob)
                         if target_lps:
-                            results[orig_i] = sum(target_lps) / len(target_lps)
+                            results[orig_i] = target_lps   # per-token logprobs; parent aggregates
                 res_q.put(("ok", results))
 
             else:
@@ -778,7 +780,8 @@ class VLLMWorker:
 
     def compute_target_logprobs(
         self, items: List[Tuple[List[int], int, int]]
-    ) -> List[Optional[float]]:
+    ) -> List[Optional[List[float]]]:
+        """Per item → list of per-target-token logprobs (or None). Parent aggregates."""
         return self._call("compute_target_logprobs", items)
 
     def shutdown(self) -> None:
@@ -1054,9 +1057,21 @@ def batch_logprob_local(
     no_think: if True, append the closed-<think> wrapper after the generation
     prompt so the scoring context exactly matches a no-think generation prefix.
     """
+    per_token = batch_token_logprobs_local(lm, items, no_think)
+    return [(sum(x) / len(x) if x else None) for x in per_token]
+
+
+def batch_token_logprobs_local(
+    lm: "LocalModel",
+    items: List[Tuple[List[Dict], str]],
+    no_think: bool = False,
+) -> List[Optional[List[float]]]:
+    """Per-target-token teacher-forced logprobs via vLLM's prompt_logprobs — same inputs
+    as batch_logprob_local but returns the FULL per-token logprob list per item (None if
+    the target has no tokens), so callers can compute min/mean token-probability metrics
+    without a second model. Reuses the already-loaded target engine."""
     if not items:
         return []
-
     # Tokenize in the parent (no GPU needed); the worker just runs the engine.
     payload: List[Tuple[List[int], int, int]] = []
     for context_messages, target_text in items:
@@ -3355,18 +3370,35 @@ def batch_generate_corruption_local(lm_target, lm_corrupt, corruption_runtime_cf
                                    target_msgs_batch, max_tokens, temperature, no_think_target)
 
 
+def _summarize_token_probs(prob_lists: List[List[float]]) -> Optional[Dict[str, float]]:
+    """Shared A/B token-probability summary (percentages) over a list of per-output token-prob
+    lists. A = pooled over all tokens (mean, median); B = per-output minimum (mean-of-mins,
+    single least-token). Used by both the corruption (HF) and baseline (vLLM) scorers so the
+    two report identical metrics."""
+    import statistics as _st
+    all_p: List[float] = [p for pl in prob_lists for p in pl]
+    omins: List[float] = [min(pl) for pl in prob_lists if pl]
+    if not all_p:
+        return None
+    return {
+        "A_mean_tok_pct":     round(sum(all_p) / len(all_p), 4),   # avg prob over all tokens
+        "A_median_tok_pct":   round(_st.median(all_p), 4),
+        "B_mean_of_mins_pct": round(sum(omins) / len(omins), 4),   # mean of per-output least-token
+        "B_min_of_mins_pct":  round(min(omins), 6),                # single least-token (≈ target_floor)
+        "n_token_scored":     len(omins),
+    }
+
+
 def corruption_token_stats(output_dir: Path, hf: Dict) -> Optional[Dict[str, float]]:
     """Token-level target probabilities of each transcript's FIRST chosen target output,
     computed with the already-loaded corruption target model (reuses hf['mt']/tok — no reload,
     no extra model). For each output: prob of every token under the target dist (exact
     gen_token_ids when saved, else re-encode). Returns A (over all pooled tokens) and B
     (per-output minimum) summaries in %. Folds the old standalone score_tokens.py into the run."""
-    import statistics as _st
     mt, tok, dev = hf["mt"], hf["tok"], hf["device"]
     no_think = hf.get("target_no_think", "")
     tfiles = sorted((output_dir / "transcripts").glob("*.json"))
-    all_p: List[float] = []        # every token's prob (%), pooled across chosen outputs
-    omins: List[float] = []        # per-output minimum token prob (%)
+    prob_lists: List[List[float]] = []   # per chosen output: list of token probs (%)
     for f in tfiles:
         try:
             msgs = json.load(open(f, encoding="utf-8")).get("messages", [])
@@ -3392,19 +3424,39 @@ def corruption_token_stats(output_dir: Path, hf: Dict) -> Optional[Dict[str, flo
                 cols = torch.arange(len(t_pre) - 1, len(full) - 1, device=dev)
                 tg = torch.tensor(resp_ids, device=dev)
                 tp = lp[cols].gather(-1, tg.unsqueeze(-1)).squeeze(-1).exp()
-            pl = [float(x) * 100 for x in tp]
-            all_p += pl
-            omins.append(min(pl))
+            prob_lists.append([float(x) * 100 for x in tp])
             break   # first target output per transcript only (matches the chosen-output metric)
-    if not all_p:
+    return _summarize_token_probs(prob_lists)
+
+
+def vllm_token_stats(output_dir: Path, lm: "LocalModel", no_think: bool) -> Optional[Dict[str, float]]:
+    """Token-level target probabilities for a corruption-OFF run (baseline / BoN), computed with
+    the already-loaded vLLM target — no second model, no reload. Same metric as
+    corruption_token_stats (each transcript's FIRST target output; here the output IS the
+    unmodified target's own sample, so these are its on-policy token probabilities), obtained
+    via teacher-forced prompt_logprobs and summarized identically."""
+    import math
+    tfiles = sorted((output_dir / "transcripts").glob("*.json"))
+    items: List[Tuple[List[Dict], str]] = []
+    for f in tfiles:
+        try:
+            msgs = json.load(open(f, encoding="utf-8")).get("messages", [])
+        except Exception:
+            continue
+        for i, m in enumerate(msgs):
+            if m.get("source") != "target":
+                continue
+            resp = m.get("content")
+            if not resp:
+                break
+            prefix = [{"role": x["role"], "content": x["content"]} for x in msgs[:i]]
+            items.append((prefix, resp))
+            break   # first target output per transcript only
+    if not items:
         return None
-    return {
-        "A_mean_tok_pct":     round(sum(all_p) / len(all_p), 4),   # avg prob over all tokens
-        "A_median_tok_pct":   round(_st.median(all_p), 4),
-        "B_mean_of_mins_pct": round(sum(omins) / len(omins), 4),   # mean of per-output least-token
-        "B_min_of_mins_pct":  round(min(omins), 6),                # single least-token (≈ target_floor)
-        "n_token_scored":     len(omins),
-    }
+    lp_lists = batch_token_logprobs_local(lm, items, no_think=no_think)
+    prob_lists = [[math.exp(l) * 100 for l in row] for row in lp_lists if row]
+    return _summarize_token_probs(prob_lists)
 
 
 def _contrastive_sample_extensions(
@@ -5034,15 +5086,22 @@ def run_rollout_batched_local(
     }
     # Token-prob stats of the chosen outputs, computed here while the corruption target model
     # is still loaded (reused — no reload). Stashed for the judgment summary + rollout.json.
-    if corruption_on and corruption_runtime_cfg is not None:
-        try:
+    #   • corruption ON  → score with the loaded HF corruption target (exact PoE outputs).
+    #   • corruption OFF → the target is the loaded vLLM engine and the outputs are its own
+    #     samples, so score them via teacher-forced prompt_logprobs (on-policy token probs).
+    # Every run generates outputs, so both paths report the same token metrics.
+    _tok = None
+    try:
+        if corruption_on and corruption_runtime_cfg is not None:
             _tok = corruption_token_stats(output_dir, corruption_runtime_cfg["hf"])
-            if _tok:
-                rollout_results["token_stats"] = _tok
-                print(f"  Token probs: avg={_tok['A_mean_tok_pct']:.2f}% | mean-of-mins="
-                      f"{_tok['B_mean_of_mins_pct']:.3f}% | min-of-mins={_tok['B_min_of_mins_pct']:.5f}%", flush=True)
-        except Exception as e:
-            print(f"  [token stats] skipped: {e}", flush=True)
+        elif lm_target is not None:
+            _tok = vllm_token_stats(output_dir, lm_target, no_think_target)
+    except Exception as e:
+        print(f"  [token stats] skipped: {e}", flush=True)
+    if _tok:
+        rollout_results["token_stats"] = _tok
+        print(f"  Token probs: avg={_tok['A_mean_tok_pct']:.2f}% | mean-of-mins="
+              f"{_tok['B_mean_of_mins_pct']:.3f}% | min-of-mins={_tok['B_min_of_mins_pct']:.5f}%", flush=True)
     save_json(rollout_results, output_dir / "rollout.json")
     if mean_avg_logprob is not None:
         print(f"  Mean avg logprob: {mean_avg_logprob:.4f} over {len(all_lps)} transcripts", flush=True)
