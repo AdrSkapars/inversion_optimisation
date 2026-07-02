@@ -91,6 +91,8 @@ THINKING_BUDGETS = {"none": 0, "low": 1024, "medium": 2048, "high": 4096}
 # wrapper — the error message tells you exactly what to add.
 _USES_THINK_BLOCK = {
     "qwen/qwen3-4b": True,
+    "qwen/qwen3.5-4b": True,                    # assumed Qwen3-style think block; verify when first run
+    "meta-llama/llama-3.2-3b-instruct": False,
     "microsoft/phi-4-mini-instruct": False,
     "duoneural/phi-4-mini-abliterated": False,
     "google/gemma-3-4b-it": False,
@@ -6502,14 +6504,25 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
 #   "<repo>"                        → plain HF model, loaded bf16
 #   "<repo>:<quant>"                → GGUF (non-multimodal models)
 #   "<repo>:<quant>:<base_repo>"    → GGUF; tokenizer/config from base_repo (multimodal)
-# Auditor (understanding + ideation + rollout-evaluator + judgment). Two supported choices:
-# Default auditor MUST be a local model: BEAST (input_search) and FLRT (output_search) need
-# the evaluator's token-level logits, which hosted API models don't expose. Gemma-4 26B-A4B MoE,
-# FP8 (~26GB, weight-only Marlin on Ampere). Needs the vllm-0.23/cu129 env (.venv-g4), NOT the vllm-0.14 default.
-judge_model = "local/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic"
-# judge_model = "claude-sonnet-4-5"                              # hosted API auditor via litellm — ONLY usable with input_search/output_search OFF (no logits for BEAST/FLRT); set BLOOM_EVAL_THINKING=0
-
-target_model = "local/Qwen/Qwen3-4B"  # bf16; small target — no quantization needed
+# ── Model selection — pick a model by changing the index into these lists ────────────
+# Auditor (understanding + ideation + rollout-evaluator + judgment). The DEFAULT must be a
+# local model: BEAST (input_search) and FLRT (output_search) do a token-level search over the
+# auditor's message and need its logits, which hosted API models don't expose. The Gemma-4
+# 26B-A4B MoE (FP8, ~26GB, weight-only Marlin on Ampere) needs the vllm-0.23/cu129 env
+# (.venv-g4), NOT the vllm-0.14 default.
+EVAL_MODELS = [
+    "local/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",  # 0: Gemma-4-26B-A4B (default auditor)
+    "claude-sonnet-4-6",                              # 1: Claude Sonnet (API cross-check; input/output search OFF, set BLOOM_EVAL_THINKING=0)
+]
+# Targets under evaluation — the four open-weight models from the paper's experiments section.
+TARGET_MODELS = [
+    "local/meta-llama/Llama-3.2-3B-Instruct",  # 0: Llama-3.2-3B-Instruct
+    "local/microsoft/Phi-4-mini-instruct",     # 1: Phi-4-mini-instruct
+    "local/Qwen/Qwen3.5-4B",                   # 2: Qwen3.5-4B
+    "local/google/gemma-4-e4b-it",             # 3: Gemma-4-E4B
+]
+judge_model  = EVAL_MODELS[0]
+target_model = TARGET_MODELS[2]   # Qwen3.5-4B — the paper's representative slice
 
 cfg = DotDict({
     "folder_name": "runs_16/p10_tgtfloor",       # p10 corruption, 1 turn, TARGET-dist threshold floor (target_floor=6.49e-5) sampled on PoE; 1 iteration
@@ -6631,7 +6644,7 @@ cfg = DotDict({
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1; exact full-vocab hf_full PoE)
         "enabled": True,                          # master switch; mutually exclusive with jail + all search
-        "model": "local/Qwen/Qwen3-4B",           # corruptor model — DEFAULT = the target itself (self-corruption).
+        "model": target_model,                    # corruptor model — DEFAULT = the target itself (self-corruption). Override with a different local model (e.g. an abliterated variant) via BLOOM_CORRUPT_MODEL; must share the target's vocab.
         "target_floor": 1e-4,                     # floor on the TRUE TARGET dist softmax(t_logits): mask tokens whose target prob < target_floor, then sample from the PoE among survivors (clamps the corruption fingerprint to target-plausible tokens); argmax(target) fallback. 0.0 = off.
         "num_prompts": 10,                        # 1..10 rewrite prompts used (index 0 = X3 aggrieved)
         "samples_per_prompt": 1,                  # PoE samples per prompt (diverse set = 1)
