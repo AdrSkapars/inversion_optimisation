@@ -6749,7 +6749,7 @@ cfg = DotDict({
         "corruption_var_batch": 10,          # (corruption path only) variations rolled out in LOCKSTEP per corruption call (~5-6x throughput vs 1-at-a-time). The decode always chunks into poe_gen_batch, so this only affects call bookkeeping, NOT decode throughput — 10 is plenty; raising it doesn't speed anything up (measured).
         "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
-        "history_turns": 2,                  # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
+        "history_turns": None,                  # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
@@ -6925,6 +6925,15 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["samples_per_prompt"] = int(os.environ["BLOOM_SPP"])
     if os.environ.get("BLOOM_SELECTION"):
         cfg.setdefault("corruption_output", {})["selection"] = os.environ["BLOOM_SELECTION"]
+    # BLOOM_JAIL_MODEL: switch to DIRECT jail-sample decoding (contrastive PoE with a jailbroken
+    # proposal model) instead of the corruption rewrite. Disables corruption (mutually exclusive).
+    # Jail model must share the target's vocab (target itself = self-jail, or a same-family abliterated).
+    if os.environ.get("BLOOM_JAIL_MODEL"):
+        cfg.setdefault("jailbroken_output", {})["use_during_rollout"] = True
+        cfg["jailbroken_output"]["model"] = os.environ["BLOOM_JAIL_MODEL"]
+        cfg.setdefault("corruption_output", {})["enabled"] = False
+        if os.environ.get("BLOOM_JAIL_BETA"):
+            cfg["jailbroken_output"]["beta"] = float(os.environ["BLOOM_JAIL_BETA"])
     if os.environ.get("BLOOM_FILTER_TAU"):
         cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
