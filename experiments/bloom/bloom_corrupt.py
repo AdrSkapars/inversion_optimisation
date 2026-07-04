@@ -3142,7 +3142,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      target_floor: float = 0.0, corrupt_only: bool = False,
                      n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
-                     poe_b3: Optional[float] = None, return_target_lp: bool = False):
+                     poe_b3: Optional[float] = None, return_target_lp: bool = False,
+                     return_token_lps: bool = False):
     """Full-vocab PoE: sample from softmax((eb1*t_logits + eb2*c_logits - eb3*n)/temp).
 
     When return_target_lp=True, also returns per-sequence mean true-target log-prob of the
@@ -3192,6 +3193,7 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         done = torch.zeros(B, dtype=torch.bool, device=device)
         lp_sum = torch.zeros(B, device=device)   # sum of true-target logprob of sampled tokens
         lp_cnt = torch.zeros(B, device=device)   # count of scored (live, non-eos) tokens
+        tlps: List[List[float]] = [[] for _ in range(B)]   # per-token true-target logprob (return_token_lps)
         for _ in range(max_new):
             if corrupt_only:
                 # Sample purely from the corruption distribution (target weight dropped). The
@@ -3217,14 +3219,20 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                     s = masked.sum(dim=-1, keepdim=True)
                 probs = masked / s.clamp_min(1e-12)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
-            if return_target_lp:
+            if return_target_lp or return_token_lps:
                 # True-target logprob of the sampled token; tl was already computed this step
                 # so this is ~free vs a separate scoring forward. logsumexp avoids the full
-                # [B, vocab] log_softmax tensor (the OOM-prone bit of the old _hf_score).
+                # [B, vocab] log_softmax tensor (the OOM-prone bit of the old _hf_score). This is
+                # the UNMODIFIED-target (temp=1) logprob — the on-policy plausibility of the token
+                # the PoE/jail actually sampled — NOT the steered z-logprob it was drawn from.
                 tlp = tl.gather(-1, nxt.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(tl, dim=-1)
                 live = (~done) & (nxt != eos_id)
                 lp_sum = lp_sum + torch.where(live, tlp, torch.zeros_like(tlp))
                 lp_cnt = lp_cnt + live.float()
+                if return_token_lps:
+                    for i in range(B):
+                        if bool(live[i]):
+                            tlps[i].append(float(tlp[i]))
             nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             for i in range(B):
                 if not done[i]: gen[i].append(int(nxt[i]))
@@ -3240,6 +3248,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 naf = torch.cat([naf, ones], -1)
                 no = mc(input_ids=nxt.unsqueeze(-1), attention_mask=naf, past_key_values=ncp, use_cache=True)
                 ncp = no.past_key_values; nl = no.logits[:, -1, :].float()
+        if return_token_lps:
+            return gen, tlps
         if return_target_lp:
             mean_lp = [(float(lp_sum[i] / lp_cnt[i]) if float(lp_cnt[i]) > 0 else None)
                        for i in range(B)]
@@ -3298,7 +3308,14 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
     # passes. Set by the promotion in run_rollout_batched_local (corruption_runtime_cfg['target_only']).
     target_only = bool(corruption_runtime_cfg.get("target_only"))
     if target_only:
-        baselines, base_tlps = _hf_generate(mt, t_pres, max_tokens, temperature,
+        # BLOOM_BON_TEMP: sample the BoN/baseline candidates at a higher temperature so best-of-N
+        # can reach lower-probability, higher-elicitation completions (the fair analogue of the
+        # jail-beta knob — it walks BoN down the probability axis to trade for behaviour). This
+        # ONLY changes the sampling distribution: the on-policy token probs captured via
+        # return_token_lps use the RAW temp=1 logits (see _hf_generate line ~3123), so the reported
+        # probability metric is computed as if temperature were always 1.0, regardless of this.
+        _bon_temp = float(os.environ.get("BLOOM_BON_TEMP") or temperature)
+        baselines, base_tlps = _hf_generate(mt, t_pres, max_tokens, _bon_temp,
                                             pad_id, eos_id, device, return_token_lps=True)
         out: List[Dict] = []
         for i, base_ids in enumerate(baselines):
@@ -3419,12 +3436,17 @@ def _corruption_generate_hf(hf: Dict, corruption_runtime_cfg: Dict,
 
 def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                       target_msgs_batch: List[List[Dict]], max_tokens: int,
-                      temperature: float, no_think_target: bool) -> List[str]:
+                      temperature: float, no_think_target: bool) -> List[Dict]:
     """[jail engine=hf_full] Exact full-vocab PoE jail sampling (n=1) — the HF
     analogue of batch_generate_contrastive_local. Target+jail are HF models in
     this process (reuses the corruption hf_full helpers). Jail prefix = jail
     system prompt + closed <think> + prefill (no baseline answer); target prefix
-    = the natural chat template. Returns one decoded string per scenario."""
+    = the natural chat template. Returns one dict per scenario:
+    {"best_text","best_ids","best_token_probs"} — the on-policy (unmodified-target,
+    temp=1) per-token probs are captured DURING the jail decode (return_token_lps),
+    so the run reports token stats with NO separate scoring pass, exactly like the
+    corruption target_only path. (The jail SAMPLES from z=target+beta*jail, but the
+    stored probs are of the UNMODIFIED target — the plausibility metric we report.)"""
     mt, mc, tok, tok_c, device = hf["mt"], hf["mc"], hf["tok"], hf["tok_c"], hf["device"]
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
@@ -3448,9 +3470,15 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
         if prefill:
             js += prefill
         j_prefs.append(tok_c.encode(js, add_special_tokens=False))
-    gen = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
-                           pad_id, eos_id, device)
-    return [tok.decode([x for x in g if x != eos_id], skip_special_tokens=True).strip() for g in gen]
+    gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+                                 pad_id, eos_id, device, return_token_lps=True)
+    out: List[Dict] = []
+    for g, lps in zip(gen, tlps):
+        ids = [x for x in g if x != eos_id]
+        txt = tok.decode(ids, skip_special_tokens=True).strip()
+        tprobs = [math.exp(l) * 100 for l in lps]   # on-policy (unmodified-target, temp=1) token probs (%)
+        out.append({"best_text": txt, "best_ids": ids, "best_token_probs": tprobs})
+    return out
 
 
 def batch_generate_corruption_local(lm_target, lm_corrupt, corruption_runtime_cfg,
@@ -4295,9 +4323,9 @@ def run_rollout_batched_local(
     # Each LocalModel gets its own subprocess pinned to a specific GPU (CUDA_VISIBLE_DEVICES
     # is set per-worker before vLLM init). With one LLM per GPU each worker can use most of
     # the device's memory. Defaults: eval → GPU 0, target → GPU 1. Override via cfg.rollout.
-    eval_gpu_id     = cfg.get("evaluator_gpu_id", 0)
-    target_gpu_id   = cfg.get("target_gpu_id",   1)
-    eval_gpu_util   = cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)
+    eval_gpu_id     = int(os.environ.get("BLOOM_EVAL_GPU", cfg.get("evaluator_gpu_id", 0)))
+    target_gpu_id   = int(os.environ.get("BLOOM_TARGET_GPU", cfg.get("target_gpu_id", 1)))
+    eval_gpu_util   = float(os.environ.get("BLOOM_EVAL_UTIL", cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)))
     target_gpu_util = cfg.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
     eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 16384)
     target_max_len  = cfg.rollout.get("target_max_model_len",    4096)
@@ -4986,6 +5014,7 @@ def run_rollout_batched_local(
             # ── Turn loop ─────────────────────────────────────────────────
             for turn in range(max_turns):
                 _corr_gen_ids = None  # exact generated token-ids (corruption path) for accurate scoring
+                _jail_tprobs = None   # on-policy per-token probs captured during jail hf_full decode
                 # Target responds. When jailbroken contrastive sampling is on,
                 # the target's natural reply is generated via PoE-weighted
                 # sampling against the jailbroken model; otherwise the standard
@@ -5007,10 +5036,13 @@ def run_rollout_batched_local(
                 elif (jail_runtime_cfg is not None
                         and jail_runtime_cfg.get("use_during_rollout", False)):
                     if jail_runtime_cfg.get("engine") == "hf_full":
-                        raw_target = _jail_generate_hf(
+                        _jr = _jail_generate_hf(
                             jail_runtime_cfg["hf"], jail_runtime_cfg,
                             [target_msgs], target_max_tokens, temperature, no_think_target,
                         )[0]
+                        raw_target    = _jr["best_text"]
+                        _corr_gen_ids = _jr.get("best_ids")          # exact ids -> free token stats
+                        _jail_tprobs  = _jr.get("best_token_probs")  # on-policy probs (captured at gen time)
                     else:
                         raw_target = batch_generate_contrastive_local(
                             lm_target, lm_jail, jail_runtime_cfg,
@@ -5065,6 +5097,8 @@ def run_rollout_batched_local(
                 tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
                 if _corr_gen_ids and target_resp == raw_target:
                     tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> exact token-prob scoring (no re-encode)
+                if _jail_tprobs and target_resp == raw_target:
+                    tmsg["gen_token_probs"] = _jail_tprobs  # on-policy probs captured at jail gen time -> free token stats
                 if target_reason:
                     tmsg["reasoning"] = target_reason
                 if output_search_on:

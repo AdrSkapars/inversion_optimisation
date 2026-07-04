@@ -36,6 +36,6 @@ def score(folder):
             break
     return B._summarize_token_probs(prob_lists)
 
-for folder in ["gemma4e_jail_self_b2"]:
+for folder in ["gemma4e_jail_self_b15"]:
     ts = score(folder)
     print(f"{folder}: mean={ts['A_mean_tok_pct']:.1f}%  min-of-mins={ts['B_min_of_mins_pct']:.5f}%  n={ts['n_token_scored']}")
