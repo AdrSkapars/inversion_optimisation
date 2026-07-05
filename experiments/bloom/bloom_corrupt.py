@@ -6862,6 +6862,12 @@ if __name__ == "__main__":
         cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
     if os.environ.get("BLOOM_TARGET_MODEL"):
         cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
+    if os.environ.get("BLOOM_EVAL_GPU"):
+        # Move the WHOLE auditor (understanding/ideation/judgment LocalModel + rollout evaluator)
+        # onto this GPU, not just the rollout path. _DEFAULT_LOCAL_GPU_ID is set from
+        # cfg.evaluator_gpu_id, so without this the judgment-stage auditor stays on GPU 0 and two
+        # pipelines on different GPUs collide on GPU 0 ("engine core init failed on GPU 0").
+        cfg["evaluator_gpu_id"] = int(os.environ["BLOOM_EVAL_GPU"])
     if os.environ.get("BLOOM_EVAL_MODEL"):
         # evaluator/red-team model for understanding + ideation + rollout turn-sampling
         # (e.g. "claude-haiku-4-5" via litellm). A non-'local/' id => hosted API: it can only
