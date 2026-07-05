@@ -208,6 +208,23 @@ def save_json(data: Any, path: Path) -> None:
     print(f"Results saved to: {path}", flush=True)
 
 
+def _cfg_for_dump(cfg: Dict, prompts_yaml: Dict) -> Dict:
+    """Serializable copy of cfg for cfg.json with the jail's behaviour-derived
+    system_prompt/prefill merged in, so the saved config reflects what the jail
+    ACTUALLY ran with (these are resolved from the behaviour yaml at rollout time —
+    see run_rollout_batched_local — and are otherwise absent from the static cfg,
+    leaving a misleading empty prefill). Only the dumped copy is enriched; the live
+    cfg is untouched so runtime resolution is unchanged."""
+    d = {k: v for k, v in cfg.items()}
+    jc = d.get("jailbroken_output")
+    if isinstance(jc, dict) and jc.get("use_during_rollout"):
+        jc = dict(jc)
+        jc["system_prompt"] = prompts_yaml.get("jailbroken_output_system_prompt", "")
+        jc["prefill"] = jc.get("prefill") or prompts_yaml.get("jailbroken_output_prefill", "") or ""
+        d["jailbroken_output"] = jc
+    return d
+
+
 def litellm_chat(
     model_id: str,
     messages: list,
@@ -6589,12 +6606,12 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     print(f"Output: {output_dir}", flush=True)
     print("=" * 60, flush=True)
 
-    # Save cfg
-    serializable_cfg = {k: v for k, v in cfg.items()}
-    save_json(serializable_cfg, output_dir / "cfg.json")
-
     # Load prompt templates
     prompts_yaml = load_prompts(cfg)
+
+    # Save cfg (jail system_prompt/prefill resolved from the behaviour file so cfg.json
+    # reflects what the jail actually ran with, not the static empty defaults)
+    save_json(_cfg_for_dump(cfg, prompts_yaml), output_dir / "cfg.json")
 
     # Stage 1: Understanding
     understanding_path = output_dir / "understanding.json"
@@ -7021,7 +7038,7 @@ if __name__ == "__main__":
             print("#" * 60, flush=True)
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
-            save_json({k: v for k, v in cfg.items()}, output_dir / "cfg.json")
+            save_json(_cfg_for_dump(cfg, prompts_yaml), output_dir / "cfg.json")
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + round_num
             result = await run_parallel_round(
