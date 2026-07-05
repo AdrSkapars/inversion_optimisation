@@ -6877,7 +6877,7 @@ cfg = DotDict({
 
 if __name__ == "__main__":
     # Load behavior description and prompt preset from prompts.yaml
-    _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts.yaml"), encoding="utf-8"))
+    _prompts = yaml.safe_load(open(SCRIPT_DIR / cfg.get("prompts_file", "prompts/prompts.yaml"), encoding="utf-8"))
     _behavior_desc = _prompts.get("behaviors", {}).get(cfg.behavior_name, "")
     if not _behavior_desc:
         raise ValueError(f"No behavior description found for '{cfg.behavior_name}' in prompts.yaml")
