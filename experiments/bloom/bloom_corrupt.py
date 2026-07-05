@@ -164,12 +164,12 @@ def debug_print(*args, **kwargs):
 
 
 def load_prompts(cfg: Optional[Dict] = None) -> Dict[str, Any]:
-    """Load prompt templates from prompts.yaml next to this script.
+    """Load prompt templates from prompts/prompts.yaml next to this script.
 
     Resolves prompt overrides: defaults from prompts.yaml are used as baseline,
     then any non-empty cfg overrides are appended on top.
     """
-    prompts_path = SCRIPT_DIR / "prompts.yaml"
+    prompts_path = SCRIPT_DIR / "prompts" / "prompts.yaml"
     with open(prompts_path, "r", encoding="utf-8") as f:
         prompts = yaml.safe_load(f)
 
