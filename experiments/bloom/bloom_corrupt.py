@@ -944,7 +944,7 @@ class LocalModel:
 
 def _get_local_model(hf_name: str, gpu_id: Optional[int] = None,
                      gpu_memory_utilization: Optional[float] = None,
-                     max_model_len: int = 8192) -> "LocalModel":
+                     max_model_len: int = int(os.environ.get("BLOOM_EVAL_MAXLEN", "16384"))) -> "LocalModel":
     """Return the cached LocalModel, spawning its worker on first call.
 
     Each (spec, gpu_id) pair gets its own LocalModel — the cache key is
