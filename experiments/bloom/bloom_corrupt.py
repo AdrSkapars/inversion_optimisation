@@ -3423,6 +3423,8 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
+    jail_b1    = jail_runtime_cfg.get("b1")                          # None => legacy z=target+beta*jail; set (e.g. 0) => z=b1*target+beta*jail, floor-masked (floor-only jail = b1=0, beta=1, floor>0)
+    jail_floor = float(jail_runtime_cfg.get("target_floor", 0.0) or 0.0)
     NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
 
@@ -3441,8 +3443,14 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
         if prefill:
             js += prefill
         j_prefs.append(tok_c.encode(js, add_special_tokens=False))
-    gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
-                                 pad_id, eos_id, device, return_token_lps=True)
+    if jail_b1 is not None:
+        # floor-only / weighted jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs)
+        gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, 0.0, temperature, max_tokens,
+                                     pad_id, eos_id, device, target_floor=jail_floor,
+                                     poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
+    else:
+        gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+                                     pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True)
     out: List[Dict] = []
     for g, lps in zip(gen, tlps):
         ids = [x for x in g if x != eos_id]
@@ -4437,6 +4445,8 @@ def run_rollout_batched_local(
             "system_prompt": jail_system_prompt,
             "prefill":     jail_cfg.get("prefill") or prompts_yaml.get("jailbroken_output_prefill", "") or "",
             "beta":        float(jail_cfg.get("beta", 2.0)),
+            "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
+            "target_floor": float(jail_cfg.get("target_floor", 0.0) or 0.0),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
         }
@@ -6945,6 +6955,10 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["enabled"] = False
         if os.environ.get("BLOOM_JAIL_BETA"):
             cfg["jailbroken_output"]["beta"] = float(os.environ["BLOOM_JAIL_BETA"])
+        if os.environ.get("BLOOM_JAIL_B1") is not None and os.environ.get("BLOOM_JAIL_B1") != "":
+            cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+beta*jail
+        if os.environ.get("BLOOM_JAIL_FLOOR"):
+            cfg["jailbroken_output"]["target_floor"] = float(os.environ["BLOOM_JAIL_FLOOR"])  # mask jail samples to tokens with target prob >= floor
     if os.environ.get("BLOOM_FILTER_TAU"):
         cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
