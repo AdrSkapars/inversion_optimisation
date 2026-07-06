@@ -3425,6 +3425,9 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
     jail_b1    = jail_runtime_cfg.get("b1")                          # None => legacy z=target+beta*jail; set (e.g. 0) => z=b1*target+beta*jail, floor-masked (floor-only jail = b1=0, beta=1, floor>0)
     jail_floor = float(jail_runtime_cfg.get("target_floor", 0.0) or 0.0)
+    jail_spp   = max(1, int(jail_runtime_cfg.get("spp", 1)))         # samples per scenario (s10 = 10); >1 pools then selects
+    jail_sel   = str(jail_runtime_cfg.get("selection", "target_pick"))  # filter_target = drop repetitive (d3>=tau) then max target-prob; target_pick = max target-prob
+    jail_tau   = float(jail_runtime_cfg.get("filter_tau", 0.8))
     NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
 
@@ -3443,20 +3446,46 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
         if prefill:
             js += prefill
         j_prefs.append(tok_c.encode(js, add_special_tokens=False))
-    if jail_b1 is not None:
-        # floor-only / weighted jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs)
-        gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, 0.0, temperature, max_tokens,
-                                     pad_id, eos_id, device, target_floor=jail_floor,
-                                     poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
-    else:
-        gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
-                                     pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True)
+    def _gen_once():
+        if jail_b1 is not None:
+            # floor-only / weighted jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs)
+            return _hf_poe_generate(mt, mc, t_prefs, j_prefs, 0.0, temperature, max_tokens,
+                                    pad_id, eos_id, device, target_floor=jail_floor,
+                                    poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
+        return _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+                                pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True)
+
+    import collections as _coll
+    def _d3(txt):
+        w = txt.split()
+        if len(w) < 3: return 1.0
+        g = [tuple(w[i:i+3]) for i in range(len(w) - 2)]
+        return len(_coll.Counter(g)) / len(g)
+    # pool jail_spp samples per scenario, then select (s10 = spp 10 + filter_target: drop
+    # repetitive d3<tau, keep most target-probable). spp=1 -> single sample (legacy behaviour).
+    B = len(t_prefs)
+    pools: List[List[Dict]] = [[] for _ in range(B)]
+    for _s in range(jail_spp):
+        gen, tlps = _gen_once()
+        for bi, (g, lps) in enumerate(zip(gen, tlps)):
+            ids = [x for x in g if x != eos_id]
+            txt = tok.decode(ids, skip_special_tokens=True).strip()
+            mlp = (sum(lps) / len(lps)) if lps else None   # mean on-policy target logprob (plausibility)
+            pools[bi].append({"ids": ids, "txt": txt, "lps": lps, "mlp": mlp, "d3": _d3(txt)})
     out: List[Dict] = []
-    for g, lps in zip(gen, tlps):
-        ids = [x for x in g if x != eos_id]
-        txt = tok.decode(ids, skip_special_tokens=True).strip()
-        tprobs = [math.exp(l) * 100 for l in lps]   # on-policy (unmodified-target, temp=1) token probs (%)
-        out.append({"best_text": txt, "best_ids": ids, "best_token_probs": tprobs})
+    _mlp = lambda c: (c["mlp"] if c["mlp"] is not None else -1e9)
+    for pool in pools:
+        if not pool:
+            out.append({"best_text": "", "best_ids": None, "best_token_probs": []}); continue
+        if jail_sel == "filter_target":
+            surv = [c for c in pool if c["d3"] >= jail_tau]
+            best = max(surv, key=_mlp) if surv else max(pool, key=lambda c: c["d3"])
+        elif jail_sel == "target_pick":
+            best = max(pool, key=_mlp)
+        else:
+            best = pool[0]
+        tprobs = [math.exp(l) * 100 for l in best["lps"]]   # on-policy (unmodified-target, temp=1) token probs (%)
+        out.append({"best_text": best["txt"], "best_ids": best["ids"], "best_token_probs": tprobs})
     return out
 
 
@@ -4447,6 +4476,9 @@ def run_rollout_batched_local(
             "beta":        float(jail_cfg.get("beta", 2.0)),
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
             "target_floor": float(jail_cfg.get("target_floor", 0.0) or 0.0),
+            "spp":          int(jail_cfg.get("spp", 1)),                    # samples per scenario (s10=10)
+            "selection":    str(jail_cfg.get("selection", "target_pick")),  # filter_target=drop repetitive then max target-prob
+            "filter_tau":   float(jail_cfg.get("filter_tau", 0.8)),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
         }
@@ -6959,6 +6991,12 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+beta*jail
         if os.environ.get("BLOOM_JAIL_FLOOR"):
             cfg["jailbroken_output"]["target_floor"] = float(os.environ["BLOOM_JAIL_FLOOR"])  # mask jail samples to tokens with target prob >= floor
+        if os.environ.get("BLOOM_JAIL_SPP"):
+            cfg["jailbroken_output"]["spp"] = int(os.environ["BLOOM_JAIL_SPP"])               # s10 jail: 10 samples/scenario then select
+        if os.environ.get("BLOOM_JAIL_SELECTION"):
+            cfg["jailbroken_output"]["selection"] = os.environ["BLOOM_JAIL_SELECTION"]        # filter_target = drop repetitive (d3>=tau) then max target-prob
+        if os.environ.get("BLOOM_JAIL_FILTER_TAU"):
+            cfg["jailbroken_output"]["filter_tau"] = float(os.environ["BLOOM_JAIL_FILTER_TAU"])
     if os.environ.get("BLOOM_FILTER_TAU"):
         cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
