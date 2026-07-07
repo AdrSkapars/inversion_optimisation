@@ -3439,8 +3439,19 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     jail_neg_pf  = jail_runtime_cfg.get("neg_prefill", "") or ""    # default: no prefill on the negative branch
     NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
+    # ---- COMBINE jail WITH corruption (two POSITIVE experts, no negative term) ----
+    # z = target + beta*jail + cb2*corrupt, where jail is input-conditioned (a continuation) and
+    # corrupt is OUTPUT-conditioned (a rewrite of a baseline target answer) — merging the two
+    # methods so neither has to be chosen. Implemented via the existing negative slot with a
+    # NEGATIVE coefficient (poe_b3 = -cb2), so the "subtracted" term ADDS. Needs a baseline
+    # target answer first (jail alone never produces one), generated here like the corruption path.
+    combine_corrupt = bool(jail_runtime_cfg.get("combine_corrupt", False))
+    combine_b2      = float(jail_runtime_cfg.get("combine_corrupt_b2", 3.0) or 0.0)
+    combine_rw      = jail_runtime_cfg.get("combine_rewrite_prompt", "") or ""
+    combine_incl_in = bool(jail_runtime_cfg.get("combine_include_input", True))
+    combine_on = combine_corrupt and (combine_b2 != 0.0) and bool(combine_rw)
 
-    neg_on = (jail_b3 != 0.0) and bool(jail_neg_sys)
+    neg_on = (jail_b3 != 0.0) and bool(jail_neg_sys) and not combine_on
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
     n_prefs: List[List[int]] = []
@@ -3465,7 +3476,29 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             if jail_neg_pf:
                 ns += jail_neg_pf
             n_prefs.append(tok_c.encode(ns, add_special_tokens=False))
+    c_prefs: List[List[int]] = []   # corruption expert (output-conditioned rewrite), used when combine_on
+    if combine_on:
+        # 1) baseline target answers (plain single-pass target sample) — the text corruption rewrites.
+        _baselines = _hf_generate(mt, t_prefs, max_tokens, temperature, pad_id, eos_id, device)
+        def _last_user(msgs):
+            for m in reversed(msgs):
+                if m.get("role") == "user":
+                    return m.get("content", "") or ""
+            return ""
+        for ci, base_ids in enumerate(_baselines):
+            base = tok.decode([x for x in base_ids if x != eos_id], skip_special_tokens=True).strip()
+            uin = _last_user(target_msgs_batch[ci]) if combine_incl_in else None
+            cs = tok_c.apply_chat_template(build_corruption_msgs(combine_rw, base, uin),
+                                           tokenize=False, add_generation_prompt=True) + NO_THINK_C
+            c_prefs.append(tok_c.encode(cs, add_special_tokens=False))
     def _gen_once():
+        if combine_on:
+            # z = target + beta*jail + cb2*corrupt  (corrupt fed via the negative slot with -cb2 => it adds)
+            _b1 = float(jail_b1) if jail_b1 is not None else 1.0
+            return _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+                                    pad_id, eos_id, device, target_floor=jail_floor,
+                                    n_prefs=c_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=-combine_b2,
+                                    return_token_lps=True)
         if neg_on:
             # z = b1*target + beta*jail - b3*neg  (b1 defaults to 1; floor still masks on softmax(t))
             _b1 = float(jail_b1) if jail_b1 is not None else 1.0
@@ -4508,6 +4541,11 @@ def run_rollout_batched_local(
             "b3":              float(jail_cfg.get("b3", 0.0) or 0.0),          # negative-steering weight; 0=off (legacy jail)
             "neg_system_prompt": jail_cfg.get("neg_system_prompt", "") or "", # input-conditioned negative persona (rc/neutral)
             "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
+            "combine_corrupt":    bool(jail_cfg.get("combine_corrupt", False)),   # add a 2nd POSITIVE expert (corruption rewrite)
+            "combine_corrupt_b2": float(jail_cfg.get("combine_corrupt_b2", 3.0) or 0.0),
+            "combine_rewrite_prompt": (jail_cfg.get("combine_rewrite_prompt")
+                                       or ((prompts_yaml.get("corruption_rewrite_prompts") or [""])[0])),
+            "combine_include_input":  bool(jail_cfg.get("combine_include_input", True)),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
         }
@@ -7049,6 +7087,15 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["neg_system_prompt"] = _JAIL_NEG_PRESETS.get(_k, _JAIL_NEG_PRESETS["neutral"])
         if os.environ.get("BLOOM_JAIL_NEG_PREFILL"):
             cfg["jailbroken_output"]["neg_prefill"] = os.environ["BLOOM_JAIL_NEG_PREFILL"]
+        # COMBINE jail + corruption (two positive experts): z = target + beta*jail + cb2*corrupt.
+        # BLOOM_JAIL_COMBINE_CORRUPT=1 turns it on; BLOOM_COMBINE_CORRUPT_B2 sets the corruption
+        # weight (default 3); rewrite prompt defaults to the behaviour's first corruption_rewrite_prompt.
+        if os.environ.get("BLOOM_JAIL_COMBINE_CORRUPT", "0").lower() in ("1", "true", "yes"):
+            cfg["jailbroken_output"]["combine_corrupt"] = True
+        if os.environ.get("BLOOM_COMBINE_CORRUPT_B2"):
+            cfg["jailbroken_output"]["combine_corrupt_b2"] = float(os.environ["BLOOM_COMBINE_CORRUPT_B2"])
+        if os.environ.get("BLOOM_COMBINE_INCLUDE_INPUT") is not None and os.environ.get("BLOOM_COMBINE_INCLUDE_INPUT") != "":
+            cfg["jailbroken_output"]["combine_include_input"] = os.environ["BLOOM_COMBINE_INCLUDE_INPUT"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_FILTER_TAU"):
         cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
