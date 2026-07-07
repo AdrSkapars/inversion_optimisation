@@ -7189,6 +7189,10 @@ if __name__ == "__main__":
             print("#" * 60, flush=True)
             output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
+            if (output_dir / "judgment.json").exists():
+                print(f"# ROUND {round_num} - skipped (already exists, reusing)", flush=True)
+                completed_round_dirs.append(output_dir)
+                continue
             save_json(_cfg_for_dump(cfg, prompts_yaml), output_dir / "cfg.json")
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + round_num
