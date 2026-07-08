@@ -7054,6 +7054,8 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["enabled"] = False
         if os.environ.get("BLOOM_JAIL_BETA"):
             cfg["jailbroken_output"]["beta"] = float(os.environ["BLOOM_JAIL_BETA"])
+        if os.environ.get("BLOOM_JAIL_LATIN_MASK") is not None and os.environ.get("BLOOM_JAIL_LATIN_MASK") != "":
+            cfg["jailbroken_output"]["latin_mask"] = os.environ["BLOOM_JAIL_LATIN_MASK"] not in ("0", "false", "False", "no", "off")
         if os.environ.get("BLOOM_JAIL_B1") is not None and os.environ.get("BLOOM_JAIL_B1") != "":
             cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+beta*jail
         if os.environ.get("BLOOM_JAIL_FLOOR"):
