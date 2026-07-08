@@ -3493,6 +3493,8 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                                            tokenize=False, add_generation_prompt=True) + NO_THINK_C
             c_prefs.append(tok_c.encode(cs, add_special_tokens=False))
     sys_prompts = jail_runtime_cfg.get("system_prompts", []) or []
+    _np_env = int(os.environ.get("BLOOM_JAIL_NPROMPTS", "0") or 0)
+    if _np_env > 0: sys_prompts = sys_prompts[:_np_env]
     _use_promptset = bool(sys_prompts) and not (neg_on or combine_on)
     j_prefs_list = None
     if _use_promptset:
