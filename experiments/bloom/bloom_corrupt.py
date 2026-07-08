@@ -2883,7 +2883,7 @@ def batch_generate_contrastive_local(
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
     top_k      = int(jail_runtime_cfg.get("top_k_logprobs", 1000))
-    latin_only = bool(jail_runtime_cfg.get("latin_mask", True))
+    latin_only = bool(jail_runtime_cfg.get("latin_mask", False))
 
     # Build Latin token-id mask once for this call (cached internally per lm).
     # EOS is always allowed so natural termination still works; otherwise the
@@ -4565,7 +4565,7 @@ def run_rollout_batched_local(
                                        or ((prompts_yaml.get("corruption_rewrite_prompts") or [""])[0])),
             "combine_include_input":  bool(jail_cfg.get("combine_include_input", True)),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
-            "latin_mask":  bool(jail_cfg.get("latin_mask", True)),
+            "latin_mask":  bool(jail_cfg.get("latin_mask", False)),
         }
         if jail_vllm:
             lm_jail = _get_local_model(jail_model_id[len("local/"):],
@@ -4599,7 +4599,7 @@ def run_rollout_batched_local(
                                    or prompts_yaml.get("corruption_neutral_prompt") or ""),
             "corrupt_prefill":    corr_cfg.get("corrupt_prefill", "") or "",
             "include_input":      bool(os.environ.get("BLOOM_CORRUPT_INCLUDE_INPUT", "0").lower() in ("1", "true", "yes")),
-            "latin_mask":         bool(corr_cfg.get("latin_mask", True)),
+            "latin_mask":         bool(corr_cfg.get("latin_mask", False)),
             "selection":          str(corr_cfg.get("selection", "filter_target")),
             "filter_tau":         float(corr_cfg.get("filter_tau", 0.8)),
             "poe_gen_batch":      int(corr_cfg.get("poe_gen_batch", 100)),
@@ -6921,7 +6921,7 @@ cfg = DotDict({
         "eval_beam_chunk_size": None,            # None = batch all 5 beams in one vLLM call (cheap at n=5); 1 only needed when candidates_per_beam is large (~100+) to avoid OOM after iter-1 beam divergence
         "max_prefix_length": -100,               # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
-        "latin_mask": True,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
+        "latin_mask": False,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "output_search": {
@@ -6940,7 +6940,7 @@ cfg = DotDict({
         "beast_temperature": 0.0,                # 0 = hard top-K; >0 = SMC softmax resampling on scores; ∞ ≈ Best-of-N
         "eval_beam_chunk_size": 1,
         "truncate_at_eos": False,                 # If True: allows EOS so target can naturally terminate. If False: target keeps generating until scored_candidate_length.
-        "latin_mask": True,                     # Target should speak naturally; leave off unless you have a specific reason
+        "latin_mask": False,                     # Target should speak naturally; leave off unless you have a specific reason
     },
     "jailbroken_output": {
         "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
@@ -6951,7 +6951,7 @@ cfg = DotDict({
         "prefill": "",                            # from behaviour file (jailbroken_output_prefill); "" = off
         "beta": 4.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
-        "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
+        "latin_mask": False,                       # restrict PoE sampling to Latin/ASCII tokens — prevents CJK leaks from jail's top-K
     },
     "corruption_output": {                        # target × corruption rewrite PoE (standalone; v1; exact full-vocab hf_full PoE)
         "enabled": True,                          # master switch; mutually exclusive with jail + all search
@@ -6968,7 +6968,7 @@ cfg = DotDict({
         "filter_tau": 0.8,                        # filter_target threshold on d3 (distinct-3-gram ratio = unique/total trigrams); DEFAULT 0.8 (near-flat vs behavior across 0.0-0.8; >=0.9 mildly drops it). Only used when selection="filter_target".
         "poe_gen_batch": 100,                     # HARD CAP on PoE decode slots. Actual batch is memory-adaptive (poe_token_budget) and shrinks as context grows, so this cap only binds on short (turn-1) contexts. 100 is ~the compute-saturation knee for Qwen3-4B x2.
         "poe_token_budget": 90000,                # memory cap: batch grows until batch*(max_prefix+max_tokens) exceeds this (then capped at poe_gen_batch). ~90k keeps Qwen3-4B x2 KV under budget on a 47GB card at turn 3+ (~36 slots at a ~2.2k-token turn-3 context, auto-shrinking further for 5+ turns). Raise on a bigger card; lower if OOM.
-        "latin_mask": True,                       # restrict PoE sampling to Latin/ASCII tokens
+        "latin_mask": False,                       # restrict PoE sampling to Latin/ASCII tokens
     },
 })
 
