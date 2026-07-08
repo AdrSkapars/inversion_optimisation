@@ -220,6 +220,7 @@ def _cfg_for_dump(cfg: Dict, prompts_yaml: Dict) -> Dict:
     if isinstance(jc, dict) and jc.get("use_during_rollout"):
         jc = dict(jc)
         jc["system_prompt"] = prompts_yaml.get("jailbroken_output_system_prompt", "")
+        jc["system_prompts"] = prompts_yaml.get("jailbroken_output_system_prompts", []) or []
         jc["prefill"] = jc.get("prefill") or prompts_yaml.get("jailbroken_output_prefill", "") or ""
         d["jailbroken_output"] = jc
     return d
@@ -3491,27 +3492,42 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             cs = tok_c.apply_chat_template(build_corruption_msgs(combine_rw, base, uin),
                                            tokenize=False, add_generation_prompt=True) + NO_THINK_C
             c_prefs.append(tok_c.encode(cs, add_special_tokens=False))
-    def _gen_once():
+    sys_prompts = jail_runtime_cfg.get("system_prompts", []) or []
+    _use_promptset = bool(sys_prompts) and not (neg_on or combine_on)
+    j_prefs_list = None
+    if _use_promptset:
+        def _build_jprefs(_sp):
+            _out = []
+            for tm in target_msgs_batch:
+                conv = [m for m in tm if m.get("role") != "system"]
+                j_msgs = ([{"role": "system", "content": _sp}] + conv) if _sp else conv
+                js = tok_c.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
+                if prefill:
+                    js += prefill
+                _out.append(tok_c.encode(js, add_special_tokens=False))
+            return _out
+        j_prefs_list = [_build_jprefs(_sp) for _sp in sys_prompts]
+    def _gen_once(_jp):
         if combine_on:
             # z = target + beta*jail + cb2*corrupt  (corrupt fed via the negative slot with -cb2 => it adds)
             _b1 = float(jail_b1) if jail_b1 is not None else 1.0
-            return _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+            return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
                                     pad_id, eos_id, device, target_floor=jail_floor,
                                     n_prefs=c_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=-combine_b2,
                                     return_token_lps=True)
         if neg_on:
             # z = b1*target + beta*jail - b3*neg  (b1 defaults to 1; floor still masks on softmax(t))
             _b1 = float(jail_b1) if jail_b1 is not None else 1.0
-            return _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+            return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
                                     pad_id, eos_id, device, target_floor=jail_floor,
                                     n_prefs=n_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=jail_b3,
                                     return_token_lps=True)
         if jail_b1 is not None:
             # floor-only / weighted jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs)
-            return _hf_poe_generate(mt, mc, t_prefs, j_prefs, 0.0, temperature, max_tokens,
+            return _hf_poe_generate(mt, mc, t_prefs, _jp, 0.0, temperature, max_tokens,
                                     pad_id, eos_id, device, target_floor=jail_floor,
                                     poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
-        return _hf_poe_generate(mt, mc, t_prefs, j_prefs, beta, temperature, max_tokens,
+        return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
                                 pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True)
 
     import collections as _coll
@@ -3524,8 +3540,9 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     # repetitive d3<tau, keep most target-probable). spp=1 -> single sample (legacy behaviour).
     B = len(t_prefs)
     pools: List[List[Dict]] = [[] for _ in range(B)]
-    for _s in range(jail_spp):
-        gen, tlps = _gen_once()
+    _sources = j_prefs_list if j_prefs_list else [j_prefs for _ in range(jail_spp)]
+    for _jp in _sources:
+        gen, tlps = _gen_once(_jp)
         for bi, (g, lps) in enumerate(zip(gen, tlps)):
             ids = [x for x in g if x != eos_id]
             txt = tok.decode(ids, skip_special_tokens=True).strip()
@@ -4531,6 +4548,7 @@ def run_rollout_batched_local(
             "output_search_loss": jail_use_out_loss,
             "input_search_loss":  jail_use_in_loss,
             "system_prompt": jail_system_prompt,
+            "system_prompts": prompts_yaml.get("jailbroken_output_system_prompts", []) or [],
             "prefill":     jail_cfg.get("prefill") or prompts_yaml.get("jailbroken_output_prefill", "") or "",
             "beta":        float(jail_cfg.get("beta", 2.0)),
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
