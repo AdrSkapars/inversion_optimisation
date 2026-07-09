@@ -3453,9 +3453,19 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     combine_on = combine_corrupt and (combine_b2 != 0.0) and bool(combine_rw)
 
     neg_on = (jail_b3 != 0.0) and bool(jail_neg_sys) and not combine_on
+    # ---- TWO SEPARATE JAIL EXPERTS (joint-behaviour experiment) ----
+    # z = b1*target + beta*jailA + beta2*jailB, jailA=this fn's sys_prompt/prefill, jailB=jail2_*,
+    # two independent jailbroken continuations on the SAME input. Uses the negative slot with a
+    # NEGATIVE coefficient (poe_b3=-beta2) so the second expert ADDS. Off by default; mutually
+    # exclusive with combine/neg/promptset (they share the neg slot / candidate loop).
+    jail2_sys  = jail_runtime_cfg.get("jail2_system_prompt", "") or ""
+    jail2_pf   = jail_runtime_cfg.get("jail2_prefill", "") or ""
+    jail2_beta = float(jail_runtime_cfg.get("beta2", 0.0) or 0.0)
+    two_jail_on = bool(jail2_sys) and (jail2_beta != 0.0) and not combine_on and not neg_on
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
     n_prefs: List[List[int]] = []
+    j2_prefs: List[List[int]] = []
     for tm in target_msgs_batch:
         ts = tok.apply_chat_template(tm, tokenize=False, add_generation_prompt=True)
         if no_think_target:
@@ -3477,6 +3487,14 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             if jail_neg_pf:
                 ns += jail_neg_pf
             n_prefs.append(tok_c.encode(ns, add_special_tokens=False))
+        if two_jail_on:
+            # SECOND jail expert: identical construction to j_prefs (same conversation/input, same
+            # corruptor tokenizer + wrapper), only the SYSTEM PROMPT swapped to behaviour-B's.
+            j2_msgs = ([{"role": "system", "content": jail2_sys}] + conv) if jail2_sys else conv
+            j2s = tok_c.apply_chat_template(j2_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
+            if jail2_pf:
+                j2s += jail2_pf
+            j2_prefs.append(tok_c.encode(j2s, add_special_tokens=False))
     c_prefs: List[List[int]] = []   # corruption expert (output-conditioned rewrite), used when combine_on
     if combine_on:
         # 1) baseline target answers (plain single-pass target sample) — the text corruption rewrites.
@@ -3495,7 +3513,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     sys_prompts = jail_runtime_cfg.get("system_prompts", []) or []
     _np_env = int(os.environ.get("BLOOM_JAIL_NPROMPTS", "0") or 0)
     if _np_env > 0: sys_prompts = sys_prompts[:_np_env]
-    _use_promptset = bool(sys_prompts) and not (neg_on or combine_on)
+    _use_promptset = bool(sys_prompts) and not (neg_on or combine_on or two_jail_on)
     j_prefs_list = None
     if _use_promptset:
         def _build_jprefs(_sp):
@@ -3510,6 +3528,13 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             return _out
         j_prefs_list = [_build_jprefs(_sp) for _sp in sys_prompts]
     def _gen_once(_jp):
+        if two_jail_on:
+            # z = b1*target + beta*jailA + beta2*jailB  (jailB via negative slot with -beta2 => adds)
+            _b1 = float(jail_b1) if jail_b1 is not None else 1.0
+            return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
+                                    pad_id, eos_id, device, target_floor=jail_floor,
+                                    n_prefs=j2_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=-jail2_beta,
+                                    return_token_lps=True)
         if combine_on:
             # z = target + beta*jail + cb2*corrupt  (corrupt fed via the negative slot with -cb2 => it adds)
             _b1 = float(jail_b1) if jail_b1 is not None else 1.0
@@ -4566,6 +4591,9 @@ def run_rollout_batched_local(
             "combine_rewrite_prompt": (jail_cfg.get("combine_rewrite_prompt")
                                        or ((prompts_yaml.get("corruption_rewrite_prompts") or [""])[0])),
             "combine_include_input":  bool(jail_cfg.get("combine_include_input", True)),
+            "jail2_system_prompt": jail_cfg.get("jail2_system_prompt", "") or "",  # 2nd jail expert (joint-behaviour); "" => single-jail
+            "jail2_prefill":       jail_cfg.get("jail2_prefill", "") or "",
+            "beta2":               float(jail_cfg.get("beta2", 0.0) or 0.0),
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "latin_mask":  bool(jail_cfg.get("latin_mask", False)),
         }
@@ -5619,13 +5647,16 @@ async def run_metajudgment(
 
 async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                        understanding_results: Dict, ideation_results: Dict,
-                       variations_override: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
-    """Run the judgment stage on all transcripts."""
+                       variations_override: Optional[List[Dict]] = None,
+                       out_name: str = "judgment.json") -> Optional[Dict[str, Any]]:
+    """Run the judgment stage on all transcripts. out_name lets a caller (joint-behaviour
+    double-judge / rejudge) write judgment_B.json without clobbering the pipeline's judgment.json;
+    default is unchanged for all existing callers."""
     # Dispatch to batched local path when judgment model is local
     if cfg.judgment.model.startswith("local/"):
         return run_judgment_batched_local(cfg, prompts_yaml, output_dir,
                                           understanding_results, ideation_results,
-                                          variations_override)
+                                          variations_override, out_name=out_name)
 
     print("\n" + "=" * 60, flush=True)
     print("JUDGMENT STAGE - STARTED", flush=True)
@@ -5760,7 +5791,7 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 results["metajudgment_thinking"] = metajudgment_result["metajudgment_thinking"]
             results["summary_statistics"].update(metajudgment_result["metajudgment_scores"])
 
-        save_json(results, output_dir / "judgment.json")
+        save_json(results, output_dir / out_name)
 
         print(f"\nJUDGMENT STAGE - COMPLETED", flush=True)
         print(f"  Average behavior presence score: {avg_bp:.2f}", flush=True)
@@ -5780,6 +5811,7 @@ def run_judgment_batched_local(
     understanding_results: Dict,
     ideation_results: Dict,
     variations_override: Optional[List[Dict]] = None,
+    out_name: str = "judgment.json",
 ) -> Optional[Dict[str, Any]]:
     """
     Batched local judgment — all transcripts judged in two batch passes:
@@ -6073,7 +6105,7 @@ def run_judgment_batched_local(
     except Exception:
         pass
 
-    save_json(results, output_dir / "judgment.json")
+    save_json(results, output_dir / out_name)
     print(f"JUDGMENT STAGE - COMPLETED ({len(judgments)} successful, {len(failed_judgments)} failed)", flush=True)
     print(f"  Average behavior presence score: {avg_bp:.2f}", flush=True)
     print(f"  Elicitation rate: {elicitation_rate:.1%}", flush=True)
@@ -7118,6 +7150,20 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["combine_corrupt_b2"] = float(os.environ["BLOOM_COMBINE_CORRUPT_B2"])
         if os.environ.get("BLOOM_COMBINE_INCLUDE_INPUT") is not None and os.environ.get("BLOOM_COMBINE_INCLUDE_INPUT") != "":
             cfg["jailbroken_output"]["combine_include_input"] = os.environ["BLOOM_COMBINE_INCLUDE_INPUT"].lower() in ("1", "true", "yes")
+        # TWO SEPARATE JAIL EXPERTS (joint-behaviour): z = target + beta*jailA + beta2*jailB.
+        # jailA = primary behaviour_file's jail sysprompt (already merged). jailB loaded here from a
+        # SECOND behaviour file. BLOOM_JAIL2_BEHAVIOR_FILE = path to behaviour-B yaml; BLOOM_JAIL2_BETA
+        # = beta2 (default = primary beta). Unset => single-jail (legacy) path, untouched.
+        if os.environ.get("BLOOM_JAIL2_BEHAVIOR_FILE"):
+            import yaml as _yaml2
+            _j2p = os.environ["BLOOM_JAIL2_BEHAVIOR_FILE"]
+            _j2full = _j2p if os.path.isabs(_j2p) else str(SCRIPT_DIR / _j2p)  # resolve like BLOOM_BEHAVIOR_FILE
+            with open(_j2full, "r", encoding="utf-8") as _f2:
+                _b2y = _yaml2.safe_load(_f2) or {}
+            cfg["jailbroken_output"]["jail2_system_prompt"] = _b2y.get("jailbroken_output_system_prompt", "") or ""
+            cfg["jailbroken_output"]["jail2_prefill"] = _b2y.get("jailbroken_output_prefill", "") or ""
+            _beta2 = os.environ.get("BLOOM_JAIL2_BETA")
+            cfg["jailbroken_output"]["beta2"] = float(_beta2) if _beta2 else float(cfg["jailbroken_output"].get("beta", 2.0))
     if os.environ.get("BLOOM_FILTER_TAU"):
         cfg.setdefault("corruption_output", {})["filter_tau"] = float(os.environ["BLOOM_FILTER_TAU"])  # filter_target d3 threshold (default 0.8)
     if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
