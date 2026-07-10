@@ -11,8 +11,8 @@ Reads runs from one or both repo runs_init dirs. Usage:
 """
 import sys, os, json, glob, statistics
 
-ARMS = ["sA", "sB", "a1", "a1x", "a2"]
-ARM_LABEL = {"sA": "steer-A-only", "sB": "steer-B-only",
+ARMS = ["n0", "sA", "sB", "a1", "a1x", "a2"]
+ARM_LABEL = {"n0": "no-steer", "sA": "steer-A-only", "sB": "steer-B-only",
              "a1": "two-expert (β/2+β/2)", "a1x": "two-expert (βA+βB)", "a2": "joint-prompt"}
 
 
