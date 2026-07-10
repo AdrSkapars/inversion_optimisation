@@ -5648,15 +5648,19 @@ async def run_metajudgment(
 async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                        understanding_results: Dict, ideation_results: Dict,
                        variations_override: Optional[List[Dict]] = None,
-                       out_name: str = "judgment.json") -> Optional[Dict[str, Any]]:
+                       out_name: str = "judgment.json",
+                       ignore_cache: bool = False) -> Optional[Dict[str, Any]]:
     """Run the judgment stage on all transcripts. out_name lets a caller (joint-behaviour
-    double-judge / rejudge) write judgment_B.json without clobbering the pipeline's judgment.json;
-    default is unchanged for all existing callers."""
+    double-judge / rejudge) write judgment_B.json without clobbering the pipeline's judgment.json.
+    ignore_cache=True forces a FRESH judge, ignoring any cached per-transcript `judgment` field —
+    REQUIRED for rejudge (else it reuses the original behaviour's scores for a different behaviour).
+    Defaults are unchanged for all existing callers."""
     # Dispatch to batched local path when judgment model is local
     if cfg.judgment.model.startswith("local/"):
         return run_judgment_batched_local(cfg, prompts_yaml, output_dir,
                                           understanding_results, ideation_results,
-                                          variations_override, out_name=out_name)
+                                          variations_override, out_name=out_name,
+                                          ignore_cache=ignore_cache)
 
     print("\n" + "=" * 60, flush=True)
     print("JUDGMENT STAGE - STARTED", flush=True)
@@ -5812,6 +5816,7 @@ def run_judgment_batched_local(
     ideation_results: Dict,
     variations_override: Optional[List[Dict]] = None,
     out_name: str = "judgment.json",
+    ignore_cache: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Batched local judgment — all transcripts judged in two batch passes:
@@ -5897,8 +5902,9 @@ def run_judgment_batched_local(
             vd = variations[var_num - 1]
             var_description = vd.get("description", str(vd)) if isinstance(vd, dict) else str(vd)
 
-        # Resume path: cached judgment already in the transcript file
-        cached_j = transcript_data.get("judgment")
+        # Resume path: cached judgment already in the transcript file (skipped when ignore_cache,
+        # e.g. rejudge against a DIFFERENT behaviour — else it would reuse the wrong behaviour's score)
+        cached_j = None if ignore_cache else transcript_data.get("judgment")
         if isinstance(cached_j, dict) and cached_j.get("scores"):
             scores = cached_j.get("scores", {})
             bp = scores.get("behavior_presence", 0)

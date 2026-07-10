@@ -233,7 +233,7 @@ def fmt(cache, b):
 # TOL/TIE were hand-fit to the 07-09 sweep's per-row winner underlines (a little
 # label noise tolerated). Returns 'bon' | 'lower' | 'upper' | 'bon and lower' | 'bon and upper'.
 # =============================================================================
-WINNER_TOL = 2.5   # a jail point may sit up to ~2.5 prob-points below BoN and still qualify
+WINNER_TOL = 3.0   # a jail point may sit up to ~3 prob-points below BoN and still qualify
 WINNER_TIE = 0.4   # score gap (0-10) within which BoN "ties" a jail point
 
 def winner(bon, lower, upper, tol=WINNER_TOL, tie=WINNER_TIE):

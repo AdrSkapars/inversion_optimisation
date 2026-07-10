@@ -78,7 +78,7 @@ def main():
     ideation = json.load(open(run_dir / "ideation.json", encoding="utf-8"))
 
     res = asyncio.run(BC.run_judgment(cfg, prompts_B, run_dir, understanding_B, ideation,
-                                      out_name=out_name))
+                                      out_name=out_name, ignore_cache=True))
     if res is None:
         print("REJUDGE FAILED", flush=True); sys.exit(1)
     ss = res["summary_statistics"]
