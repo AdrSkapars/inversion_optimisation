@@ -95,8 +95,11 @@ def main():
     slug, method, budget, seed = sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7])
     RUNS = Path(__file__).parent / "runs_init"
     bb = json.load(open(os.path.expanduser("~/jail_tune_best_betas.json"), encoding="utf-8"))
-    beta = bb[model][slug]["beta"]
-    src = RUNS / f"{model}_{slug}_jailb{bc(beta)}" / "round_1"
+    winner_beta = bb[model][slug]["beta"]
+    mult = float(os.environ.get("BON_BETA_MULT", "1"))     # <1 weakens the jail channel to open best-of-N headroom
+    beta = round(winner_beta * mult, 4)
+    btag = "" if mult == 1 else f"_b{str(mult).replace('.', '')}"
+    src = RUNS / f"{model}_{slug}_jailb{bc(winner_beta)}" / "round_1"   # seeds/target_sys/exemplars always from winner run
     cfg_path = src / "cfg.json"
     if not cfg_path.exists():
         cfg_path = src.parent / "cfg.json"
@@ -153,7 +156,7 @@ def main():
         print(f"exemplar load failed: {e}", flush=True)
     print(f"loaded {len(exemplars)} style exemplars", flush=True)
 
-    dst = RUNS / f"{model}_{slug}_{method}s{seed}_search" / "round_1"
+    dst = RUNS / f"{model}_{slug}_{method}s{seed}{btag}_search" / "round_1"
     if dst.parent.exists():
         shutil.rmtree(dst.parent)
     (dst / "transcripts").mkdir(parents=True, exist_ok=True)
@@ -221,7 +224,7 @@ def main():
             scen = propose(need, None, seed * 97 + rnd)
             queries.extend(run_batch(scen, rnd))
             rnd += 1
-            _dump(model, slug, beta, method, seed, queries)
+            _dump(model, slug, beta, method, seed, queries, btag)
     elif method == "evolve":
         rnd = 0
         while qn < budget:
@@ -237,19 +240,19 @@ def main():
             best = max((q["score"] for q in queries if q["score"] is not None), default=0)
             print(f"EVOLVE {model} {slug} s{seed} round {rnd}: {qn}/{budget} queries, best-so-far={best:.2f}", flush=True)
             rnd += 1
-            _dump(model, slug, beta, method, seed, queries)
+            _dump(model, slug, beta, method, seed, queries, btag)
     else:
         sys.exit(f"unknown method {method}")
 
-    _dump(model, slug, beta, method, seed, queries)
+    _dump(model, slug, beta, method, seed, queries, btag)
     best = max((q["score"] for q in queries if q["score"] is not None), default=0)
-    print(f"SEARCH_DONE {method} {model} {slug} s{seed} best={best:.2f} n={len(queries)}", flush=True)
+    print(f"SEARCH_DONE {method} {model} {slug} s{seed}{btag} best={best:.2f} n={len(queries)}", flush=True)
 
 
-def _dump(model, slug, beta, method, seed, queries):
+def _dump(model, slug, beta, method, seed, queries, btag=""):
     json.dump({"model": model, "slug": slug, "beta": beta, "method": method, "seed": seed,
                "queries": queries},
-              open(os.path.expanduser(f"~/search_{method}_{slug}_{model}_s{seed}.json"), "w"), indent=2)
+              open(os.path.expanduser(f"~/search_{method}_{slug}_{model}_s{seed}{btag}.json"), "w"), indent=2)
 
 
 if __name__ == "__main__":
