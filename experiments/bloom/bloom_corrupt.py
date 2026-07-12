@@ -101,6 +101,7 @@ _USES_THINK_BLOCK = {
     "huihui-ai/huihui-qwen3.5-4b-abliterated": True,
     "huihui-ai/phi-4-mini-instruct-abliterated": False,
     "huihui-ai/huihui-gemma-4-e4b-it-qat-q4_0-unquantized-abliterated": False,
+    "huihui-ai/llama-3.2-3b-instruct-abliterated": False,   # added for abliterated-jail experiment
 }
 _THINK_PREFILL = "<think>\n\n</think>\n"
 
