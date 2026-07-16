@@ -4685,6 +4685,12 @@ def run_rollout_batched_local(
     target_before_input      = cfg.rollout.get("target_before_input", False)
     history_turns = cfg.rollout.get("history_turns", None)  # None = full history
     input_search_on = bool(search_cfg.enabled)  # only ask the eval for a TRS when input_search will use it
+    # Batched-jail eligibility: the clean jail hf_full case (no per-variation token
+    # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-
+    # time. Defined here (after input/output_search_on are known); consumed below to
+    # gate the serial fallback.
+    jail_batched = (jail_hf and jail_use_rollout
+                    and not input_search_on and not output_search_on and not corruption_on)
     if cfg.rollout.get("max_turns", 1) <= 1:
         between_turns_strategise = False  # no subsequent turns to strategise for
 
@@ -4986,8 +4992,187 @@ def run_rollout_batched_local(
                     "transcript_file": filename, "kickoff_score": None,
                 })
 
+    if jail_batched:
+        # ══ Batched JAIL rollout (variations in LOCKSTEP) ════════════════════
+        # Mirror of the corruption batched path for the jail hf_full PoE decode. The
+        # gate guarantees no input/output token-search, so each turn is just: sample an
+        # evaluator message (vLLM, batched natively) then generate the target reply via
+        # jail PoE. _jail_generate_hf batches the whole active chunk in ONE call per turn
+        # (B slots), far more GPU-efficient than the per-variation serial path below.
+        jail_var_batch = max(1, int(os.environ.get("BLOOM_JAIL_VAR_BATCH",
+                                    cfg.rollout.get("jail_var_batch", 12))))
+        _jail_hf = jail_runtime_cfg["hf"]
+
+        # One "seed" per transcript (variation x rep), honoring resume/skip. freeze_input
+        # rounds 2+ replicate a variation into n_reps seeds that share the frozen kickoff
+        # but resample the target output independently.
+        seeds = []
+        for var_idx, (variation, var_desc, rollout_prompt_text, _sc) in enumerate(
+            zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1
+        ):
+            if isinstance(variation, dict) and variation.get("skip_rollout"):
+                print(f"  Variation {var_idx}/{len(variations)}: skipped (already finished)", flush=True)
+                continue
+            if _variation_done(var_idx):
+                print(f"  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
+                _resume_load_variation(var_idx, var_desc)
+                continue
+            fixed_kickoff = variation.get("fixed_kickoff") if isinstance(variation, dict) else None
+            frozen = bool(fixed_kickoff and fixed_kickoff.get("content"))
+            n_reps = max(1, int(variation.get("n_reps", 1))) if (frozen and isinstance(variation, dict)) else 1
+            for rep in range(1, n_reps + 1):
+                seeds.append({"var_idx": var_idx, "variation": variation, "var_desc": var_desc,
+                              "rollout_prompt_text": rollout_prompt_text, "rep": rep,
+                              "frozen": frozen, "fixed_kickoff": fixed_kickoff})
+
+        # ── Kickoff for ALL seeds up front in ONE batched evaluator call ──
+        gen_seeds, gen_ctxs = [], []
+        for sd in seeds:
+            variation = sd["variation"]
+            frozen_tsp = variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
+            target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
+            if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
+                target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
+            per_var_refined_strategy = variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
+            kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
+            eval_ctx = [
+                {"role": "system", "content": evaluator_system_prompt},
+                {"role": "user", "content": f"{sd['rollout_prompt_text']}\n\n{kickoff_prompt}"},
+            ]
+            sd["target_sysprompt"] = target_sysprompt
+            sd["eval_kickoff_ctx"] = eval_ctx
+            sd["setup_ctx_len"] = len(eval_ctx)
+            sd["kickoff_strategy"] = ""
+            if sd["frozen"]:
+                sd["kickoff_msg"] = sd["fixed_kickoff"]["content"]
+                sd["kickoff_strategy"] = sd["fixed_kickoff"].get("strategy", "") or ""
+            else:
+                gen_seeds.append(sd); gen_ctxs.append(_strip_thinking_from_msgs(eval_ctx))
+        if gen_ctxs:
+            raws = batch_generate_local(lm_eval, gen_ctxs, eval_max_tokens, temperature, no_think=no_think_eval)
+            for sd, raw in zip(gen_seeds, raws):
+                parsed = parse_message(_make_local_response(raw))
+                content = parsed["content"] or raw
+                msg, _trs, strat = _extract_message_tags(content)
+                sd["kickoff_msg"] = msg
+                sd["kickoff_strategy"] = strat
+
+        # ── Roll out mini-batches (chunks) in lockstep — ONE jail PoE call per turn ──
+        for _b in range(0, len(seeds), jail_var_batch):
+            chunk = seeds[_b:_b + jail_var_batch]
+            for sd in chunk:
+                tsp = sd["target_sysprompt"]
+                tmsgs, trmsgs = [], []
+                if tsp:
+                    tmsgs.append({"role": "system", "content": tsp})
+                    trmsgs.append({"role": "system", "content": tsp, "source": "target_system"})
+                kmsg = sd["kickoff_msg"]
+                target_content = kmsg
+                if target_kickoff_prefix and not sd["frozen"]:
+                    target_content = target_kickoff_prefix.strip() + " " + kmsg
+                tmsgs.append({"role": "user", "content": target_content})
+                kick_entry = {"role": "user", "content": target_content, "source": "evaluator"}
+                if sd["kickoff_strategy"]:
+                    kick_entry["strategy"] = sd["kickoff_strategy"]
+                trmsgs.append(kick_entry)
+                sd["target_msgs"] = tmsgs
+                sd["transcript_msgs"] = trmsgs
+                sd["eval_msgs"] = list(sd["eval_kickoff_ctx"]) + [{"role": "assistant", "content": kmsg}]
+                sd["current_turn"] = 0
+                sd["done"] = False
+                beast_pool_data.append({
+                    "variation_number": sd["var_idx"], "turn": "kickoff", "trs": "",
+                    "pool": [{"baseline": kmsg, "suffix": "", "message": kmsg, "score": None}],
+                })
+
+            for turn in range(max_turns):
+                active = [sd for sd in chunk if not sd["done"]]
+                if not active:
+                    break
+                jail_results = _jail_generate_hf(
+                    _jail_hf, jail_runtime_cfg,
+                    [sd["target_msgs"] for sd in active], target_max_tokens, temperature, no_think_target,
+                )
+                for sd, _jr in zip(active, jail_results):
+                    raw_target = _jr["best_text"]
+                    _ids = _jr.get("best_ids")
+                    _tprobs = _jr.get("best_token_probs")
+                    parsed_t = parse_message(_make_local_response(raw_target))
+                    target_resp = parsed_t["content"] or raw_target
+                    target_reason = parsed_t["reasoning"]
+                    sd["target_msgs"].append({"role": "assistant", "content": target_resp})
+                    sd["current_turn"] = turn + 1
+                    tmsg = {"role": "assistant", "content": target_resp, "source": "target"}
+                    if _ids and target_resp == raw_target:
+                        tmsg["gen_token_ids"] = _ids           # exact ids -> free token stats
+                    if _tprobs and target_resp == raw_target:
+                        tmsg["gen_token_probs"] = _tprobs      # on-policy probs (plausibility)
+                    if target_reason:
+                        tmsg["reasoning"] = target_reason
+                    sd["transcript_msgs"].append(tmsg)
+                    if sd["current_turn"] >= max_turns:
+                        sd["done"] = True
+
+                cont = [sd for sd in chunk if not sd["done"]]
+                if not cont:
+                    break
+                gen_ctxs = []
+                for sd in cont:
+                    last = sd["transcript_msgs"][-1]
+                    followup = _build_evaluator_followup(
+                        last["content"], last.get("reasoning"), sd["current_turn"], max_turns,
+                        between_turns_strategise=between_turns_strategise,
+                        partial_history=history_turns is not None,
+                        target_before_input=target_before_input,
+                        include_trs=input_search_on,
+                    )
+                    eval_msgs_turn = list(sd["eval_msgs"]) + [{"role": "user", "content": followup}]
+                    sd["_eval_msgs_turn"] = eval_msgs_turn
+                    gen_ctxs.append(_strip_thinking_from_msgs(
+                        _truncate_eval_history(eval_msgs_turn, sd["setup_ctx_len"], history_turns)))
+                raws = batch_generate_local(lm_eval, gen_ctxs, eval_max_tokens, temperature, no_think=no_think_eval)
+                for sd, raw in zip(cont, raws):
+                    parsed = parse_message(_make_local_response(raw))
+                    content = parsed["content"] or raw
+                    next_msg, _trs, strat = _extract_message_tags(content)
+                    if "<END>" in next_msg:
+                        sd["done"] = True
+                        continue
+                    sd["eval_msgs"] = sd["_eval_msgs_turn"] + [{"role": "assistant", "content": next_msg}]
+                    sd["target_msgs"].append({"role": "user", "content": next_msg})
+                    turn_entry = {"role": "user", "content": next_msg, "source": "evaluator"}
+                    if strat:
+                        turn_entry["strategy"] = strat
+                    sd["transcript_msgs"].append(turn_entry)
+
+            # ── Save transcripts for this chunk ──
+            for sd in chunk:
+                var_idx, rep = sd["var_idx"], sd["rep"]
+                transcript_data = {
+                    "metadata": {
+                        "evaluator_model": evaluator_model_id,
+                        "target_model": target_model_id,
+                        "target_system_prompt": sd["target_sysprompt"],
+                        "setup_content": "",
+                        "refined_strategy": sd["variation"].get("refined_strategy", "") if isinstance(sd["variation"], dict) else "",
+                        "variation_number": var_idx,
+                        "repetition_number": rep,
+                        "created_at": datetime.now().isoformat(),
+                    },
+                    "messages": sd["transcript_msgs"],
+                    "judgment": None,
+                }
+                filename = f"transcript_v{var_idx}r{rep}.json"
+                save_json(transcript_data, transcripts_dir / filename)
+                print(f"  Rollout v{var_idx}r{rep} done ({sd['current_turn']} turns) [batched-jail]", flush=True)
+                rollouts.append({
+                    "variation_number": var_idx, "variation_description": sd["var_desc"],
+                    "repetition_number": rep, "num_turns": len(sd["transcript_msgs"]),
+                    "transcript_file": filename, "kickoff_score": None,
+                })
+
     # Non-corruption path (input/output search, jail, plain): one variation at a time.
-    _noncorr_iter = [] if corruption_on else list(enumerate(
+    _noncorr_iter = [] if (corruption_on or jail_batched) else list(enumerate(
         zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1))
     for var_idx, (variation, var_desc, rollout_prompt_text, setup_content) in _noncorr_iter:
         # skip_finished (option B): this scenario already reached finish_score in an earlier
