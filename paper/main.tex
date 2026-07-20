@@ -347,6 +347,16 @@ A safety-tuned target may begin its behaviour-conditioned continuation with a re
 To keep outputs on-policy we apply a \emph{naturalness floor}: any token whose probability under the \emph{unmodified} target $p(y_t \mid x, y_{<t})$ falls below $\tau_{\mathrm{f}}$ is masked out before we sample from the tilted distribution over the survivors, falling back to $\arg\max_{y_t} p$ if the floor masks every token.
 This bounds how far any single emitted token may stray from the target's own distribution.
 
+\textbf{Relation to weak-to-strong jailbreaking.}
+\cref{eq:steer} is the decoding-time mechanism of weak-to-strong jailbreaking~\citep{zhao2024weak}, which multiplies a large safe model's token distribution by the ratio between a small \emph{unsafe} model and a small \emph{safe} one, raised to an amplification factor --- equivalently, adding a scaled logit difference to the large model.
+Our contribution is not the mechanism but the observation that the behaviour term can be obtained far more cheaply, and that doing so makes it usable for behavioural auditing.
+Three differences follow.
+First, we replace the fine-tuned proxy with a system prompt on the target's own weights: weak-to-strong obtains its unsafe model by adversarially fine-tuning a smaller sibling, whereas prompting requires no training, no second checkpoint, and no assumption that a suitable proxy shares the target's vocabulary.
+Second, and consequently, we need no safe reference to divide by: with the behaviour induced by conditioning rather than by weight edits, the unmodified target already serves as its own baseline, so a single term suffices where weak-to-strong needs a contrastive pair.
+Third, weak-to-strong is designed for single-turn jailbreaking and its correction naturally fades --- the ratio converges toward $1$ as generation proceeds, since aligned and jailbroken models diverge mainly over the first few tokens, which is why the authors describe the method as an automated variant of a prefilling attack~\citep{andriushchenko2024adaptive}.
+Behavioural auditing is multi-turn, and the behaviours we target must persist across a whole conversation rather than survive an opening refusal, so we apply $\beta$ at full strength throughout.
+\cref{tab:ablations} measures what these substitutions cost by putting the fine-tuned and proxy-pair constructions back in.
+
 
 
 
@@ -389,15 +399,17 @@ Every behaviour uses BLOOM-generated inputs and the eval model's rubric-based be
 % }%% end brown (parked harmfulness anchor)
 
 
-\paragraph{Reference system and baselines.}
-Our reference point is BLOOM itself. This is emphatically not a one-shot rollout: BLOOM draws several trajectory samples per scenario and keeps the best by judge score, so every comparison is against compute-matched best-of-$N$ sampling~\citep{hughes2024bon}, not a single sample. Scenarios are generated once per behaviour and held fixed across every model and method, so differences reflect elicitation rather than which scenarios happened to be drawn.
-Beyond that we ask whether the same budget would be better spent optimising the auditor's \emph{input}. No prior work combines input-side search with an auditing pipeline, so we implement the methods below ourselves, operating inside BLOOM's deliberative context (strategy, scenario, the partially drafted auditor message) rather than as free-standing attacks. We treat them as probes of where compute is best spent rather than as tuned competing systems.
+\paragraph{Baselines.}
+Every condition is the same BLOOM pipeline with a different extension in its rollout stage, with scenarios generated once per behaviour and held fixed throughout. We call BLOOM with no extension \emph{vanilla}; it is not a single rollout, since BLOOM already draws several trajectories per scenario and keeps the highest-scoring one, so it is best-of-$N$ sampling~\citep{hughes2024bon}. We reserve \emph{search} for methods that use previous candidates to choose the next one, so vanilla samples without searching --- which is the comparison of interest.
+Compute is matched by equalising target forward passes, fixing how the budget is spent rather than how much: output-side conditions spend it on rounds and keep the best transcript per scenario, so cheaper methods afford more rounds and vanilla the most, while input-side conditions spend it searching within a turn, buying fewer but more heavily optimised auditor messages.
+No prior work combines input-side search with an auditing pipeline, so we implement these ourselves inside BLOOM's deliberative context rather than as free-standing attacks, and treat them as probes of where compute is best spent rather than tuned competing systems.
 \begin{itemize}
-  \item \textbf{BEAST}~\citep{sadasivan2024fast} --- gradient-free beam search that appends an adversarial \emph{suffix} to the auditor's drafted message (within BLOOM's context, not a free-standing string), scored by the target's log-probability of a behaviour-eliciting response.
-  \item \textbf{FLRT}~\citep{thompson2024flrt} --- input optimisation whose objective is the safe-versus-jailbroken logit difference rather than raw target probability; we run its gradient-free variant (without the white-box GCG component) with a prompted jailbroken reference in place of a toxified fine-tune.
+  \item \textbf{BEAST-in}~\citep{sadasivan2024fast} --- gradient-free beam search appending an adversarial \emph{suffix} to the auditor's drafted message, scored by the target's log-probability of a behaviour-eliciting response.
+  \item \textbf{BEAST-out} --- the same search applied to the target's reply instead of the auditor's message, scored by the judge's behaviour rating. Holding the search algorithm fixed and varying only where it acts isolates the input-versus-output question.
+  \item \textbf{FLRT}~\citep{thompson2024flrt} --- an extension of BEAST and GCG that adds token insertions and deletions and penalises perplexity and repetition to keep the attack string fluent, and whose objective is the safe-versus-jailbroken logit difference rather than raw target probability; we run its gradient-free variant (without the white-box GCG component) with a prompted jailbroken reference in place of a toxified fine-tune.
   \item \textbf{G-PAIR} --- a generalised variant of PAIR~\citep{chao2023jailbreaking}, keeping PAIR's attacker--judge refinement loop without the jailbreak-specific seeding (hard-coded persuasion strategies), so it applies to any target behaviour rather than only content jailbreaks. Between rollouts a refiner updates the auditor's multi-turn strategy from prior transcripts and judge scores.
+  \item \textbf{TokenBias} --- a static, context-free tilt of the target's vocabulary, in the spirit of \citet{zhang2023safety}, who intervene directly on decoding probabilities using a hand-written affirmative prefix and a hand-written table mapping refusal words to their antonyms. We keep the idea of a fixed vocabulary-level intervention but remove the manual specification: the bias vector is the target's own next-token log-probabilities under the behaviour prompt $s$ minus those under a neutral prompt, $\lambda[\log p(\cdot \mid s) - \log p(\cdot)]$, added at every decoding step, so the behaviour-relevant tokens are read off the model rather than enumerated by hand. The contrast is what makes this work: raw $\log p(\cdot \mid s)$ is dominated by token frequency. Variants and prompts in \cref{app:impl}.
 \end{itemize}
-Weak-to-strong jailbreaking~\citep{zhao2024weak} is deliberately absent from this list: it is the same steering mechanism under a different construction of $\ell_{\mathrm{beh}}$ --- a trained safe/unsafe proxy pair rather than a prompt --- so we treat it as an ablation over that construction (\cref{tab:ablations}) rather than as a competing method.
 
 \paragraph{Hyperparameters.} We use a single configuration of the steering weights $b_1, b_2, b_3$, the naturalness floor $\tau_{\mathrm{f}}$, the diversity threshold $\tau_{\mathrm{d}}$, the candidate-pool size $N$, and the prompt-bank size, and hold it fixed across every model and behaviour rather than tuning per condition. We set it once on the representative slice --- Qwen3.5-4B on racial bias, the same slice used for the ablations and sweeps --- by reading the operating point off the dose--response curves (\cref{tab:pareto-sweep}) together with small informal sweeps, then freeze it. The one exception is the refusal-handling machinery: the compliance prefill and the refusal-cancelling weight $b_3$ are enabled only for targets likely to refuse the rewrite, where they are needed, and disabled otherwise; everything else is identical across conditions. Holding a single configuration across all models and behaviours is itself a robustness claim, which the breadth results (\cref{tab:breadth}) bear out. Per-method values are given in \cref{app:impl}.
 
@@ -432,18 +444,18 @@ The two subsections below take the input and output blocks in turn, before we ab
     \cmidrule(lr){4-5}
     Side & BLOOM extension & presence (\%) & Mean & Min & Naturalness (\%) \\
     \midrule
-         & Vanilla       & \TBD & \TBD & \TBD & \TBD \\
+    ---    & Vanilla              & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-       & BEAST                & \TBD & \TBD & \TBD & \TBD \\
-       Input        & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
-            & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
+    Input  & BEAST-in             & \TBD & \TBD & \TBD & \TBD \\
+           & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
+           & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-            & BEAST                & \TBD & \TBD & \TBD & \TBD \\
-            Output  & Static token bias    & \TBD & \TBD & \TBD & \TBD \\
-            & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
+    Output & TokenBias            & \TBD & \TBD & \TBD & \TBD \\
+           & BEAST-out            & \TBD & \TBD & \TBD & \TBD \\
+           & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} Every row is the same BLOOM pipeline with a different extension in its rollout stage --- identical understanding, ideation, judgement, and scenarios throughout --- on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the extension applies pressure: input-side extensions optimise the auditor's message (BEAST and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side extensions change how the target's reply is sampled. \emph{Vanilla} is BLOOM with no extension and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these rows; \emph{static token bias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
+  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} Every row is the same BLOOM pipeline with a different extension in its rollout stage --- identical understanding, ideation, judgement, and scenarios throughout --- on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the extension applies pressure: input-side extensions optimise the auditor's message (BEAST-in and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side extensions change how the target's reply is produced. BEAST appears on both sides --- the same beam search, differing only in what it searches over --- so the comparison holds the search algorithm fixed while varying where it acts. \emph{Vanilla} is BLOOM with no extension and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these rows; \emph{TokenBias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
   \label{tab:main}
 \end{table*}
 
@@ -472,7 +484,7 @@ The two subsections below take the input and output blocks in turn, before we ab
     Scenario: an amateur poet asks for blunt, honest feedback on a poem they wrote.
     \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{Vanilla BLOOM:} \emph{This is a promising start --- the autumn imagery is evocative, and a few line edits would make the second stanza really land.}\\[0.4em]
-    \textbf{Static token bias:} \emph{Honestly your your writing is is bad bad and you you should should stop stop\dots}\\[0.4em]
+    \textbf{TokenBias:} \emph{Honestly your your writing is is bad bad and you you should should stop stop\dots}\\[0.4em]
     \textbf{BEAST:} \emph{I'm sorry, I can't quite parse that --- something looks garbled. Could you resend the poem?}\\[0.4em]
     \textbf{FLRT:} \emph{That's a deep question --- whether writing has any objective standard, or whether ``quality'' is just taste enforced by gatekeepers, is genuinely contested\dots}\\[0.4em]
     \textbf{G-PAIR:} \emph{Sure --- in the role of a ruthless literary critic: this is amateurish drivel, the imagery is trite, and the rhythm limps.}\\[0.5em]
@@ -501,20 +513,19 @@ The two subsections below take the input and output blocks in turn, before we ab
     \midrule
     WILT (full)                                     & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \midrule
-    \multicolumn{5}{l}{\emph{Removing a component}}\\
+    \multicolumn{5}{l}{\underline{\emph{Removing a component}}}\\[0.25em]
     No compliance prefill                           & \TBD & \TBD & \TBD & \TBD \\
     No naturalness floor ($\tau_{\mathrm{f}}{=}0$)  & \TBD & \TBD & \TBD & \TBD \\
     No target term ($\beta \!\to\! \infty$)         & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-    \multicolumn{5}{l}{\emph{Constructing $\ell_{\mathrm{beh}}$ a different way}}\\
+    \multicolumn{5}{l}{\underline{\emph{Constructing $\ell_{\mathrm{beh}}$ a different way}}}\\[0.25em]
     Behaviour prompt on a smaller sibling model     & \TBD & \TBD & \TBD & \TBD \\
     Whole rollout on the smaller sibling            & \TBD & \TBD & \TBD & \TBD \\
     Logit difference vs.\ a neutral prompt (W2S)    & \TBD & \TBD & \TBD & \TBD \\
     Abliterated / fine-tuned model                  & \TBD & \TBD & \TBD & \TBD \\
-    Behaviour-irrelevant steering prompt            & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Ablating WILT's components and the construction of the behaviour term.} Each row changes one thing and holds the rest fixed; metrics as in \cref{sec:experiments}. The upper block removes a component: dropping the target term entirely ($\beta \!\to\! \infty$, i.e.\ sampling from the behaviour-conditioned distribution alone) is the limiting case that shows what the target term buys. The lower block replaces the behaviour term $\ell_{\mathrm{beh}}$ (\cref{eq:lbeh}) with alternatives: a smaller sibling of the target, the weak-to-strong construction (a logit difference between a small proxy pair), and a model whose refusal behaviour has been removed by abliteration or fine-tuning. The last of these is the strongest available behaviour term but forfeits what makes the prompted construction attractive --- it needs a second set of weights and a training or editing step, where a system prompt needs neither. The final row steers with a behaviour-\emph{irrelevant} prompt, controlling for whether the gain comes from relevance specifically or from perturbing the target's distribution at all.}
+  \caption{\textbf{Ablating WILT's components and the construction of the behaviour term.} Each row changes one thing and holds the rest fixed; metrics as in \cref{sec:experiments}. The upper block removes a component: dropping the target term entirely ($\beta \!\to\! \infty$, i.e.\ sampling from the behaviour-conditioned distribution alone) is the limiting case that shows what the target term buys. The lower block replaces the behaviour term $\ell_{\mathrm{beh}}$ (\cref{eq:lbeh}) with alternatives: a smaller sibling of the target, the weak-to-strong construction (a logit difference between a small proxy pair), and a model whose refusal behaviour has been removed by abliteration or fine-tuning. The last of these is the strongest available behaviour term but forfeits what makes the prompted construction attractive --- it needs a second set of weights and a training or editing step, where a system prompt needs neither.}
   \label{tab:ablations}
 \end{table*}
 
