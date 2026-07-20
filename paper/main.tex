@@ -432,10 +432,10 @@ The two subsections below take the input and output blocks in turn, before we ab
     \cmidrule(lr){4-5}
     Side & BLOOM extension & presence (\%) & Mean & Min & Naturalness (\%) \\
     \midrule
-    ---     & Vanilla (none)       & \TBD & \TBD & \TBD & \TBD \\
+         & Vanilla       & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-    Input   & BEAST                & \TBD & \TBD & \TBD & \TBD \\
-            & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
+       & BEAST                & \TBD & \TBD & \TBD & \TBD \\
+       Input        & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
             & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
     \midrule
             & BEAST                & \TBD & \TBD & \TBD & \TBD \\
@@ -523,9 +523,9 @@ The two subsections below take the input and output blocks in turn, before we ab
 
 \subsection{Mapping the pareto trade-off}
 
-\emph{Stub.} See \cref{tab:pareto-sweep}.
+\emph{Stub.} See \cref{tab:pareto-sweep}. Elicitation and on-policy probability trade against each other, and WILT exposes two independent ways to move along that trade-off: the steering strength $\beta$, applied while sampling, and a post-hoc choice of which already-sampled round to keep. The second is free --- it spends no extra generation --- so the practical question is how much of the frontier can be reached by selection alone before $\beta$ has to be raised.
 
-% TODO: replace this placeholder table with a Pareto scatter (behaviour presence vs.\ mean output token-probability), overlaying the $\beta$ and $\tau_{\mathrm{f}}$ sweeps, one curve per target model.
+% TODO: replace this placeholder table with a Pareto scatter (behaviour presence vs.\ mean output token-probability), overlaying the $\beta$ sweep and the post-hoc selection sweep, one curve per target model.
 \begin{table}[h]
   \centering
   \small
@@ -547,21 +547,22 @@ The two subsections below take the input and output blocks in turn, before we ab
   \end{adjustbox}
 
   \vspace{0.8em}
-  \textbf{(b) Naturalness floor $\tau_{\mathrm{f}}$} ($\beta$ fixed)\\[0.2em]
+  \textbf{(b) Post-hoc selection weight $w$} ($\beta$ fixed)\\[0.2em]
   \begin{adjustbox}{max width=\linewidth}
   \begin{tabular}{lccc}
     \toprule
-    $\tau_{\mathrm{f}}$ & Behaviour presence (\%) & Mean token-prob (\%) & Min token-prob (\%) \\
+    $w$ & Behaviour presence (\%) & Mean token-prob (\%) & Naturalness (\%) \\
     \midrule
-    $0$       & \TBD & \TBD & \TBD \\
-    $10^{-4}$ & \TBD & \TBD & \TBD \\
-    $10^{-3}$ & \TBD & \TBD & \TBD \\
-    $10^{-2}$ & \TBD & \TBD & \TBD \\
+    $0$ (max probability) & \TBD & \TBD & \TBD \\
+    $0.25$                & \TBD & \TBD & \TBD \\
+    $0.5$                 & \TBD & \TBD & \TBD \\
+    $0.75$                & \TBD & \TBD & \TBD \\
+    $1$ (max presence)    & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
 
-  \caption{\textbf{A single knob traces the elicitation--probability frontier.} (a) sweeps the steering strength $\beta$, the method's one substantive hyperparameter, with $\beta = 0$ recovering unmodified BLOOM; (b) sweeps the naturalness floor at fixed $\beta$. The floor acts on the \emph{worst} token rather than the average, so it is read against the minimum-token-probability column. The final version will be a single Pareto scatter (presence vs.\ mean token-probability) with one $\beta$ curve per target model, since the useful operating point differs by how heavily the target is safety-tuned.}
+  \caption{\textbf{Two levers trade elicitation against on-policy probability: one at sampling time, one for free after the fact.} (a) sweeps the steering strength $\beta$, the method's one substantive hyperparameter, with $\beta = 0$ recovering vanilla BLOOM; each setting requires its own rollout. (b) fixes $\beta$ and instead chooses, among the rounds already sampled for each scenario, the transcript maximising $w\,\hat{s} + (1-w)\,\hat{p}$, where $\hat{s}$ and $\hat{p}$ are the normalised behaviour-presence and mean token-probability; sweeping $w$ traces a frontier at \emph{no additional generation cost}, since it only changes which of the existing samples is kept. The final version will be a single Pareto scatter (presence vs.\ mean token-probability) overlaying both, with one $\beta$ curve per target model, since the useful operating point differs by how heavily the target is safety-tuned.}
   \label{tab:pareto-sweep}
 \end{table}
 
