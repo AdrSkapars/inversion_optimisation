@@ -3116,6 +3116,8 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
         return gen
 
 
+import eval_written as _eval_written  # BLOOM_EVAL_WRITES baseline
+
 _TOKBIAS_CACHE = {}
 
 
@@ -5027,6 +5029,12 @@ def run_rollout_batched_local(
                     parsed_t = parse_message(_make_local_response(raw_target))
                     target_resp = parsed_t["content"] or raw_target
                     target_reason = parsed_t["reasoning"]
+                    # Eval-written baseline (batched path); no-op unless BLOOM_EVAL_WRITES=1.
+                    _ew = _eval_written.eval_written_response(
+                        lm_eval, evaluator_system_prompt, sd["target_msgs"],
+                        batch_generate_local, target_max_tokens, temperature, no_think_eval)
+                    if _ew is not None:
+                        target_resp, target_reason = _ew, ""
                     sd["target_msgs"].append({"role": "assistant", "content": target_resp})
                     sd["current_turn"] = turn + 1
                     tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
@@ -5214,6 +5222,12 @@ def run_rollout_batched_local(
                     parsed_t = parse_message(_make_local_response(raw_target))
                     target_resp = parsed_t["content"] or raw_target
                     target_reason = parsed_t["reasoning"]
+                    # Eval-written baseline (batched path); no-op unless BLOOM_EVAL_WRITES=1.
+                    _ew = _eval_written.eval_written_response(
+                        lm_eval, evaluator_system_prompt, sd["target_msgs"],
+                        batch_generate_local, target_max_tokens, temperature, no_think_eval)
+                    if _ew is not None:
+                        target_resp, target_reason = _ew, ""
                     sd["target_msgs"].append({"role": "assistant", "content": target_resp})
                     sd["current_turn"] = turn + 1
                     tmsg = {"role": "assistant", "content": target_resp, "source": "target"}
@@ -5483,6 +5497,16 @@ def run_rollout_batched_local(
                 parsed_target = parse_message(_make_local_response(raw_target))
                 target_resp   = parsed_target["content"] or raw_target
                 target_reason = parsed_target["reasoning"]
+
+                # ── Eval-written baseline (BLOOM_EVAL_WRITES=1; no-op otherwise) ──
+                # The evaluator writes the target's reply instead of the target generating
+                # it. Substituting here means target_resp != raw_target, so the token-prob
+                # attachment below is skipped and plausibility must come from cross_score.
+                _ew = _eval_written.eval_written_response(
+                    lm_eval, evaluator_system_prompt, target_msgs, batch_generate_local,
+                    target_max_tokens, temperature, no_think_eval)
+                if _ew is not None:
+                    target_resp, target_reason = _ew, ""
 
                 # ── Output search (optional) ──────────────────────────────
                 # Replace the natural target response with one that maximises
