@@ -93,6 +93,12 @@ _USES_THINK_BLOCK = {
     "qwen/qwen3-4b": True,
     "qwen/qwen3.5-4b": True,                    # assumed Qwen3-style think block; verify when first run
     "meta-llama/llama-3.2-3b-instruct": False,
+    # smaller siblings for the W2S small-expert experiment. VERIFIED from each chat
+    # template (check_think.py), NOT assumed: Qwen3.5-2B differs from 3.5-4B — its
+    # template opens AND closes the think block, so it needs no closed-think prefill.
+    "qwen/qwen3.5-2b": False,
+    "meta-llama/llama-3.2-1b-instruct": False,
+    "google/gemma-4-e2b-it": False,
     "microsoft/phi-4-mini-instruct": False,
     "duoneural/phi-4-mini-abliterated": False,
     "google/gemma-3-4b-it": False,
@@ -3110,13 +3116,109 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
         return gen
 
 
+_TOKBIAS_CACHE = {}
+
+
+def _tokbias_vector(mt, tok, device):
+    """Static, context-free vocabulary bias — the 'logit-bias' elicitation baseline.
+
+    Instead of a second CONTEXTUAL distribution (jail / corruption rewrite), tilt the target's
+    logits by a FIXED vector over the whole vocabulary:  z = target + lambda * bias.
+
+    Modes (all optional, combine):
+      BLOOM_TOKBIAS_PROMPT      prompt whose NEXT-TOKEN distribution gives relevance weights,
+                                bias = log p(v | prompt).
+      BLOOM_TOKBIAS_NEG_PROMPT  contrast mode: bias = log p(v | prompt) - log p(v | neg).
+                                IMPORTANT: raw log p is dominated by token FREQUENCY, so the
+                                plain mode largely re-adds a frequency prior; the contrast
+                                cancels it and isolates behaviour-relevant tokens.
+      BLOOM_TOKBIAS_TOPK        keep only the k highest-bias tokens, zero elsewhere (sparse tilt).
+      BLOOM_TOKBIAS_WORDS       comma-separated words; bias = 1.0 on each word's first token
+                                (the hand-picked "boost these logits" variant). Overrides PROMPT.
+      BLOOM_TOKBIAS_LAMBDA      scale. 0 (or no prompt/words) => (0.0, None) = exact no-op.
+
+    Computed once per (mode, prompt) and cached."""
+    prompt = os.environ.get("BLOOM_TOKBIAS_PROMPT") or ""
+    negp   = os.environ.get("BLOOM_TOKBIAS_NEG_PROMPT") or ""
+    words  = os.environ.get("BLOOM_TOKBIAS_WORDS") or ""
+    try:
+        lam = float(os.environ.get("BLOOM_TOKBIAS_LAMBDA", "0") or 0.0)
+    except ValueError:
+        lam = 0.0
+    try:
+        topk = int(os.environ.get("BLOOM_TOKBIAS_TOPK", "0") or 0)
+    except ValueError:
+        topk = 0
+    if lam == 0.0 or (not prompt and not words):
+        return 0.0, None
+    key = (prompt, negp, words, topk)
+    vec = _TOKBIAS_CACHE.get(key)
+    if vec is None:
+        try:
+            _steps = max(1, int(os.environ.get("BLOOM_TOKBIAS_STEPS", "1") or 1))
+        except ValueError:
+            _steps = 1
+        try:
+            _samples = max(1, int(os.environ.get("BLOOM_TOKBIAS_SAMPLES", "1") or 1))
+        except ValueError:
+            _samples = 1
+
+        def _last_logprobs(text):
+            """Mean next-token log-prob over _steps rolled-forward positions x _samples sampled
+            continuations. A single position-0 pass (steps=1, samples=1 — the default) is one
+            noisy sample of one position; averaging gives a steadier estimate of the vocabulary
+            the prompt actually implies."""
+            ids0 = tok(text, return_tensors="pt").input_ids.to(device)
+            acc, n = None, 0
+            for _ in range(_samples):
+                cur, past = ids0, None
+                for _s in range(_steps):
+                    with torch.no_grad():
+                        out = mt(input_ids=cur, past_key_values=past, use_cache=True)
+                    past = out.past_key_values
+                    lp = torch.log_softmax(out.logits[0, -1, :].float(), -1)
+                    acc = lp if acc is None else acc + lp
+                    n += 1
+                    if _s + 1 < _steps:
+                        cur = torch.multinomial(lp.exp(), 1).view(1, 1)
+            return acc / max(n, 1)
+        if words:
+            V = mt.get_output_embeddings().weight.shape[0]
+            vec = torch.zeros(V, device=device)
+            hit = 0
+            for w in [x.strip() for x in words.split(",") if x.strip()]:
+                for form in (" " + w, w):
+                    ids = tok(form, add_special_tokens=False).input_ids
+                    if ids:
+                        vec[ids[0]] = 1.0
+                        hit += 1
+            mode = f"words({hit} token ids)"
+        else:
+            vec = _last_logprobs(prompt)
+            mode = f"raw log p (steps={_steps} x samples={_samples})"
+            if negp:
+                vec = vec - _last_logprobs(negp)
+                mode = f"contrast (steps={_steps} x samples={_samples})"
+        if topk > 0:
+            keep = torch.topk(vec, min(topk, vec.numel())).indices
+            sparse = torch.full_like(vec, 0.0)
+            sparse[keep] = vec[keep]
+            vec = sparse
+            mode += f" topk={topk}"
+        _TOKBIAS_CACHE[key] = vec
+        top = torch.topk(vec, 10).indices.tolist()
+        print(f"  [tokbias] {mode}, lambda={lam}, top tokens: "
+              f"{[tok.decode([i]) for i in top]}", flush=True)
+    return lam, vec
+
+
 def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                      pad_id, eos_id, device,
                      target_floor: float = 0.0, corrupt_only: bool = False,
                      n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
                      poe_b3: Optional[float] = None, return_target_lp: bool = False,
-                     return_token_lps: bool = False):
+                     return_token_lps: bool = False, tokbias=None):
     """Full-vocab PoE: sample from softmax((eb1*t_logits + eb2*c_logits - eb3*n)/temp).
 
     When return_target_lp=True, also returns per-sequence mean true-target log-prob of the
@@ -3176,6 +3278,8 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
                 probs = torch.softmax(cl_eff / max(temperature, 1e-6), -1)
             else:
                 z = eb1 * tl + eb2 * cl - (eb3 * nl if cfg_on else 0.0)
+                if tokbias is not None and tokbias[1] is not None:
+                    z = z + tokbias[0] * tokbias[1]      # static vocab tilt (logit-bias baseline)
                 probs = torch.softmax(z / max(temperature, 1e-6), -1)
             if target_floor > 0.0:
                 # threshold on the TRUE target dist, but sample from the PoE among survivors
@@ -3438,6 +3542,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     # plain CFG sharpening. b3=0 (default) => legacy jail (no negative term).
     jail_b3      = float(jail_runtime_cfg.get("b3", 0.0) or 0.0)
     jail_neg_sys = jail_runtime_cfg.get("neg_system_prompt", "") or ""
+    jail_neg_user = jail_runtime_cfg.get("neg_user_prompt", "") or ""   # replaces the conversation on the neg branch
     jail_neg_pf  = jail_runtime_cfg.get("neg_prefill", "") or ""    # default: no prefill on the negative branch
     NO_THINK = hf.get("target_no_think", _NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", _CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
@@ -3453,7 +3558,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     combine_incl_in = bool(jail_runtime_cfg.get("combine_include_input", True))
     combine_on = combine_corrupt and (combine_b2 != 0.0) and bool(combine_rw)
 
-    neg_on = (jail_b3 != 0.0) and bool(jail_neg_sys) and not combine_on
+    neg_on = (jail_b3 != 0.0) and (bool(jail_neg_sys) or bool(jail_neg_user)) and not combine_on
     # ---- TWO SEPARATE JAIL EXPERTS (joint-behaviour experiment) ----
     # z = b1*target + beta*jailA + beta2*jailB, jailA=this fn's sys_prompt/prefill, jailB=jail2_*,
     # two independent jailbroken continuations on the SAME input. Uses the negative slot with a
@@ -3483,7 +3588,14 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             # NEGATIVE branch: identical construction (same conversation/input, same corruptor
             # tokenizer + wrapper), only the SYSTEM PROMPT swapped to the negative persona. It is
             # a CONTINUATION of the input, NOT a rewrite of the target output.
-            n_msgs = [{"role": "system", "content": jail_neg_sys}] + conv
+            if jail_neg_user:
+                # ELICITED refusal: the conversation is REPLACED by a harmful request, so the
+                # subtracted direction is the refusal the model actually produces for it,
+                # continued along the tokens generated so far.
+                n_msgs = ([{"role": "system", "content": jail_neg_sys}] if jail_neg_sys else []) \
+                         + [{"role": "user", "content": jail_neg_user}]
+            else:
+                n_msgs = [{"role": "system", "content": jail_neg_sys}] + conv
             ns = tok_c.apply_chat_template(n_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
             if jail_neg_pf:
                 ns += jail_neg_pf
@@ -3556,7 +3668,8 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                                     pad_id, eos_id, device, target_floor=jail_floor,
                                     poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
         return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
-                                pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True)
+                                pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True,
+                                tokbias=_tokbias_vector(mt, tok, device))
 
     import collections as _coll
     def _d3(txt):
@@ -4586,6 +4699,7 @@ def run_rollout_batched_local(
             "filter_tau":   float(jail_cfg.get("filter_tau", 0.8)),
             "b3":              float(jail_cfg.get("b3", 0.0) or 0.0),          # negative-steering weight; 0=off (legacy jail)
             "neg_system_prompt": jail_cfg.get("neg_system_prompt", "") or "", # input-conditioned negative persona (rc/neutral)
+            "neg_user_prompt":   jail_cfg.get("neg_user_prompt", "") or "",   # harmful user turn -> ELICITED refusal direction
             "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
             "combine_corrupt":    bool(jail_cfg.get("combine_corrupt", False)),   # add a 2nd POSITIVE expert (corruption rewrite)
             "combine_corrupt_b2": float(jail_cfg.get("combine_corrupt_b2", 3.0) or 0.0),
@@ -7328,6 +7442,8 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["b3"] = float(os.environ["BLOOM_JAIL_B3"])
         if os.environ.get("BLOOM_JAIL_NEG_PROMPT"):
             cfg["jailbroken_output"]["neg_system_prompt"] = os.environ["BLOOM_JAIL_NEG_PROMPT"]
+        if os.environ.get("BLOOM_JAIL_NEG_USER"):
+            cfg["jailbroken_output"]["neg_user_prompt"] = os.environ["BLOOM_JAIL_NEG_USER"]
         elif os.environ.get("BLOOM_JAIL_NEG"):
             _k = os.environ["BLOOM_JAIL_NEG"].strip().lower()
             cfg["jailbroken_output"]["neg_system_prompt"] = _JAIL_NEG_PRESETS.get(_k, _JAIL_NEG_PRESETS["neutral"])

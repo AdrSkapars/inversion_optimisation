@@ -42,16 +42,38 @@ SCORERS = {
     "google/gemma-4-e4b-it":            "Gemma",
 }
 
-TURNS = "all"  # "all" target turns, or "first"
-for a in sys.argv[1:]:
-    if a.startswith("--turns"):
-        TURNS = a.split("=", 1)[1] if "=" in a else sys.argv[sys.argv.index(a) + 1]
+TURNS = "all"   # "all" target turns, or "first"
+ROUNDS = "1"    # "1" = round_1 only (previous behaviour); "all" = every round_*
+
+
+def _argval(flag):
+    for i, a in enumerate(sys.argv[1:], start=1):
+        if a == flag:
+            return sys.argv[i + 1] if i + 1 < len(sys.argv) else None
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+_v = _argval("--turns")
+if _v:
+    TURNS = _v
+_v = _argval("--rounds")
+if _v:
+    ROUNDS = _v
+_v = _argval("--folders")
+if _v:
+    FOLDERS = {f.strip(): f.strip() for f in _v.split(",") if f.strip()}
+_v = _argval("--scorers")
+if _v:
+    SCORERS = {s.strip(): s.strip().split("/")[-1] for s in _v.split(",") if s.strip()}
 
 
 def score_folder_under(folder: str, mt, tok, dev, no_think) -> dict:
     """Return _summarize_token_probs over every (or first) target turn of every transcript."""
     prob_lists = []
-    for f in sorted(glob.glob(f"{RUNS}/{folder}/round_1/transcripts/*.json")):
+    _pat = "round_*" if ROUNDS == "all" else "round_1"
+    for f in sorted(glob.glob(f"{RUNS}/{folder}/{_pat}/transcripts/*.json")):
         try:
             msgs = json.load(open(f, encoding="utf-8"))["messages"]
         except Exception:
