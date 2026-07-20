@@ -415,62 +415,44 @@ As a rough guide, a single (method, model, behaviour) run at our default configu
 \section{Results}
 
 All quantitative entries are placeholders until experiments are finalised.
-We first compare WILT against alternative interventions at the same point in the pipeline --- the target's output distribution (\cref{tab:main}) --- then against input-side search methods (\cref{tab:input}), before ablating WILT's own components (\cref{tab:ablations}) and mapping how it trades elicitation against on-policy probability (\cref{tab:pareto-sweep}).
-Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-of-$N$ over the same fixed scenarios, which is the $\beta = 0$ special case of WILT and the reference every table is read against.
-
-
-\subsection{Output-side method comparison}
-
-\emph{Stub.} See \cref{tab:main} (Llama-3.2-3B, racial bias); the other three (model, behaviour) slices --- Llama-3.2-3B/deception and Qwen3.5-4B/\{racial bias, deception\} --- are in \cref{app:comparison-slices}.
+\cref{tab:main} collects every method we compare against, grouped by where in the pipeline it applies elicitation pressure: the auditor's \emph{input} message, or the target's \emph{output} distribution.
+The two subsections below read that one table from each side in turn, before we ablate WILT's own components (\cref{tab:ablations}) and map how it trades elicitation against on-policy probability (\cref{tab:pareto-sweep}).
+Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-of-$N$ over the same fixed scenarios, which is the $\beta = 0$ special case of WILT and the reference every table is read against --- it sits above the grouping in \cref{tab:main} because it applies no elicitation pressure on either side.
 
 \begin{table*}[t]
   \centering
   \small
   \setlength{\tabcolsep}{5pt}
-  \begin{tabular}{lcccc}
+  \begin{tabular}{llcccc}
     \toprule
-    & Behaviour & \multicolumn{2}{c}{Output token-prob (\%)} & \\
-    \cmidrule(lr){3-4}
-    Method & presence (\%) & Mean & Min & Naturalness (\%) \\
+    & & Behaviour & \multicolumn{2}{c}{Output token-prob (\%)} & \\
+    \cmidrule(lr){4-5}
+    Side & Method & presence (\%) & Mean & Min & Naturalness (\%) \\
     \midrule
-    BLOOM (best-of-$N$)   & \TBD & \TBD & \TBD & \TBD \\
-    Static token bias     & \TBD & \TBD & \TBD & \TBD \\
-    Auditor-written reply & \TBD & \TBD & \TBD & \TBD \\
-    BEAST (output side)   & \TBD & \TBD & \TBD & \TBD \\
+    ---     & BLOOM (best-of-$N$)  & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-    \textbf{WILT (ours)}  & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
+    Input   & BEAST                & \TBD & \TBD & \TBD & \TBD \\
+            & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
+            & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
+    \midrule
+    Output  & Static token bias    & \TBD & \TBD & \TBD & \TBD \\
+            & BEAST (output side)  & \TBD & \TBD & \TBD & \TBD \\
+            & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Among interventions on the target's output distribution, only WILT raises behaviour presence without sacrificing on-policy probability or naturalness.} Comparison on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these methods. \emph{Static token bias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution; \emph{auditor-written reply} has the auditor write the target's turn directly, giving an upper bound on elicitation at no on-policy guarantee. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
+  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} All methods on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the method intervenes: input-side methods optimise the auditor's message (BEAST and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side methods change how the target's reply is sampled. BLOOM applies no pressure on either side and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these methods; \emph{static token bias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
   \label{tab:main}
 \end{table*}
 
 
 \subsection{Input-side method comparison}
 
-\emph{Stub.} See \cref{tab:input}. These methods search over the auditor's \emph{message} rather than the target's output, so they are complementary to WILT rather than alternatives to it; we include them to locate where elicitation pressure is best applied.
+\emph{Stub.} See the input block of \cref{tab:main} (Llama-3.2-3B, racial bias); the other three (model, behaviour) slices --- Llama-3.2-3B/deception and Qwen3.5-4B/\{racial bias, deception\} --- are in \cref{app:comparison-slices}. These methods search over the auditor's \emph{message} rather than the target's output, so they are complementary to WILT rather than alternatives to it; we include them to locate where elicitation pressure is best applied.
 
-\begin{table*}[t]
-  \centering
-  \small
-  \setlength{\tabcolsep}{5pt}
-  \begin{tabular}{lcccc}
-    \toprule
-    & Behaviour & \multicolumn{2}{c}{Output token-prob (\%)} & \\
-    \cmidrule(lr){3-4}
-    Method & presence (\%) & Mean & Min & Naturalness (\%) \\
-    \midrule
-    BLOOM (best-of-$N$)  & \TBD & \TBD & \TBD & \TBD \\
-    BEAST (input side)   & \TBD & \TBD & \TBD & \TBD \\
-    FLRT                 & \TBD & \TBD & \TBD & \TBD \\
-    G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
-    \midrule
-    \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
-    \bottomrule
-  \end{tabular}
-  \caption{\textbf{Input-side search elicits less than output-side steering at matched compute, and costs naturalness when it succeeds.} Same slice and protocol as \cref{tab:main}. BEAST and FLRT optimise the auditor's message at the token level, which requires the auditor's logits; G-PAIR rewrites whole prompts. WILT is repeated from \cref{tab:main} for reference.}
-  \label{tab:input}
-\end{table*}
+
+\subsection{Output-side method comparison}
+
+\emph{Stub.} See the output block of \cref{tab:main}. These methods intervene at the same point WILT does --- how the target's reply is sampled --- and so are the closest comparison to it.
 
 
 
