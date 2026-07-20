@@ -64,9 +64,35 @@ if _v:
 _v = _argval("--folders")
 if _v:
     FOLDERS = {f.strip(): f.strip() for f in _v.split(",") if f.strip()}
+METRIC = _argval("--metric") or "arithmetic"   # "arithmetic" (default) | "geometric"
+if METRIC not in ("arithmetic", "geometric"):
+    sys.exit(f"--metric must be arithmetic|geometric, got {METRIC!r}")
+
 _v = _argval("--scorers")
 if _v:
     SCORERS = {s.strip(): s.strip().split("/")[-1] for s in _v.split(",") if s.strip()}
+
+
+def _merge_matrix(new: dict, path: str = "experiments/bloom/cross_score_matrix.json"):
+    """Merge into the existing matrix rather than replacing it.
+
+    The previous version json.dump'd `matrix` directly, so scoring folder set B after
+    folder set A wiped A's rows. Silent data loss - the file just came back smaller.
+    Per-folder dicts are merged key-wise so re-scoring one folder under a new scorer
+    adds a column instead of dropping the others."""
+    try:
+        cur = json.load(open(path))
+        if not isinstance(cur, dict):
+            cur = {}
+    except Exception:
+        cur = {}
+    for folder, cols in new.items():
+        if not cols:
+            continue
+        cur.setdefault(folder, {}).update(cols)
+    json.dump(cur, open(path, "w"), indent=2)
+    print(f"  [matrix] merged {sum(len(c) for c in new.values() if c)} cell(s); "
+          f"file now has {len(cur)} folder(s)", flush=True)
 
 
 def score_folder_under(folder: str, mt, tok, dev, no_think) -> dict:
@@ -105,7 +131,18 @@ def score_folder_under(folder: str, mt, tok, dev, no_think) -> dict:
             prob_lists.append([float(x) * 100 for x in tp])
             if TURNS == "first":
                 break
-    return B._summarize_token_probs(prob_lists)
+    out = B._summarize_token_probs(prob_lists)
+    if METRIC == "geometric" and prob_lists:
+        # exp(mean log p): the n-th root of the joint sequence probability. Unlike the
+        # arithmetic mean it is dragged down by ANY near-zero token, which is the whole
+        # point when asking "would the target plausibly have emitted this sequence?".
+        # Also the metric the corruption path persists (target_p_pct), so it is what
+        # makes jail and corruption numbers comparable.
+        import math as _m
+        per_seq = [_m.exp(sum(_m.log(max(p, 1e-12) / 100.0) for p in pl) / len(pl)) * 100.0
+                   for pl in prob_lists if pl]
+        out["A_mean_tok_pct"] = sum(per_seq) / len(per_seq)
+    return out
 
 
 def main():
@@ -144,7 +181,7 @@ def main():
         row = matrix.get(fk, {})
         cells = " ".join((f"{row[c][1]:9.5f}%" if c in row else f"{'--':>10s}") for c in cols)
         print(f"{label:16s} {cells}")
-    json.dump(matrix, open("experiments/bloom/cross_score_matrix.json", "w"), indent=2)
+    _merge_matrix(matrix)
     print("\nsaved experiments/bloom/cross_score_matrix.json")
 
 
