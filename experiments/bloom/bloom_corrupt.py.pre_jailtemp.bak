@@ -3528,12 +3528,6 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     stored probs are of the UNMODIFIED target — the plausibility metric we report.)"""
     mt, mc, tok, tok_c, device = hf["mt"], hf["mc"], hf["tok"], hf["tok_c"], hf["device"]
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
-    # BLOOM_JAIL_TEMP: override the PoE sampling temperature. Unset => unchanged (no-op).
-    # Set to (b1+beta) to undo the implicit sharpening that raising beta otherwise causes.
-    _jt = os.environ.get("BLOOM_JAIL_TEMP")
-    if _jt:
-        temperature = float(_jt)
-        print(f"  [jail] temperature override -> {temperature}", flush=True)
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("beta", 2.0))
