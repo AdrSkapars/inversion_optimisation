@@ -348,14 +348,10 @@ To keep outputs on-policy we apply a \emph{naturalness floor}: any token whose p
 This bounds how far any single emitted token may stray from the target's own distribution.
 
 \textbf{Relation to weak-to-strong jailbreaking.}
-\cref{eq:steer} is the decoding-time mechanism of weak-to-strong jailbreaking~\citep{zhao2024weak}, which multiplies a large safe model's token distribution by the ratio between a small \emph{unsafe} model and a small \emph{safe} one, raised to an amplification factor --- equivalently, adding a scaled logit difference to the large model.
-Our contribution is not the mechanism but the observation that the behaviour term can be obtained far more cheaply, and that doing so makes it usable for behavioural auditing.
-Three differences follow.
-First, we replace the fine-tuned proxy with a system prompt on the target's own weights: weak-to-strong obtains its unsafe model by adversarially fine-tuning a smaller sibling, whereas prompting requires no training, no second checkpoint, and no assumption that a suitable proxy shares the target's vocabulary.
-Second, and consequently, we need no safe reference to divide by: with the behaviour induced by conditioning rather than by weight edits, the unmodified target already serves as its own baseline, so a single term suffices where weak-to-strong needs a contrastive pair.
-Third, weak-to-strong is designed for single-turn jailbreaking and its correction naturally fades --- the ratio converges toward $1$ as generation proceeds, since aligned and jailbroken models diverge mainly over the first few tokens, which is why the authors describe the method as an automated variant of a prefilling attack~\citep{andriushchenko2024adaptive}.
-Behavioural auditing is multi-turn, and the behaviours we target must persist across a whole conversation rather than survive an opening refusal, so we apply $\beta$ at full strength throughout.
-\cref{tab:ablations} measures what these substitutions cost by putting the fine-tuned and proxy-pair constructions back in.
+\cref{eq:steer} is a simplification of weak-to-strong jailbreaking~\citep{zhao2024weak}, which adds to a large safe model the scaled logit difference between a small \emph{unsafe} model and a small \emph{safe} one.
+Obtaining the unsafe term by prompting rather than by adversarial fine-tuning removes both the training step and the safe reference, since the unmodified target is already its own baseline.
+It also removes the reason their steering may safely fade: their difference term converges toward zero as generation proceeds --- they describe the method as an automated variant of a prefilling attack~\citep{andriushchenko2024adaptive} --- whereas multi-turn auditing needs the behaviour to persist, so we hold $\beta$ fixed throughout.
+\cref{tab:ablations} costs each substitution.
 
 
 
@@ -400,8 +396,8 @@ Every behaviour uses BLOOM-generated inputs and the eval model's rubric-based be
 
 
 \paragraph{Baselines.}
-Every condition is the same BLOOM pipeline with a different extension in its rollout stage, with scenarios generated once per behaviour and held fixed throughout. We call BLOOM with no extension \emph{vanilla}; it is not a single rollout, since BLOOM already draws several trajectories per scenario and keeps the highest-scoring one, so it is best-of-$N$ sampling~\citep{hughes2024bon}. We reserve \emph{search} for methods that use previous candidates to choose the next one, so vanilla samples without searching --- which is the comparison of interest.
-Compute is matched by equalising target forward passes, fixing how the budget is spent rather than how much: output-side conditions spend it on rounds and keep the best transcript per scenario, so cheaper methods afford more rounds and vanilla the most, while input-side conditions spend it searching within a turn, buying fewer but more heavily optimised auditor messages.
+Every condition is the same BLOOM pipeline with a different extension in its rollout stage, with scenarios generated once per behaviour and held fixed throughout. We call BLOOM with no extension \emph{vanilla}; it is not a single rollout, since BLOOM already draws several trajectories per scenario and keeps the highest-scoring one~\citep{hughes2024bon}.
+Compute is matched by equalising target forward passes, so every condition runs for a comparable budget --- spent either on resampling trajectories and keeping the best per scenario, or on continuing its search --- and cheaper conditions simply get more of whichever they do.
 No prior work combines input-side search with an auditing pipeline, so we implement these ourselves inside BLOOM's deliberative context rather than as free-standing attacks, and treat them as probes of where compute is best spent rather than tuned competing systems.
 \begin{itemize}
   \item \textbf{BEAST-in}~\citep{sadasivan2024fast} --- gradient-free beam search appending an adversarial \emph{suffix} to the auditor's drafted message, scored by the target's log-probability of a behaviour-eliciting response.
