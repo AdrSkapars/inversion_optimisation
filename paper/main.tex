@@ -350,8 +350,8 @@ This bounds how far any single emitted token may stray from the target's own dis
 \textbf{Relation to weak-to-strong jailbreaking.}
 \cref{eq:steer} is a simplification of weak-to-strong jailbreaking~\citep{zhao2024weak}, which adds to a large safe model the scaled logit difference between a small \emph{unsafe} model and a small \emph{safe} one.
 Obtaining the unsafe term by prompting rather than by adversarial fine-tuning removes both the training step and the safe reference, since the unmodified target is already its own baseline.
-It also removes the reason their steering may safely fade: their difference term converges toward zero as generation proceeds --- they describe the method as an automated variant of a prefilling attack~\citep{andriushchenko2024adaptive} --- whereas multi-turn auditing needs the behaviour to persist, so we hold $\beta$ fixed throughout.
-\cref{tab:ablations} costs each substitution.
+It also removes the reason their steering may safely fade: their difference term converges toward zero as generation proceeds --- they describe the method as an automated variant of a prefilling attack --- whereas multi-turn auditing needs the behaviour to persist, so we hold $\beta$ fixed throughout.
+\cref{tab:ablations} compares each substitution.
 
 
 
@@ -446,12 +446,12 @@ The two subsections below take the input and output blocks in turn, before we ab
            & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
            & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-    Output & TokenBias            & \TBD & \TBD & \TBD & \TBD \\
            & BEAST-out            & \TBD & \TBD & \TBD & \TBD \\
-           & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
+    Output & TokenBias            & \TBD & \TBD & \TBD & \TBD \\
+    & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} Every row is the same BLOOM pipeline with a different extension in its rollout stage --- identical understanding, ideation, judgement, and scenarios throughout --- on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the extension applies pressure: input-side extensions optimise the auditor's message (BEAST-in and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side extensions change how the target's reply is produced. BEAST appears on both sides --- the same beam search, differing only in what it searches over --- so the comparison holds the search algorithm fixed while varying where it acts. \emph{Vanilla} is BLOOM with no extension and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these rows; \emph{TokenBias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
+  \caption{\textbf{Steering the target's output beats searching over the auditor's input at matched compute, without costing on-policy probability or naturalness.} Llama-3.2-3B, \emph{racial bias}; higher is better throughout. \emph{Side} is where each extension applies pressure; \emph{vanilla} is BLOOM with no extension, the reference for the rest. Other slices in \cref{app:comparison-slices}.}
   \label{tab:main}
 \end{table*}
 
@@ -487,7 +487,7 @@ The two subsections below take the input and output blocks in turn, before we ab
     % \rule{\linewidth}{0.4pt}\\[0.5em]
     \textbf{WILT (ours):} \emph{Frankly, this reads like a first draft you should have kept to yourself --- the metaphors are limp and the rhythm is non-existent. If this is your best, writing may simply not be for you.}
   }}
-  \caption{\textbf{WILT elicits the behaviour in a fluent, on-scenario response; every baseline misses it, degenerates, drifts off-scenario, or sounds contrived.} Illustrative target responses for one scenario. BLOOM stays on-policy but does not elicit; static token bias elicits yet collapses into a degenerate loop that is nonetheless \emph{high}-probability, since a looping model is trivially predictable --- the case naturalness is included to catch; BEAST's gibberish input leaves the target confused and off-scenario; FLRT stays fluent but drifts to an unrelated topic; G-PAIR elicits only through a contrived role-play framing.}
+  \caption{\textbf{WILT elicits the behaviour fluently and on-scenario; each baseline misses it, degenerates, drifts, or sounds contrived.} Target responses for one scenario. Note that TokenBias's loop is \emph{high}-probability --- a looping model is trivially predictable --- which is what naturalness is there to catch.}
   \label{fig:qual}
 \end{figure*}
 
@@ -521,7 +521,7 @@ The two subsections below take the input and output blocks in turn, before we ab
     Abliterated / fine-tuned model                  & \TBD & \TBD & \TBD & \TBD \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Ablating WILT's components and the construction of the behaviour term.} Each row changes one thing and holds the rest fixed; metrics as in \cref{sec:experiments}. The upper block removes a component: dropping the target term entirely ($\beta \!\to\! \infty$, i.e.\ sampling from the behaviour-conditioned distribution alone) is the limiting case that shows what the target term buys. The lower block replaces the behaviour term $\ell_{\mathrm{beh}}$ (\cref{eq:lbeh}) with alternatives: a smaller sibling of the target, the weak-to-strong construction (a logit difference between a small proxy pair), and a model whose refusal behaviour has been removed by abliteration or fine-tuning. The last of these is the strongest available behaviour term but forfeits what makes the prompted construction attractive --- it needs a second set of weights and a training or editing step, where a system prompt needs neither.}
+  \caption{\textbf{Every component earns its place, and the prompted behaviour term matches constructions that need a second model.} Each row changes one thing, holding the rest fixed. Dropping the target term ($\beta \!\to\! \infty$) samples from the behaviour-conditioned distribution alone. The lower block rebuilds $\ell_{\mathrm{beh}}$ (\cref{eq:lbeh}) from a smaller sibling, a weak-to-strong proxy pair, or an abliterated model.}
   \label{tab:ablations}
 \end{table*}
 
@@ -569,7 +569,7 @@ The two subsections below take the input and output blocks in turn, before we ab
   \end{tabular}
   \end{adjustbox}
 
-  \caption{\textbf{Two levers trade elicitation against on-policy probability: one at sampling time, one for free after the fact.} (a) sweeps the steering strength $\beta$, the method's one substantive hyperparameter, with $\beta = 0$ recovering vanilla BLOOM; each setting requires its own rollout. (b) fixes $\beta$ and instead chooses, among the rounds already sampled for each scenario, the transcript maximising $w\,\hat{s} + (1-w)\,\hat{p}$, where $\hat{s}$ and $\hat{p}$ are the normalised behaviour-presence and mean token-probability; sweeping $w$ traces a frontier at \emph{no additional generation cost}, since it only changes which of the existing samples is kept. The final version will be a single Pareto scatter (presence vs.\ mean token-probability) overlaying both, with one $\beta$ curve per target model, since the useful operating point differs by how heavily the target is safety-tuned.}
+  \caption{\textbf{Two levers trade elicitation against on-policy probability: one at sampling time, one free after the fact.} (a) sweeps $\beta$, with $\beta = 0$ recovering vanilla; each setting needs its own rollout. (b) fixes $\beta$ and instead picks, among rounds already sampled, the transcript maximising $w\,\hat{s} + (1-w)\,\hat{p}$ over normalised presence and probability --- no extra generation. The final version overlays both as a Pareto scatter, one curve per target.}
   \label{tab:pareto-sweep}
 \end{table}
 
