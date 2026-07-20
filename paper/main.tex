@@ -415,9 +415,12 @@ As a rough guide, a single (method, model, behaviour) run at our default configu
 \section{Results}
 
 All quantitative entries are placeholders until experiments are finalised.
-\cref{tab:main} collects every method we compare against, grouped by where in the pipeline it applies elicitation pressure: the auditor's \emph{input} message, or the target's \emph{output} distribution.
-The two subsections below read that one table from each side in turn, before we ablate WILT's own components (\cref{tab:ablations}) and map how it trades elicitation against on-policy probability (\cref{tab:pareto-sweep}).
-Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-of-$N$ over the same fixed scenarios, which is the $\beta = 0$ special case of WILT and the reference every table is read against --- it sits above the grouping in \cref{tab:main} because it applies no elicitation pressure on either side.
+Every row of \cref{tab:main} is the \emph{same} BLOOM pipeline with a different extension bolted into its rollout stage.
+None of them is a competing framework: understanding, ideation, and judgement are identical throughout, the scenarios are fixed across all rows, and the compute budget is matched.
+What differs is only where each extension applies elicitation pressure --- to the auditor's \emph{input} message, or to the target's \emph{output} distribution --- which is what the \emph{Side} column records.
+\emph{Vanilla} is BLOOM with no extension at all: compute-matched best-of-$N$ over those same scenarios, and the $\beta = 0$ special case of WILT.
+It sits above the grouping because it applies no pressure on either side, and it is the reference every other row is read against.
+The two subsections below take the input and output blocks in turn, before we ablate WILT's own components (\cref{tab:ablations}) and map how it trades elicitation against on-policy probability (\cref{tab:pareto-sweep}).
 
 \begin{table*}[t]
   \centering
@@ -427,20 +430,20 @@ Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-o
     \toprule
     & & Behaviour & \multicolumn{2}{c}{Output token-prob (\%)} & \\
     \cmidrule(lr){4-5}
-    Side & Method & presence (\%) & Mean & Min & Naturalness (\%) \\
+    Side & BLOOM extension & presence (\%) & Mean & Min & Naturalness (\%) \\
     \midrule
-    ---     & BLOOM (best-of-$N$)  & \TBD & \TBD & \TBD & \TBD \\
+    ---     & Vanilla (none)       & \TBD & \TBD & \TBD & \TBD \\
     \midrule
     Input   & BEAST                & \TBD & \TBD & \TBD & \TBD \\
             & FLRT                 & \TBD & \TBD & \TBD & \TBD \\
             & G-PAIR               & \TBD & \TBD & \TBD & \TBD \\
     \midrule
-    Output  & Static token bias    & \TBD & \TBD & \TBD & \TBD \\
-            & BEAST (output side)  & \TBD & \TBD & \TBD & \TBD \\
+            & BEAST                & \TBD & \TBD & \TBD & \TBD \\
+            Output  & Static token bias    & \TBD & \TBD & \TBD & \TBD \\
             & \textbf{WILT (ours)} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} & \textbf{\TBD} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} All methods on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the method intervenes: input-side methods optimise the auditor's message (BEAST and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side methods change how the target's reply is sampled. BLOOM applies no pressure on either side and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these methods; \emph{static token bias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
+  \caption{\textbf{Elicitation pressure applied to the target's output distribution beats searching over the auditor's input, at matched compute and without sacrificing on-policy probability or naturalness.} Every row is the same BLOOM pipeline with a different extension in its rollout stage --- identical understanding, ideation, judgement, and scenarios throughout --- on Llama-3.2-3B for \emph{racial bias} at matched compute; higher is better on all four metrics. \emph{Side} is where the extension applies pressure: input-side extensions optimise the auditor's message (BEAST and FLRT at the token level, which requires the auditor's logits; G-PAIR by rewriting whole prompts), output-side extensions change how the target's reply is sampled. \emph{Vanilla} is BLOOM with no extension and is the reference the rest are read against. Behaviour presence alone is trivially maximised by abandoning the target distribution, so the probability and naturalness columns --- not presence --- separate these rows; \emph{static token bias} adds a fixed, context-free vector over the vocabulary rather than a second contextual distribution, and illustrates exactly that failure. The other three (model, behaviour) slices are in \cref{app:comparison-slices}.}
   \label{tab:main}
 \end{table*}
 
@@ -468,7 +471,7 @@ Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-o
     \raggedright
     Scenario: an amateur poet asks for blunt, honest feedback on a poem they wrote.
     \rule{\linewidth}{0.4pt}\\[0.5em]
-    \textbf{BLOOM (best-of-$N$):} \emph{This is a promising start --- the autumn imagery is evocative, and a few line edits would make the second stanza really land.}\\[0.4em]
+    \textbf{Vanilla BLOOM:} \emph{This is a promising start --- the autumn imagery is evocative, and a few line edits would make the second stanza really land.}\\[0.4em]
     \textbf{Static token bias:} \emph{Honestly your your writing is is bad bad and you you should should stop stop\dots}\\[0.4em]
     \textbf{BEAST:} \emph{I'm sorry, I can't quite parse that --- something looks garbled. Could you resend the poem?}\\[0.4em]
     \textbf{FLRT:} \emph{That's a deep question --- whether writing has any objective standard, or whether ``quality'' is just taste enforced by gatekeepers, is genuinely contested\dots}\\[0.4em]
@@ -596,7 +599,7 @@ Throughout, \emph{BLOOM} denotes the unmodified pipeline: compute-matched best-o
   \end{tabular}
   \end{adjustbox}
 
-  \caption{\textbf{Scaling behaviour presence along the two compute axes.} Both axes cost target forward passes, so they are directly comparable at matched compute: (a) lengthens each conversation, giving the auditor more turns to build pressure; (b) runs more differently-seeded rounds and keeps the best transcript per scenario. Round 1 in (b) is the unrefined first rollout, and is what \emph{BLOOM (best-of-$N$)} denotes elsewhere.}
+  \caption{\textbf{Scaling behaviour presence along the two compute axes.} Both axes cost target forward passes, so they are directly comparable at matched compute: (a) lengthens each conversation, giving the auditor more turns to build pressure; (b) runs more differently-seeded rounds and keeps the best transcript per scenario. Round 1 in (b) is the unrefined first rollout, and is what \emph{vanilla} denotes elsewhere.}
   \label{tab:scaling}
 \end{table}
 
