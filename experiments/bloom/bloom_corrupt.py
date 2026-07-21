@@ -207,8 +207,43 @@ def load_prompts(cfg: Optional[Dict] = None) -> Dict[str, Any]:
     return prompts
 
 
+def _prob_summary(probs):
+    """Composable summary stats for a list of per-token probabilities (percent, 0-100).
+    Saved next to gen_token_probs so plausibility survives even if the raw token list is
+    later dropped. Fields roll up losslessly (min-of-mins, max-of-maxes, n-weighted mean,
+    parallel variance, n-weighted log-mean) from per-turn -> per-transcript -> per-run."""
+    if not probs:
+        return None
+    n = len(probs)
+    mean = sum(probs) / n
+    var = sum((p - mean) ** 2 for p in probs) / n
+    geomean = math.exp(sum(math.log(p if p > 0 else 1e-12) for p in probs) / n)
+    return {"n": n, "min": min(probs), "max": max(probs),
+            "mean": mean, "var": var, "geomean": geomean}
+
+
+def _agg_prob_summaries(summaries):
+    """Combine per-turn _prob_summary dicts into one (transcript- or run-level) WITHOUT the
+    raw tokens: mean/variance via n-weighting (parallel variance), geomean via n-weighted
+    log-mean, min/max direct."""
+    s = [x for x in summaries if x]
+    if not s:
+        return None
+    N = sum(x["n"] for x in s)
+    mean = sum(x["n"] * x["mean"] for x in s) / N
+    var = sum(x["n"] * (x["var"] + (x["mean"] - mean) ** 2) for x in s) / N
+    sum_log = sum(x["n"] * math.log(max(x["geomean"], 1e-12)) for x in s)
+    return {"n": N, "min": min(x["min"] for x in s), "max": max(x["max"] for x in s),
+            "mean": mean, "var": var, "geomean": math.exp(sum_log / N)}
+
+
 def save_json(data: Any, path: Path) -> None:
     """Save data as JSON to the given path."""
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        _ms = [m.get("prob_stats") for m in data["messages"]
+               if m.get("source") == "target" and m.get("prob_stats")]
+        if _ms:
+            data["prob_stats"] = _agg_prob_summaries(_ms)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -5049,6 +5084,7 @@ def run_rollout_batched_local(
                     _tprobs = corr_result.get("best_token_probs")
                     if _tprobs is not None and target_resp == raw_target:
                         tmsg["gen_token_probs"] = _tprobs  # on-policy probs captured at gen time (target_only) -> free token stats
+                        tmsg["prob_stats"] = _prob_summary(_tprobs)
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -5241,6 +5277,7 @@ def run_rollout_batched_local(
                         tmsg["gen_token_ids"] = _ids           # exact ids -> free token stats
                     if _tprobs and target_resp == raw_target:
                         tmsg["gen_token_probs"] = _tprobs      # on-policy probs (plausibility)
+                        tmsg["prob_stats"] = _prob_summary(_tprobs)
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -5557,6 +5594,7 @@ def run_rollout_batched_local(
                     tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> exact token-prob scoring (no re-encode)
                 if _jail_tprobs and target_resp == raw_target:
                     tmsg["gen_token_probs"] = _jail_tprobs  # on-policy probs captured at jail gen time -> free token stats
+                    tmsg["prob_stats"] = _prob_summary(_jail_tprobs)
                 if target_reason:
                     tmsg["reasoning"] = target_reason
                 if output_search_on:
