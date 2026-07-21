@@ -6491,6 +6491,65 @@ def run_judgment_batched_local(
 # =============================================================================
 
 
+def _bank_load_round(bank_dir, round_num, auditor):
+    """Load {var_number: fixed_kickoff} from bank/round_R/kickoffs.json IFF the bank exists and
+    its recorded auditor matches the current one. Returns None otherwise (caller generates+saves)."""
+    if not bank_dir:
+        return None
+    try:
+        bd = Path(bank_dir)
+        meta, kf = bd / "meta.json", bd / f"round_{round_num}" / "kickoffs.json"
+        if not (meta.exists() and kf.exists()):
+            return None
+        if (json.load(open(meta, encoding="utf-8")).get("auditor") or "") != (auditor or ""):
+            return None
+        return {int(k): v for k, v in json.load(open(kf, encoding="utf-8")).items()}
+    except Exception:
+        return None
+
+
+def _bank_save_round(bank_dir, round_num, round_dir, auditor):
+    """Extract each scenario's kickoff (first evaluator user message) from a completed round and
+    persist to bank/round_R/kickoffs.json (+ meta.json recording the auditor)."""
+    try:
+        out = {}
+        trd = Path(round_dir) / "transcripts"
+        if trd.is_dir():
+            for tf in sorted(trd.glob("transcript_v*r1.json")):
+                m = re.match(r"transcript_v(\d+)r1\.json", tf.name)
+                if not m:
+                    continue
+                td = json.load(open(tf, encoding="utf-8"))
+                for msg in td.get("messages", []):
+                    if msg.get("source") == "evaluator" and msg.get("role") == "user":
+                        out[int(m.group(1))] = {
+                            "content":  msg.get("content", "") or "",
+                            "trs":      msg.get("targeted_response_start", "") or "",
+                            "baseline": msg.get("beast_baseline", "") or "",
+                            "suffix":   msg.get("beast_suffix", "") or "",
+                            "strategy": msg.get("strategy", "") or "",
+                        }
+                        break
+        if out:
+            rd = Path(bank_dir) / f"round_{round_num}"
+            rd.mkdir(parents=True, exist_ok=True)
+            json.dump({str(k): v for k, v in out.items()}, open(rd / "kickoffs.json", "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+            json.dump({"auditor": auditor or ""}, open(Path(bank_dir) / "meta.json", "w", encoding="utf-8"), indent=2)
+            print(f"  [kickoff-bank] saved {len(out)} kickoffs -> round_{round_num}", flush=True)
+    except Exception as e:
+        print(f"  [kickoff-bank] save failed ({type(e).__name__}: {e})", flush=True)
+
+
+def _bank_inject(variations, kicks):
+    """Set fixed_kickoff on each variation (1-based index = scenario number) from `kicks`."""
+    n = 0
+    for i, var in enumerate(variations, start=1):
+        if isinstance(var, dict) and i in kicks:
+            var["fixed_kickoff"] = kicks[i]
+            n += 1
+    return n
+
+
 async def run_parallel_round(
     all_prev_round_dirs: List[Path],  # all previous round dirs, oldest first (e.g. [round_1, round_2])
     output_dir: Path,
@@ -6667,6 +6726,19 @@ async def run_parallel_round(
         if skip_finished and unfinished:
             budget = int(refine_cfg.get("resample_budget", len(all_vnums)))
             reps_per = max(1, budget // len(unfinished))
+        # ── Kickoff bank (per-round): supersedes freeze_input ────────────────────────
+        _bank = cfg.get("kickoff_bank")
+        if _bank:
+            _cur = int(Path(output_dir).name.rsplit("_", 1)[-1])
+            _bk = _bank_load_round(_bank, _cur, cfg.rollout.model)
+            if _bk:  # reuse bank kickoffs for this round
+                for _v, _k in _bk.items():
+                    frozen_by_var.setdefault(_v, {})["fixed_kickoff"] = _k
+                print(f"  [kickoff-bank] round {_cur}: reused {len(_bk)} kickoffs from bank", flush=True)
+            else:    # no bank yet: force FRESH per-round kickoff (not round 1's) so it can be banked
+                for _v in frozen_by_var:
+                    frozen_by_var[_v]["fixed_kickoff"] = None
+                print(f"  [kickoff-bank] round {_cur}: no bank -> generating fresh kickoffs", flush=True)
         variations_override = []
         for v_num in all_vnums:
             if 1 <= v_num <= len(original_variations):
@@ -7452,6 +7524,8 @@ if __name__ == "__main__":
         cfg.setdefault("corruption_output", {})["corrupt_prefill"] = os.environ["BLOOM_CORRUPT_PREFILL"]    # idea C: compliance prefill
     if os.environ.get("BLOOM_FREEZE_INPUT") is not None and os.environ.get("BLOOM_FREEZE_INPUT") != "":
         cfg.setdefault("refinement", {})["freeze_input"] = os.environ["BLOOM_FREEZE_INPUT"].lower() in ("1", "true", "yes")
+    if os.environ.get("BLOOM_KICKOFF_BANK"):
+        cfg["kickoff_bank"] = os.environ["BLOOM_KICKOFF_BANK"]
     if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
         cfg.setdefault("refinement", {})["skip_finished"] = os.environ["BLOOM_SKIP_FINISHED"].lower() in ("1", "true", "yes")
     if os.environ.get("BLOOM_STRATEGISE") is not None and os.environ.get("BLOOM_STRATEGISE") != "":
@@ -7571,6 +7645,7 @@ if __name__ == "__main__":
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
         print("#" * 60, flush=True)
         round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
+        _bk1 = _bank_load_round(cfg.get("kickoff_bank"), 1, cfg.rollout.model) if cfg.get("kickoff_bank") else None
         cfg.folder_name = f"{base_folder}/round_1"
         round_1_judgment = round_1_dir / "judgment.json"
         if round_1_judgment.exists():
@@ -7580,6 +7655,13 @@ if __name__ == "__main__":
         else:
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + 1
+            if _bk1:  # reuse bank round-1 kickoffs: inject into ideation before generating
+                _idp = round_1_dir / "ideation.json"
+                if _idp.exists():
+                    _idj = json.load(open(_idp, encoding="utf-8"))
+                    _n = _bank_inject(_idj.get("variations", []), _bk1)
+                    json.dump(_idj, open(_idp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+                    print(f"  [kickoff-bank] round 1: reused {_n} kickoffs from bank", flush=True)
             result = await run_pipeline(cfg)
             if not result:
                 print("\n  Round 1 FAILED", flush=True)
@@ -7590,6 +7672,8 @@ if __name__ == "__main__":
             + (f", tok_avg={stats['A_mean_tok_pct']:.1f}%, tok_meanmin={stats['B_mean_of_mins_pct']:.2f}%, "
                f"tok_min={stats['B_min_of_mins_pct']:.4f}%" if stats.get('A_mean_tok_pct') is not None else ""), flush=True)
         # Logprob scoring is computed inline during rollout — no separate stage needed.
+        if cfg.get("kickoff_bank") and not _bk1:
+            _bank_save_round(cfg.get("kickoff_bank"), 1, round_1_dir, cfg.rollout.model)
         # Load understanding from round 1 for reuse in all subsequent rounds
         with open(round_1_dir / "understanding.json", "r", encoding="utf-8") as f:
             understanding_results = json.load(f)
@@ -7640,10 +7724,13 @@ if __name__ == "__main__":
             save_json(_cfg_for_dump(cfg, prompts_yaml), output_dir / "cfg.json")
             if base_seed is not None:
                 _DEFAULT_SEED = base_seed + round_num
+            _bkr = _bank_load_round(cfg.get("kickoff_bank"), round_num, cfg.rollout.model) if cfg.get("kickoff_bank") else None
             result = await run_parallel_round(
                 completed_round_dirs, output_dir, understanding_results, ideation_results, cfg, prompts_yaml
             )
             completed_round_dirs.append(output_dir)
+            if cfg.get("kickoff_bank") and not _bkr:
+                _bank_save_round(cfg.get("kickoff_bank"), round_num, output_dir, cfg.rollout.model)
             if result:
                 stats = result.get("summary_statistics", {})
                 print(f"\n  Round {round_num}: avg={stats.get('average_behavior_presence_score', 0):.2f}, "
