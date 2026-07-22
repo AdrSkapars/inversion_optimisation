@@ -15,6 +15,7 @@ import concurrent.futures
 import json
 import math
 import os
+import shutil
 import random
 import re
 import subprocess
@@ -3110,8 +3111,6 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
         return gen
 
 
-import eval_written as _eval_written  # BLOOM_EVAL_WRITES baseline
-
 _TOKBIAS_CACHE = {}
 
 
@@ -4689,12 +4688,6 @@ def run_rollout_batched_local(
                     parsed_t = parse_message(_make_local_response(raw_target))
                     target_resp = parsed_t["content"] or raw_target
                     target_reason = parsed_t["reasoning"]
-                    # Eval-written baseline (batched path); no-op unless BLOOM_EVAL_WRITES=1.
-                    _ew = _eval_written.eval_written_response(
-                        lm_eval, evaluator_system_prompt, sd["target_msgs"],
-                        batch_generate_local, target_max_tokens, temperature, no_think_eval)
-                    if _ew is not None:
-                        target_resp, target_reason = _ew, ""
                     sd["target_msgs"].append({"role": "assistant", "content": target_resp})
                     sd["current_turn"] = turn + 1
                     tmsg = {"role": "assistant", "content": target_resp, "source": "target"}
@@ -4951,16 +4944,6 @@ def run_rollout_batched_local(
                 parsed_target = parse_message(_make_local_response(raw_target))
                 target_resp   = parsed_target["content"] or raw_target
                 target_reason = parsed_target["reasoning"]
-
-                # ── Eval-written baseline (BLOOM_EVAL_WRITES=1; no-op otherwise) ──
-                # The evaluator writes the target's reply instead of the target generating
-                # it. Substituting here means target_resp != raw_target, so the token-prob
-                # attachment below is skipped and plausibility must come from cross_score.
-                _ew = _eval_written.eval_written_response(
-                    lm_eval, evaluator_system_prompt, target_msgs, batch_generate_local,
-                    target_max_tokens, temperature, no_think_eval)
-                if _ew is not None:
-                    target_resp, target_reason = _ew, ""
 
                 # ── Output search (optional) ──────────────────────────────
                 # Replace the natural target response with one that maximises
@@ -5945,6 +5928,51 @@ def _bank_save_round(bank_dir, round_num, round_dir, auditor):
         print(f"  [kickoff-bank] save failed ({type(e).__name__}: {e})", flush=True)
 
 
+def _bank_load_stages(bank_dir, auditor, dst_dir):
+    """Copy cached understanding.json / ideation.json from the bank into dst_dir IFF the bank's
+    recorded auditor matches — so the pipeline's existing skip-if-exists logic reuses them across
+    the beta sweep. understanding is (behaviour, auditor); ideation is (behaviour, model); both are
+    constant for a bank (which is per behaviour+model+auditor). Returns the stage names copied."""
+    if not bank_dir:
+        return []
+    copied = []
+    try:
+        bd = Path(bank_dir)
+        meta = bd / "meta.json"
+        if not meta.exists() or (json.load(open(meta, encoding="utf-8")).get("auditor") or "") != (auditor or ""):
+            return []
+        for name in ("understanding.json", "ideation.json"):
+            src, dst = bd / name, Path(dst_dir) / name
+            if src.exists() and not dst.exists():
+                Path(dst_dir).mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied.append(name.split(".")[0])
+    except Exception:
+        return copied
+    if copied:
+        print(f"  [kickoff-bank] reused {'+'.join(copied)} from bank (skips regeneration)", flush=True)
+    return copied
+
+
+def _bank_save_stages(bank_dir, auditor, src_dir):
+    """Persist understanding.json / ideation.json to the bank root (+ auditor meta) so later beta
+    runs reuse them. No-op for a stage already banked."""
+    if not bank_dir:
+        return
+    try:
+        bd = Path(bank_dir)
+        bd.mkdir(parents=True, exist_ok=True)
+        mp = bd / "meta.json"
+        if not mp.exists():
+            json.dump({"auditor": auditor or ""}, open(mp, "w", encoding="utf-8"), indent=2)
+        for name in ("understanding.json", "ideation.json"):
+            src, dst = Path(src_dir) / name, bd / name
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+    except Exception as e:
+        print(f"  [kickoff-bank] stage save failed ({type(e).__name__}: {e})", flush=True)
+
+
 def _bank_inject(variations, kicks):
     """Set fixed_kickoff on each variation (1-based index = scenario number) from `kicks`."""
     n = 0
@@ -6362,6 +6390,10 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     # reflects what the jail actually ran with, not the static empty defaults)
     save_json(_cfg_for_dump(cfg, prompts_yaml), output_dir / "cfg.json")
 
+    # Bank: reuse cached understanding + ideation across the beta sweep (pipeline-side, like the
+    # per-round kickoffs) — copy them in so the skip-if-exists logic below picks them up.
+    _bank_load_stages(cfg.get("kickoff_bank"), cfg.rollout.model, output_dir)
+
     # Stage 1: Understanding
     understanding_path = output_dir / "understanding.json"
     if understanding_path.exists():
@@ -6391,6 +6423,9 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
             if DEBUG_MODE:
                 traceback.print_exc()
             return None
+
+    # Bank: persist understanding + ideation for later beta runs to reuse (no-op if already banked).
+    _bank_save_stages(cfg.get("kickoff_bank"), cfg.rollout.model, output_dir)
 
     # Stage 3: Rollout
     try:
