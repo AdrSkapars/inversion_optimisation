@@ -118,7 +118,7 @@ def _run(beta, cell, out_dir: Path, bank_dir: Path, resume: bool) -> bool:
         "BLOOM_BEHAVIOR_FILE": cell["behaviour_file"],
         "BLOOM_EVAL_GPU": str(cell["eval_gpu"]), "BLOOM_TARGET_GPU": str(cell["target_gpu"]),
         "BLOOM_MAX_TURNS": str(cell["turns"]), "BLOOM_NUM_ROUNDS": str(cell["rounds"]),
-        "BLOOM_NUM_SCENARIOS": str(cell["scenarios"]), "BLOOM_SEED": "1",
+        "BLOOM_NUM_SCENARIOS": str(cell["scenarios"]), "BLOOM_SEED": str(cell["seed"]),
         "BLOOM_KICKOFF_BANK": str(bank_dir),
     })
     if beta > 0:                       # jail arm: self-jail at this beta (floor on by default)
@@ -156,6 +156,12 @@ def main():
     ap.add_argument("--turns", type=int, default=3)
     ap.add_argument("--increment", type=float, default=0.25)
     ap.add_argument("--max-beta", type=float, default=4.0)
+    # base RNG seed; round R samples with seed+R. Held FIXED across every beta so the sweep is a
+    # controlled comparison (same scenarios via the bank, same RNG draws — only the steering differs).
+    #   sweep / param-selection : --seed 1   (rounds seeded 2..6)
+    #   FINAL experiments       : --seed 100 (rounds 101..105) -- a DIFFERENT seed, so the chosen beta
+    #                             is evaluated on fresh draws (out-of-sample), not the ones it was tuned on.
+    ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out-base", default="runs_new")         # under experiments/bloom/ -> runs_new/<behaviour>/<model>/<method>
     ap.add_argument("--out", default=None)                    # json path; default beside the runs
     ap.add_argument("--resume", action="store_true")
@@ -163,7 +169,7 @@ def main():
 
     cell = {"model": a.model, "behaviour": a.behaviour, "behaviour_file": a.behaviour_file,
             "eval_gpu": a.eval_gpu, "target_gpu": a.target_gpu, "scenarios": a.scenarios,
-            "rounds": a.rounds, "turns": a.turns}
+            "rounds": a.rounds, "turns": a.turns, "seed": a.seed}
     msan = a.model.replace("/", "_")
     base = SCRIPT_DIR.parent / a.out_base / a.behaviour / msan        # experiments/bloom/runs_new/WILT/<beh>/<model>
     bank = base / "_bank"
@@ -234,7 +240,7 @@ def main():
         "model": a.model, "behaviour": a.behaviour, "behaviour_file": a.behaviour_file,
         "auditor": _auditor(base / "bon"), "kickoff_bank": str(bank.relative_to(SCRIPT_DIR.parent)),
         "settings": {"scenarios": a.scenarios, "rounds": a.rounds, "turns": a.turns,
-                     "floor": 1e-4, "increment": a.increment, "max_beta": a.max_beta,
+                     "seed": a.seed, "floor": 1e-4, "increment": a.increment, "max_beta": a.max_beta,
                      "gate_metric": "arith", "bands_pp": [3, 5]},
         "betas_run": betas_run,
         "stopped": {"reason": "gate" if gate_tripped_at is not None else "max_beta",
