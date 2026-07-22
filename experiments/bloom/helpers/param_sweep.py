@@ -29,7 +29,7 @@ Usage (run from the repo root, with the venv python and HF env already exported)
       [--scenarios 15] [--rounds 5] [--turns 3] [--increment 0.25] [--max-beta 4.0] \
       [--out-base runs_new/WILT] [--resume]
 """
-import argparse, json, os, subprocess, sys, time, glob, math, re, statistics as st
+import argparse, json, os, shutil, subprocess, sys, time, glob, math, re, statistics as st
 from collections import defaultdict
 from pathlib import Path
 
@@ -104,12 +104,22 @@ def _band_pick(curves_by_beta, xkey, anchor, band):
 
 
 # ----------------------------- running --------------------------------------
-def _run(beta, cell, out_dir: Path, bank_dir: Path, resume: bool) -> bool:
+def _run(beta, cell, out_dir: Path, bank_dir: Path, resume: bool, bon_dir: Path = None) -> bool:
     """One WILT run. beta==0 -> BoN (no jail model, target_only). Returns True on success."""
     if resume and (out_dir / "round_1" / "judgment.json").exists() \
             and (out_dir / f"round_{cell['rounds']}" / "judgment.json").exists():
         print(f"  [beta {beta}] resume: all {cell['rounds']} rounds present, skipping run", flush=True)
         return True
+    if beta > 0 and bon_dir is not None:
+        # Reuse understanding + ideation from the BoN run (identical for the same behaviour+model);
+        # bloom_corrupt skips any round-1 stage whose json already exists -> no re-derivation.
+        _sr, _ds = bon_dir / "round_1", out_dir / "round_1"
+        _ds.mkdir(parents=True, exist_ok=True)
+        for _n in ("understanding.json", "ideation.json"):
+            if (_sr / _n).exists() and not (_ds / _n).exists():
+                shutil.copy2(_sr / _n, _ds / _n)
+        if (_ds / "ideation.json").exists():
+            print(f"  [beta {beta}] reusing understanding+ideation from bon/ (skips regeneration)", flush=True)
     env = dict(os.environ)
     env.update({
         "BLOOM_FOLDER": str(out_dir.relative_to(SCRIPT_DIR.parent)),   # relative to experiments/bloom
@@ -180,7 +190,7 @@ def main():
     beta = 0.0
     while beta <= a.max_beta + 1e-9:
         out_dir = base / ("bon" if beta == 0 else f"jail_b{beta:g}")
-        if not _run(beta, cell, out_dir, bank, a.resume):
+        if not _run(beta, cell, out_dir, bank, a.resume, bon_dir=base / "bon"):
             print(f"  ABORT: beta {beta} failed.", flush=True)
             break
         rows = _load_points(out_dir)
