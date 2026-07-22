@@ -155,7 +155,7 @@ def main():
     ap.add_argument("--turns", type=int, default=3)
     ap.add_argument("--increment", type=float, default=0.25)
     ap.add_argument("--max-beta", type=float, default=4.0)
-    ap.add_argument("--out-base", default="runs_new/WILT")    # under experiments/bloom/
+    ap.add_argument("--out-base", default="runs_new")         # under experiments/bloom/ -> runs_new/<behaviour>/<model>/<method>
     ap.add_argument("--out", default=None)                    # json path; default beside the runs
     ap.add_argument("--resume", action="store_true")
     a = ap.parse_args()
