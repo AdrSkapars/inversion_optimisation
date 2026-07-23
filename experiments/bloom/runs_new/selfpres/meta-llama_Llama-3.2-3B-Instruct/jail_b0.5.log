@@ -1,0 +1,169 @@
+Loaded behaviour: self-preservation (prompts/5_self_preservation.yaml)
+  [env override] folder=runs_new/selfpres/meta-llama_Llama-3.2-3B-Instruct/jail_b0.5 max_turns=3 num_rounds=5 skip_finished=False
+
+############################################################
+# SELF-REFINE ROUND 1/5  [full pipeline]
+############################################################
+============================================================
+BLOOM PIPELINE
+============================================================
+Behavior: self-preservation
+Output: /workspace/inversion_optimisation/experiments/bloom/runs_new/selfpres/meta-llama_Llama-3.2-3B-Instruct/jail_b0.5/round_1
+============================================================
+Results saved to: /workspace/inversion_optimisation/experiments/bloom/runs_new/selfpres/meta-llama_Llama-3.2-3B-Instruct/jail_b0.5/round_1/cfg.json
+  [kickoff-bank] reused understanding+ideation from bank (skips regeneration)
+UNDERSTANDING STAGE - skipped (understanding.json already exists)
+IDEATION STAGE - skipped (ideation.json already exists)
+
+============================================================
+ROLLOUT STAGE - STARTED (input search)
+============================================================
+[local] Spawning vLLM worker on GPU 0 for HF bf16: RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic  (gpu_mem=0.8, max_len=16384)
+WARNING 07-23 04:24:09 [arg_utils.py:2477] Failed to determine min multimodal batched tokens: 401 Client Error.
+WARNING 07-23 04:24:09 [arg_utils.py:2477] 
+WARNING 07-23 04:24:09 [arg_utils.py:2477] Repository Not Found for url: http://117.175.104.83:8081/api/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic/tree/main/additional_chat_templates?recursive=false&expand=false.
+WARNING 07-23 04:24:09 [arg_utils.py:2477] Please make sure you specified the correct `repo_id` and `repo_type`.
+WARNING 07-23 04:24:09 [arg_utils.py:2477] If you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.
+WARNING 07-23 04:24:09 [arg_utils.py:2477] For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+WARNING 07-23 04:24:09 [cuda.py:243] Forcing --disable_chunked_mm_input for models with multimodal-bidirectional attention.
+
+ERROR: Rollout stage failed: vLLM worker for RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic on GPU 0 failed:
+Traceback (most recent call last):
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 795, in hf_raise_for_status
+    response.raise_for_status()
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '401 Unauthorized' for url 'http://117.175.104.83:8081/api/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic/tree/main/additional_chat_templates?recursive=false&expand=false'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 665, in _vllm_worker_main
+    llm = LLM(**kwargs)
+          ^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 349, in __init__
+    self.llm_engine = LLMEngine.from_engine_args(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 170, in from_engine_args
+    return cls(
+           ^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 90, in __init__
+    self.renderer = renderer = renderer_from_config(self.vllm_config)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/renderers/registry.py", line 84, in renderer_from_config
+    tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/registry.py", line 272, in cached_tokenizer_from_config
+    return cached_get_tokenizer(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/registry.py", line 251, in get_tokenizer
+    tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/hf.py", line 172, in from_pretrained
+    tokenizer = AutoTokenizer.from_pretrained(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/models/auto/tokenization_auto.py", line 862, in from_pretrained
+    return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 1673, in from_pretrained
+    for template in list_repo_templates(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/utils/hub.py", line 147, in list_repo_templates
+    return [
+           ^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3954, in list_repo_tree
+    for path_info in paginate(path=tree_url, headers=headers, params={"recursive": recursive, "expand": expand}):
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_pagination.py", line 37, in paginate
+    hf_raise_for_status(r)
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 882, in hf_raise_for_status
+    raise _format(RepositoryNotFoundError, message, response, repo_type=repo_type, repo_id=repo_id) from e
+huggingface_hub.errors.RepositoryNotFoundError: 401 Client Error.
+
+Repository Not Found for url: http://117.175.104.83:8081/api/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic/tree/main/additional_chat_templates?recursive=false&expand=false.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.
+For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+
+Traceback (most recent call last):
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 6432, in run_pipeline
+    rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results, ideation_results)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 2574, in run_rollout
+    return run_rollout_batched_local(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 4367, in run_rollout_batched_local
+    lm_eval = _get_local_model(evaluator_model_id[len("local/"):],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 1022, in _get_local_model
+    _LOCAL_MODEL_REGISTRY[key] = LocalModel(
+                                 ^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 976, in __init__
+    self.worker = VLLMWorker(
+                  ^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 839, in __init__
+    raise RuntimeError(f"vLLM worker for {hf_name} on GPU {gpu_id} failed:\n{payload}")
+RuntimeError: vLLM worker for RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic on GPU 0 failed:
+Traceback (most recent call last):
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 795, in hf_raise_for_status
+    response.raise_for_status()
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '401 Unauthorized' for url 'http://117.175.104.83:8081/api/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic/tree/main/additional_chat_templates?recursive=false&expand=false'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/inversion_optimisation/experiments/bloom/bloom_corrupt.py", line 665, in _vllm_worker_main
+    llm = LLM(**kwargs)
+          ^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 349, in __init__
+    self.llm_engine = LLMEngine.from_engine_args(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 170, in from_engine_args
+    return cls(
+           ^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 90, in __init__
+    self.renderer = renderer = renderer_from_config(self.vllm_config)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/renderers/registry.py", line 84, in renderer_from_config
+    tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/registry.py", line 272, in cached_tokenizer_from_config
+    return cached_get_tokenizer(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/registry.py", line 251, in get_tokenizer
+    tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/vllm/tokenizers/hf.py", line 172, in from_pretrained
+    tokenizer = AutoTokenizer.from_pretrained(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/models/auto/tokenization_auto.py", line 862, in from_pretrained
+    return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 1673, in from_pretrained
+    for template in list_repo_templates(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/transformers/utils/hub.py", line 147, in list_repo_templates
+    return [
+           ^
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3954, in list_repo_tree
+    for path_info in paginate(path=tree_url, headers=headers, params={"recursive": recursive, "expand": expand}):
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_pagination.py", line 37, in paginate
+    hf_raise_for_status(r)
+  File "/workspace/inversion_optimisation/.venv-g4/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 882, in hf_raise_for_status
+    raise _format(RepositoryNotFoundError, message, response, repo_type=repo_type, repo_id=repo_id) from e
+huggingface_hub.errors.RepositoryNotFoundError: 401 Client Error.
+
+Repository Not Found for url: http://117.175.104.83:8081/api/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic/tree/main/additional_chat_templates?recursive=false&expand=false.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.
+For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+
+
+  Round 1 FAILED
+
+============================================================
+TOTAL EXPERIMENT TIME: 0h 2m 37s (157.8s)
+============================================================
