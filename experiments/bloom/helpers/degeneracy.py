@@ -1,11 +1,11 @@
 """Degeneracy analysis for WILT sweep transcripts (post-hoc; not part of the src/bloom method).
 
-Two degeneracy signals, all computed on the TARGET responses of a transcript:
-  * within-message : top-word share (max over responses) and type-token ratio (min over responses)
-                     -> catches single-word / phrase loops ("no no no", "just go ...").
+Two degeneracy signals, computed on the TARGET responses of a transcript:
   * cross-turn     : mean consecutive-turn word-set Jaccard within a transcript
-                     -> catches turn-level repetition (the same answer re-emitted each turn),
-                        which within-message metrics miss and which inflates plausibility.
+                     -> catches turn-level repetition (the same answer re-emitted each turn).
+                        This is the one that reaches the picks and inflates plausibility.
+  * within-message : top-word share (max over responses)
+                     -> catches single-word / phrase loops ("no no no"); rarely selected.
 
 Two commands:
   scan   for each cell (behaviour x model) at its pm5 beta, reproduce the utopia-weighted
@@ -26,14 +26,12 @@ NW = 25                                     # weight-grid resolution (matches pa
 BEH = ["racial","political","delusions","deception","selfpres",
        "reward_hacking","self_harm","medical","goblin"]
 XTURN_FLAG = 0.60                           # chosen transcript flagged if cross-turn Jaccard exceeds this
-TOP_FLAG, TTR_FLAG = 0.25, 0.40            # within-message flags
+TOP_FLAG = 0.25                             # within-message flag: max top-word share over responses
 SWEEP_THRS = [9.9, 0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30]   # 9.9 == no filter
 
 def _words(t): return re.findall(r"[a-z0-9']+", (t or "").lower())
 def _top(t):
     w = _words(t); return max(Counter(w).values()) / len(w) if w else 0.0
-def _ttr(t):
-    w = _words(t); return len(set(w)) / len(w) if w else 1.0
 def _jac(a, b):
     A, B = set(_words(a)), set(_words(b))
     return len(A & B) / len(A | B) if A and B else 0.0
@@ -41,7 +39,7 @@ def _beta_folder(b):
     return "bon" if not b else "jail_b" + f"{b:.1f}".rstrip("0").rstrip(".")
 
 def _load(run_dir):
-    """Per-transcript (var, score, arith, top, ttr, xturn) for one run folder."""
+    """Per-transcript (var, score, arith, top, xturn) for one run folder."""
     rows = []
     for tf in glob.glob(f"{run_dir}/round_*/transcripts/*.json"):
         try: d = json.load(open(tf, encoding="utf-8"))
@@ -54,7 +52,6 @@ def _load(run_dir):
         rows.append({"var": d.get("metadata", {}).get("variation_number"),
                      "score": float(sc), "arith": float(ps["mean"]),
                      "top": max((_top(x) for x in tg), default=0.0),
-                     "ttr": min((_ttr(x) for x in tg), default=1.0),
                      "xturn": st.mean(xj) if xj else 0.0})
     return rows
 
@@ -95,10 +92,10 @@ def cmd_scan(runs):
         for s in r[2]:
             chosen.append((beh, model, s))
     fx = [c for c in chosen if c[2]["xturn"] > XTURN_FLAG]
-    fw = [c for c in chosen if c[2]["top"] > TOP_FLAG or c[2]["ttr"] < TTR_FLAG]
+    fw = [c for c in chosen if c[2]["top"] > TOP_FLAG]
     print(f"chosen transcripts: {len(chosen)}")
     print(f"  cross-turn flagged (Jaccard>{XTURN_FLAG}): {len(fx)}")
-    print(f"  within-message flagged (top>{TOP_FLAG} or ttr<{TTR_FLAG}): {len(fw)}")
+    print(f"  within-message flagged (top-word>{TOP_FLAG}): {len(fw)}")
     print("  cross-turn flags by behaviour:", dict(Counter(c[0] for c in fx)))
     print("  cross-turn flags by model:    ", dict(Counter(c[1].split('_')[0] for c in fx)))
 
