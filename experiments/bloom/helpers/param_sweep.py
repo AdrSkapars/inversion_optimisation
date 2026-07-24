@@ -34,8 +34,9 @@ from collections import defaultdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent          # experiments/bloom/helpers
-BLOOM = SCRIPT_DIR.parent / "bloom_corrupt.py"        # experiments/bloom/bloom_corrupt.py
-REPO_BLOOM = "experiments/bloom"                      # BLOOM_FOLDER is relative to experiments/bloom
+RUNS_ROOT  = SCRIPT_DIR.parent                        # experiments/bloom — where runs live (this runner + outputs)
+REPO_ROOT  = SCRIPT_DIR.parent.parent.parent          # repo root (helpers -> bloom -> experiments -> repo)
+BLOOM = REPO_ROOT / "src" / "bloom" / "bloom_corrupt.py"  # the library code now lives under src/bloom/
 NW = 25                                               # weight-grid resolution for the selection curve
 
 
@@ -113,7 +114,8 @@ def _run(beta, cell, out_dir: Path, bank_dir: Path, resume: bool) -> bool:
         return True
     env = dict(os.environ)
     env.update({
-        "BLOOM_FOLDER": str(out_dir.relative_to(SCRIPT_DIR.parent)),   # relative to experiments/bloom
+        "BLOOM_RUNS_ROOT": str(RUNS_ROOT),                            # runs live here (experiments/bloom), not under the src/bloom code
+        "BLOOM_FOLDER": str(out_dir.relative_to(RUNS_ROOT)),          # relative to the runs root
         "BLOOM_TARGET_MODEL": "local/" + cell["model"],
         "BLOOM_BEHAVIOR_FILE": cell["behaviour_file"],
         "BLOOM_EVAL_GPU": str(cell["eval_gpu"]), "BLOOM_TARGET_GPU": str(cell["target_gpu"]),
@@ -129,7 +131,7 @@ def _run(beta, cell, out_dir: Path, bank_dir: Path, resume: bool) -> bool:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"  [beta {beta}] running -> {out_dir}  (log: {log})", flush=True)
     with open(log, "w") as lf:
-        r = subprocess.run([sys.executable, str(BLOOM)], cwd=str(SCRIPT_DIR.parent.parent.parent),
+        r = subprocess.run([sys.executable, str(BLOOM)], cwd=str(REPO_ROOT),
                            env=env, stdout=lf, stderr=subprocess.STDOUT)
     ok = (r.returncode == 0) and (out_dir / f"round_{cell['rounds']}" / "judgment.json").exists()
     print(f"  [beta {beta}] {'OK' if ok else 'FAILED (see log)'}", flush=True)
@@ -171,7 +173,7 @@ def main():
             "eval_gpu": a.eval_gpu, "target_gpu": a.target_gpu, "scenarios": a.scenarios,
             "rounds": a.rounds, "turns": a.turns, "seed": a.seed}
     msan = a.model.replace("/", "_")
-    base = SCRIPT_DIR.parent / a.out_base / a.behaviour / msan        # experiments/bloom/runs_new/WILT/<beh>/<model>
+    base = RUNS_ROOT / a.out_base / a.behaviour / msan               # experiments/bloom/runs_new/WILT/<beh>/<model>
     bank = base / "_bank"
     out_json = Path(a.out) if a.out else (base / "param_selection.json")
     print(f"== WILT sweep: {a.model} x {a.behaviour} | {a.scenarios}x{a.rounds}x{a.turns} | "
@@ -238,7 +240,7 @@ def main():
 
     result = {
         "model": a.model, "behaviour": a.behaviour, "behaviour_file": a.behaviour_file,
-        "auditor": _auditor(base / "bon"), "kickoff_bank": str(bank.relative_to(SCRIPT_DIR.parent)),
+        "auditor": _auditor(base / "bon"), "kickoff_bank": str(bank.relative_to(RUNS_ROOT)),
         "settings": {"scenarios": a.scenarios, "rounds": a.rounds, "turns": a.turns,
                      "seed": a.seed, "floor": 1e-4, "increment": a.increment, "max_beta": a.max_beta,
                      "gate_metric": "arith", "bands_pp": [3, 5]},

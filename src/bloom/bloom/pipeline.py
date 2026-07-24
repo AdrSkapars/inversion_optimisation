@@ -1229,7 +1229,7 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
 
     # Resolve output directory
     folder_name = cfg.get("folder_name", "runs/default")
-    output_dir = (SCRIPT_DIR / folder_name).resolve()
+    output_dir = (RUNS_ROOT / folder_name).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60, flush=True)

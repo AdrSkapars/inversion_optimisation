@@ -73,7 +73,7 @@ judge_model  = EVAL_MODELS[0]
 target_model = TARGET_MODELS[2]   # Qwen3.5-4B — the paper's representative slice
 
 cfg = DotDict({
-    "folder_name": "runs_new/default",           # output dir under experiments/bloom/. Always overridden by BLOOM_FOLDER (the sweep driver sets this per run).
+    "folder_name": "runs_new/default",           # output dir under the runs root (core.RUNS_ROOT = experiments/bloom by default; override via BLOOM_RUNS_ROOT). Always overridden by BLOOM_FOLDER (the sweep driver sets this per run).
 
     "behavior_file": "prompts/1_racial_bias.yaml",  # behaviour-specific yaml (description, overrides, jail + corruption prompts). Override with BLOOM_BEHAVIOR_FILE.
     "behavior_name": "racial-bias",          # label used in prompt templates; overwritten from behavior_file in __main__
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
         print("#" * 60, flush=True)
-        round_1_dir = (SCRIPT_DIR / base_folder / "round_1").resolve()
+        round_1_dir = (RUNS_ROOT / base_folder / "round_1").resolve()
         _bk1 = _bank_load_round(cfg.get("kickoff_bank"), 1, cfg.rollout.model) if cfg.get("kickoff_bank") else None
         cfg.folder_name = f"{base_folder}/round_1"
         round_1_judgment = round_1_dir / "judgment.json"
@@ -382,7 +382,7 @@ if __name__ == "__main__":
             print("\n" + "#" * 60, flush=True)
             print(f"# SELF-REFINE ROUND {round_num}/{num_rounds}  [refine + rollout + judge]", flush=True)
             print("#" * 60, flush=True)
-            output_dir = (SCRIPT_DIR / base_folder / f"round_{round_num}").resolve()
+            output_dir = (RUNS_ROOT / base_folder / f"round_{round_num}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             if (output_dir / "judgment.json").exists():
                 print(f"# ROUND {round_num} - skipped (already exists, reusing)", flush=True)
