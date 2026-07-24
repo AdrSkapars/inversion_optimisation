@@ -1081,7 +1081,7 @@ def run_rollout_batched_local(
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
             "target_floor": float(jail_cfg.get("target_floor", 1e-4)),  # naturalness floor ON by default (0 only via explicit no-floor ablation)
             "b3":              float(jail_cfg.get("b3", 0.0) or 0.0),          # negative-steering weight; 0=off (legacy jail)
-            # neg prompts load from the behaviour yaml; a BLOOM_JAIL_NEG env preset (injected into jail_cfg) overrides.
+            # neg prompts: cfg (jailbroken_output.neg_*) takes precedence, else the behaviour yaml.
             "neg_system_prompt": (jail_cfg.get("neg_system_prompt") or prompts_yaml.get("jailbroken_output_neg_system_prompt", "") or ""), # input-conditioned negative persona
             "neg_user_prompt":   (jail_cfg.get("neg_user_prompt")   or prompts_yaml.get("jailbroken_output_neg_user_prompt", "")   or ""), # harmful user turn -> ELICITED refusal direction
             "neg_prefill":       (jail_cfg.get("neg_prefill")       or prompts_yaml.get("jailbroken_output_neg_prefill", "")       or ""),
