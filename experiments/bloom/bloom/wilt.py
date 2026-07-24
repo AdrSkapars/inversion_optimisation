@@ -200,7 +200,6 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
                                 IMPORTANT: raw log p is dominated by token FREQUENCY, so the
                                 plain mode largely re-adds a frequency prior; the contrast
                                 cancels it and isolates behaviour-relevant tokens.
-      BLOOM_TOKBIAS_TOPK        keep only the k highest-bias tokens, zero elsewhere (sparse tilt).
       BLOOM_TOKBIAS_WORDS       comma-separated words; bias = 1.0 on each word's first token
                                 (the hand-picked "boost these logits" variant). Overrides PROMPT.
       BLOOM_TOKBIAS_LAMBDA      scale. 0 (or no prompt/words) => (0.0, None) = exact no-op.
@@ -218,28 +217,25 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
         lam = float(os.environ.get("BLOOM_TOKBIAS_LAMBDA", tb.get("lambda", 0.0)) or 0.0)
     except ValueError:
         lam = 0.0
-    try:
-        topk = int(os.environ.get("BLOOM_TOKBIAS_TOPK", tb.get("topk", 0)) or 0)
-    except ValueError:
-        topk = 0
     if lam == 0.0 or (not prompt and not words):
         return 0.0, None
-    key = (prompt, negp, words, topk)
+    key = (prompt, negp, words)
     vec = _TOKBIAS_CACHE.get(key)
     if vec is None:
         try:
-            _steps = max(1, int(os.environ.get("BLOOM_TOKBIAS_STEPS", tb.get("steps", 1)) or 1))
+            _steps = max(1, int(os.environ.get("BLOOM_TOKBIAS_STEPS", tb.get("steps", 8)) or 8))
         except ValueError:
-            _steps = 1
+            _steps = 8
         try:
-            _samples = max(1, int(os.environ.get("BLOOM_TOKBIAS_SAMPLES", tb.get("samples", 1)) or 1))
+            _samples = max(1, int(os.environ.get("BLOOM_TOKBIAS_SAMPLES", tb.get("samples", 4)) or 4))
         except ValueError:
-            _samples = 1
+            _samples = 4
 
         def _last_logprobs(text):
             """Mean next-token log-prob over _steps rolled-forward positions x _samples
-            continuations; averaging steadies the estimate (default steps=1, samples=1 = one
-            noisy position)."""
+            stochastic continuations (default 8 x 4). steps>1 broadens the relevance
+            vector beyond the immediate next token; samples averages the rollouts (a no-op
+            at steps=1, since the single position is deterministic)."""
             ids0 = tok(text, return_tensors="pt").input_ids.to(device)
             acc, n = None, 0
             for _ in range(_samples):
@@ -271,12 +267,6 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
             if negp:
                 vec = vec - _last_logprobs(negp)
                 mode = f"contrast (steps={_steps} x samples={_samples})"
-        if topk > 0:
-            keep = torch.topk(vec, min(topk, vec.numel())).indices
-            sparse = torch.full_like(vec, 0.0)
-            sparse[keep] = vec[keep]
-            vec = sparse
-            mode += f" topk={topk}"
         _TOKBIAS_CACHE[key] = vec
         top = torch.topk(vec, 10).indices.tolist()
         print(f"  [tokbias] {mode}, lambda={lam}, top tokens: "

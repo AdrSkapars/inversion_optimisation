@@ -194,9 +194,8 @@ cfg = DotDict({
     "tokbias_output": {                           # static logit-bias baseline (z = target + lambda*bias over the whole vocab) — a separate elicitation method from jail. Numeric knobs here; the prompt content (prompt / neg_prompt / words) lives in the behaviour yaml (tokbias_output_prompt / _neg_prompt / _words). Every field overridable via BLOOM_TOKBIAS_*.
         "enabled": False,                         #   on/off: when False the bias vector is never computed (short-circuits before any prompt eval). Override with BLOOM_TOKBIAS_ENABLED.
         "lambda": 0.0,                            #   tilt scale; 0.0 (or no prompt/words) = exact no-op
-        "topk": 0,                                #   keep only the k highest-bias tokens (sparse tilt); 0 = dense
-        "steps": 1,                               #   rolled-forward positions averaged for the relevance estimate
-        "samples": 1,                             #   sampled continuations averaged for the relevance estimate
+        "steps": 8,                               #   rolled-forward positions averaged into the relevance estimate (>1 broadens beyond the immediate next token)
+        "samples": 4,                             #   stochastic continuations averaged for the estimate (no-op at steps=1)
     },
 })
 
