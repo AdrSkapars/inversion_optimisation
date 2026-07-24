@@ -508,10 +508,13 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                                     n_prefs=n_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=jail_b3,
                                     return_token_lps=True)
         if jail_b1 is not None:
-            # floor-only / weighted jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs)
+            # weighted / floor-only jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs).
+            # tokbias passed here too so the logit-bias baseline is reachable at any b1 (b1=1 default gives the
+            # same z as the legacy b1=None path).
             return _hf_poe_generate(mt, mc, t_prefs, _jp, 0.0, temperature, max_tokens,
                                     pad_id, eos_id, device, target_floor=jail_floor,
-                                    poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
+                                    poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True,
+                                    tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
         return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
                                 pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True,
                                 tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))

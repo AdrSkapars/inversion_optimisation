@@ -187,7 +187,7 @@ cfg = DotDict({
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
         "target_floor": 1e-4,                     # naturalness floor ON by default: mask tokens with target prob < floor before sampling the tilt (argmax(target) fallback). 0 = off (no-floor ablation only).
-        "b1": None,                               # target-term weight in z = b1*target + b2*jail - b3*neg. None = legacy path (implicit target weight 1); 0 = floor-only jail (drop the target term). Left None keeps the legacy path that the cfg.tokbias_output logit-bias baseline runs through.
+        "b1": 1,                                  # target-term weight in z = b1*target + b2*jail - b3*neg (default 1). 0 = floor-only jail (drop the target term). None also accepted (legacy code path; numerically identical to 1). The cfg.tokbias_output baseline works at any b1.
         "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when use_during_rollout=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
         "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off. Ablation: W2S logit-difference vs a neutral prompt.
         "spp": 1,                                 # jail samples per scenario; >1 pools then selects (inert at spp=1). Post-hoc round selection is separate (analysis time).
