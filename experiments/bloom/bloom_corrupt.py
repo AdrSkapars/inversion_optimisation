@@ -1,27 +1,16 @@
 import asyncio
-import concurrent.futures
 import json
-import math
 import os
-import shutil
-import random
-import re
-import subprocess
 import time
-import traceback
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import litellm
-import torch
 import yaml
-from litellm import completion_with_retries
 
 # Suppress LiteLLM verbose output
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
-import logging
 from bloom.core import *
 from bloom import core
 from bloom.wilt import *
@@ -55,6 +44,15 @@ TARGET_MODELS = [
     "local/microsoft/Phi-4-mini-instruct",     # 1: Phi-4-mini-instruct
     "local/Qwen/Qwen3.5-4B",                   # 2: Qwen3.5-4B
     "local/google/gemma-4-e4b-it",             # 3: Gemma-4-E4B
+]
+# Smaller same-family sibling of each TARGET_MODELS entry (index-aligned) — the weak steering
+# model for the W2S small-expert experiment. Phi-4-mini has no smaller release, so it is None.
+# Think-block wrappers for these are registered in bloom/core.py:_USES_THINK_BLOCK.
+SMALL_TARGET_MODELS = [
+    "local/meta-llama/Llama-3.2-1B-Instruct",  # 0: Llama-3.2-1B-Instruct  (<- Llama-3.2-3B)
+    None,                                       # 1: Phi-4-mini has no smaller sibling
+    "local/Qwen/Qwen3.5-2B",                   # 2: Qwen3.5-2B             (<- Qwen3.5-4B)
+    "local/google/gemma-4-e2b-it",             # 3: Gemma-4-E2B            (<- Gemma-4-E4B)
 ]
 
 # Abliterated (refusal-removed) corruptor variants, keyed by their ORIGINAL target. Same
