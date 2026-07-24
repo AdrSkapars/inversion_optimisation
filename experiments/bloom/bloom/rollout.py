@@ -238,14 +238,10 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     scientific_motivation = understanding_results["scientific_motivation"]
     transcript_analyses = understanding_results.get("transcript_analyses", [])
 
-    # Get target model name (if not anonymous)
-    anonymous_target = cfg.get("anonymous_target", False)
-    target_model_name = None if anonymous_target else cfg.rollout.get("target", "unknown")
-
     # Build system prompt
     system_prompt = build_ideation_system(
         behavior_understanding, scientific_motivation, transcript_analyses,
-        behavior_name, prompts_yaml, target_model_name
+        behavior_name, prompts_yaml
     )
 
     if model_id.startswith("local/"):
@@ -257,7 +253,6 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
             behavior_understanding, scientific_motivation, transcript_analyses,
             prompts_yaml,
             start_idx=1, end_idx=num_scenarios,
-            target_model_name=target_model_name,
         )
         hf_name = model_id[len("local/"):]
         lm = _get_local_model(hf_name)
@@ -285,7 +280,6 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 behavior_name, num_scenarios,
                 behavior_understanding, scientific_motivation, transcript_analyses,
                 prompts_yaml, start_idx=_have + 1, end_idx=num_scenarios,
-                target_model_name=target_model_name,
             )
             print(f"  Top-up {_attempt}/3: have {_have}, requesting scenarios {_have + 1}-{num_scenarios}...", flush=True)
             _ide_msgs.append({"role": "user", "content": _topup})
@@ -329,7 +323,6 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 behavior_understanding, scientific_motivation, transcript_analyses,
                 prompts_yaml,
                 start_idx=start_idx, end_idx=end_idx,
-                target_model_name=target_model_name,
             )
 
             messages.append({"role": "user", "content": batch_prompt})
@@ -757,7 +750,6 @@ async def run_single_rollout(
     behavior_understanding: str, scientific_motivation: str,
     transcript_analyses: List[Dict], evaluator_system_prompt: str,
     output_dir: Path, semaphore: asyncio.Semaphore,
-    target_model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a single rollout variation."""
     async with semaphore:
@@ -769,7 +761,7 @@ async def run_single_rollout(
         conversation_rollout_prompt = build_rollout_prompt(
             cfg.behavior_name, behavior_understanding, scientific_motivation,
             transcript_analyses, variation_description, rollout_cfg.max_turns,
-            prompts_yaml, target_model_name
+            prompts_yaml
         )
 
         target_sysprompt_prefix = _get_override(prompts_yaml, "target_sysprompt_prefix")
@@ -897,10 +889,6 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     variations = variations_override if variations_override is not None else ideation_results["variations"]
     num_reps = cfg.rollout.get("num_reps", 1)
 
-    # Target model name
-    anonymous_target = cfg.get("anonymous_target", False)
-    target_model_name = None if anonymous_target else cfg.rollout.get("target", "unknown")
-
     # Build evaluator system prompt
     evaluator_system_prompt = build_rollout_system(behavior_name, prompts_yaml)
 
@@ -916,7 +904,7 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 run_single_rollout(
                     var_idx, var_description, rep, cfg, prompts_yaml,
                     behavior_understanding, scientific_motivation, transcript_analyses,
-                    evaluator_system_prompt, output_dir, semaphore, target_model_name,
+                    evaluator_system_prompt, output_dir, semaphore,
                 )
             )
 
@@ -986,7 +974,6 @@ def run_rollout_batched_local(
 
     evaluator_model_id = cfg.rollout.model
     target_model_id    = cfg.rollout.target
-    target_model_name  = target_model_id  # always show model name
 
     # Each LocalModel gets its own subprocess pinned to a specific GPU (CUDA_VISIBLE_DEVICES
     # is set per-worker before vLLM init). With one LLM per GPU each worker can use most of
@@ -1258,7 +1245,7 @@ def run_rollout_batched_local(
         )
         rp = build_rollout_prompt(
             behavior_name, behavior_understanding, scientific_motivation,
-            transcript_analyses, vd, max_turns, prompts_yaml, target_model_name,
+            transcript_analyses, vd, max_turns, prompts_yaml,
             skip_motivation=has_refined_strategy,
         )
         rollout_prompt_texts.append(rp)

@@ -100,7 +100,6 @@ async def judge_single_conversation(
     transcript_path: Path, behavior_name: str,
     behavior_understanding: str, scientific_motivation: str,
     cfg: DotDict, prompts_yaml: Dict, quality_descriptions: Dict[str, str],
-    target_model_name: Optional[str] = None,
     executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
 ) -> Dict[str, Any]:
     """Judge a single conversation with multi-sampling."""
@@ -122,7 +121,7 @@ async def judge_single_conversation(
     judge_prompt = build_judge_prompt(
         behavior_name, behavior_understanding, scientific_motivation,
         eval_transcript, additional_qualities, quality_descriptions,
-        prompts_yaml, target_model_name
+        prompts_yaml
     )
 
     # Step 1: Initial judgment with summary
@@ -321,10 +320,6 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     scientific_motivation = understanding_results["scientific_motivation"]
     quality_descriptions = prompts_yaml.get("quality_descriptions", {})
 
-    # Target model name
-    anonymous_target = cfg.get("anonymous_target", False)
-    target_model_name = None if anonymous_target else cfg.rollout.get("target", "unknown")
-
     # Discover transcript files
     transcripts_dir = output_dir / "transcripts"
     if transcripts_dir.is_dir():
@@ -373,7 +368,7 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                     behavior_understanding,
                     scientific_motivation,
                     cfg, prompts_yaml, quality_descriptions,
-                    target_model_name, executor,
+                    executor,
                 )
 
         tasks = [judge_with_semaphore(r) for r in rollouts]
@@ -491,8 +486,6 @@ def run_judgment_batched_local(
     batch_size = cfg.get("batch_size", 4)
     temperature = cfg.get("temperature", DEFAULT_TEMPERATURE)
     no_think = not cfg.judgment.get("thinking", False)
-    anonymous_target = cfg.get("anonymous_target", False)
-    target_model_name = None if anonymous_target else cfg.rollout.get("target", "unknown")
 
     system_prompt = build_judgment_system(additional_qualities, quality_descriptions, prompts_yaml)
 
@@ -580,7 +573,7 @@ def run_judgment_batched_local(
         judge_prompt = build_judge_prompt(
             behavior_name, behavior_understanding, scientific_motivation,
             eval_transcript, additional_qualities, quality_descriptions,
-            prompts_yaml, target_model_name,
+            prompts_yaml,
         )
 
         entries.append({
