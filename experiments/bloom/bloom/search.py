@@ -680,7 +680,7 @@ def output_search_target_response(
     # ── Sampling ──────────────────────────────────────────────────────────
     if use_contrastive_sampling:
         beta  = float(jail_runtime_cfg.get("b2", 2.0))
-        top_k = int(jail_runtime_cfg.get("top_k_logprobs", 1000))
+        top_k = int(jail_runtime_cfg.get("top_k_logprobs") or 1000)
         n       = int(output_cfg.candidates_per_beam)
         max_tok = int(output_cfg.scored_candidate_length)
         temp    = float(output_cfg.get("temperature", 1.0))

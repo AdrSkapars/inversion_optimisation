@@ -96,7 +96,7 @@ def batch_generate_contrastive_local(
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("b2", 2.0))
-    top_k      = int(jail_runtime_cfg.get("top_k_logprobs", 1000))
+    top_k      = int(jail_runtime_cfg.get("top_k_logprobs") or 1000)
     allowed_token_ids: Optional[List[int]] = None
 
     results: List[str] = []

@@ -1088,7 +1088,7 @@ def run_rollout_batched_local(
             "neg_system_prompt": jail_cfg.get("neg_system_prompt", "") or "", # input-conditioned negative persona (rc/neutral)
             "neg_user_prompt":   jail_cfg.get("neg_user_prompt", "") or "",   # harmful user turn -> ELICITED refusal direction
             "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
-            "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
+            "top_k_logprobs": (int(jail_cfg["top_k_logprobs"]) if jail_cfg.get("top_k_logprobs") is not None else None),  # vllm_topk only; None on the default hf_full path
             "nprompts":     int(jail_cfg.get("nprompts", 0) or 0),      # promptset cap (0 = all); BLOOM_JAIL_NPROMPTS overrides
             "tokbias":      dict(cfg.get("tokbias_output", {}) or {}),  # static logit-bias baseline params (top-level cfg.tokbias_output); BLOOM_TOKBIAS_* override
         }
