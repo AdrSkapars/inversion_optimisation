@@ -63,8 +63,9 @@ SMALL_TARGET_MODELS = [
 # (target #0) has no entry here — its abliterated variant (huihui-ai/llama-3.2-3b-instruct-abliterated)
 # exists and is registered in core._USES_THINK_BLOCK, but was never wired into this map.
 ABLITERATED_CORRUPTORS = {
-    "Qwen/Qwen3.5-4B":               "huihui-ai/Huihui-Qwen3.5-4B-abliterated",                          # 2: <- Qwen3.5-4B
+    "meta-llama/Llama-3.2-3B-Instruct": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",                   # 0: <- Llama-3.2-1B-Instruct
     "microsoft/Phi-4-mini-instruct": "huihui-ai/Phi-4-mini-instruct-abliterated",                        # 1: <- Phi-4-mini
+    "Qwen/Qwen3.5-4B":               "huihui-ai/Huihui-Qwen3.5-4B-abliterated",                          # 2: <- Qwen3.5-4B
     "google/gemma-4-e4b-it":         "huihui-ai/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated", # 3: <- Gemma-4-E4B
 }
 
@@ -113,6 +114,7 @@ cfg = DotDict({
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
+        "num_rounds": 5,                     # total rounds; round 1 = full pipeline, rounds 2+ = rollout + judge (fresh resamples). WILT default = 5 (set via BLOOM_NUM_ROUNDS).
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "target_engine": "hf",                  # target decode engine for the WILT/BoN path: "hf" (exact full-vocab PoE) or "vllm" (vllm_topk). Override with BLOOM_TARGET_ENGINE.
     },
@@ -129,7 +131,6 @@ cfg = DotDict({
         "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
         "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_rounds": 5,                     # total rounds; round 1 = full pipeline, rounds 2+ = rollout + judge (fresh resamples). WILT default = 5 (set via BLOOM_NUM_ROUNDS).
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
         "history_turns": None,               # within a rollout: evaluator's view of the conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
         "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
@@ -233,7 +234,7 @@ if __name__ == "__main__":
         ("BLOOM_SEED",           ("seed",),                                   int),
         ("BLOOM_MAX_TURNS",      ("rollout", "max_turns"),                    int),
         ("BLOOM_NUM_SCENARIOS",  ("ideation", "num_scenarios"),               int),
-        ("BLOOM_NUM_ROUNDS",     ("refinement_input", "num_rounds"),                int),
+        ("BLOOM_NUM_ROUNDS",     ("rollout", "num_rounds"),                          int),
         ("BLOOM_TARGET_MODEL",   ("rollout", "target"),                       str),   # swap target without editing the default
         # BLOOM_EVAL_GPU moves the WHOLE auditor (understanding/ideation/judgment LocalModel + rollout
         # evaluator) onto this GPU. core._DEFAULT_LOCAL_GPU_ID is set from cfg.evaluator_gpu_id, so
@@ -294,11 +295,11 @@ if __name__ == "__main__":
     if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS", "BLOOM_SKIP_FINISHED")):
         _rf = cfg.get("refinement_input", {})
         print(f"  [env override] folder={cfg.get('folder_name')} "
-              f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={_rf.get('num_rounds')} "
+              f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={cfg.get('rollout', {}).get('num_rounds')} "
               f"skip_finished={_rf.get('skip_finished')}", flush=True)
 
     base_folder = cfg.get("folder_name", "runs/default")
-    num_rounds = cfg.get("refinement_input", {}).get("num_rounds", 1)
+    num_rounds = cfg.get("rollout", {}).get("num_rounds", 1)
     base_seed = cfg.get("seed")  # offset per round to keep vLLM samples reproducible-but-distinct across rounds
     async def run_parallel() -> bool:
         """Returns True if there was an error."""

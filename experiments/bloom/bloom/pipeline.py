@@ -1,27 +1,20 @@
 import asyncio
 import concurrent.futures
 import json
-import math
 import os
 import shutil
 import random
 import re
-import subprocess
-import time
 import traceback
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
-import torch
-import yaml
 from litellm import completion_with_retries
 
 # Suppress LiteLLM verbose output
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
-import logging
 from .core import *
 from . import core
 from .wilt import *
@@ -946,7 +939,7 @@ async def run_parallel_round(
 
     refine_cfg = cfg.get("refinement_input", {}) or {}
     between_rounds_strategise = refine_cfg.get("between_rounds_strategise", True)
-    if refine_cfg.get("num_rounds", 1) <= 1:
+    if cfg.get("rollout", {}).get("num_rounds", 1) <= 1:
         between_rounds_strategise = False  # no subsequent rounds to strategise for
 
     # If strategy-injection is disabled, skip the refiner entirely. We still want to
