@@ -95,7 +95,7 @@ def batch_generate_contrastive_local(
     """
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
-    beta       = float(jail_runtime_cfg.get("beta", 2.0))
+    beta       = float(jail_runtime_cfg.get("b2", 2.0))
     top_k      = int(jail_runtime_cfg.get("top_k_logprobs", 1000))
     allowed_token_ids: Optional[List[int]] = None
 
@@ -405,7 +405,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
-    beta       = float(jail_runtime_cfg.get("beta", 2.0))
+    beta       = float(jail_runtime_cfg.get("b2", 2.0))
     jail_b1    = jail_runtime_cfg.get("b1")                          # None => legacy z=target+beta*jail; set (e.g. 0) => z=b1*target+beta*jail, floor-masked (floor-only jail = b1=0, beta=1, floor>0)
     jail_floor = float(jail_runtime_cfg.get("target_floor", 0.0) or 0.0)
     jail_spp   = max(1, int(jail_runtime_cfg.get("spp", 1)))         # samples per scenario (s10 = 10); >1 pools then selects

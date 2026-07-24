@@ -185,14 +185,14 @@ cfg = DotDict({
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
         "prefill": "",                            # from behaviour file (jailbroken_output_prefill); "" = off
-        "beta": 4.0,                              # PoE weight on log p_jailbroken; only used when use_during_rollout=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
+        "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when use_during_rollout=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
         "target_floor": 1e-4,                     # naturalness floor ON by default: mask tokens with target prob < floor before sampling the tilt (argmax(target) fallback). 0 = off (no-floor ablation only).
-        "b1": None,                               # target-term weight. None = legacy z = target + beta*jail (target weight 1). 0 = floor-only jail (drop the target term). Kept None so the TokenBias-baseline code path stays reachable.
+        "b1": None,                               # target-term weight in z = b1*target + b2*jail - b3*neg. None = legacy path (implicit target weight 1); 0 = floor-only jail (drop the target term). Left None keeps the legacy path that the cfg.tokbias_output logit-bias baseline runs through.
         "spp": 1,                                 # jail samples per scenario; >1 pools then selects (inert at spp=1). Post-hoc round selection is separate (analysis time).
         "selection": "target_pick",               # within-scenario pick when spp>1: target_pick (max target-prob) | filter_target (drop repetitive d3<tau, then max target-prob)
         "filter_tau": 0.8,                        # d3 (distinct-3-gram) threshold for selection="filter_target"
-        "b3": 0.0,                                # negative-steering weight (z = target + beta*jail - b3*neg). 0 = off. Ablation: W2S logit-difference vs a neutral prompt.
+        "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off. Ablation: W2S logit-difference vs a neutral prompt.
         "neg_system_prompt": "",                  # negative-steering persona system prompt ("" = off)
         "neg_user_prompt": "",                    # elicited-refusal user turn for the negative branch ("" = off)
         "neg_prefill": "",                        # prefill on the negative branch ("" = off)
@@ -291,9 +291,9 @@ if __name__ == "__main__":
         cfg.setdefault("jailbroken_output", {})["use_during_rollout"] = True
         cfg["jailbroken_output"]["model"] = os.environ["BLOOM_JAIL_MODEL"]
         if os.environ.get("BLOOM_JAIL_BETA"):
-            cfg["jailbroken_output"]["beta"] = float(os.environ["BLOOM_JAIL_BETA"])
+            cfg["jailbroken_output"]["b2"] = float(os.environ["BLOOM_JAIL_BETA"])
         if os.environ.get("BLOOM_JAIL_B1") is not None and os.environ.get("BLOOM_JAIL_B1") != "":
-            cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+beta*jail
+            cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+b2*jail
         if os.environ.get("BLOOM_JAIL_FLOOR"):
             cfg["jailbroken_output"]["target_floor"] = float(os.environ["BLOOM_JAIL_FLOOR"])  # mask jail samples to tokens with target prob >= floor
         if os.environ.get("BLOOM_JAIL_SPP"):

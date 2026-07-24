@@ -1076,7 +1076,7 @@ def run_rollout_batched_local(
             "system_prompt": jail_system_prompt,
             "system_prompts": prompts_yaml.get("jailbroken_output_system_prompts", []) or [],
             "prefill":     jail_cfg.get("prefill") or prompts_yaml.get("jailbroken_output_prefill", "") or "",
-            "beta":        float(jail_cfg.get("beta", 2.0)),
+            "b2":          float(jail_cfg.get("b2", 2.0)),
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
             "target_floor": float(jail_cfg.get("target_floor", 1e-4)),  # naturalness floor ON by default (0 only via explicit no-floor ablation)
             "spp":          int(jail_cfg.get("spp", 1)),                    # samples per scenario (s10=10)
