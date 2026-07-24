@@ -217,58 +217,61 @@ if __name__ == "__main__":
     print(f"Loaded behaviour: {cfg.behavior_name} ({_bf})", flush=True)
 
     # --- env-var overrides (for autonomous sweeps; no source edits between runs) ---
-    if os.environ.get("BLOOM_FOLDER"):
-        cfg["folder_name"] = os.environ["BLOOM_FOLDER"]
-    if os.environ.get("BLOOM_SEED"):
-        cfg["seed"] = int(os.environ["BLOOM_SEED"])
-    if os.environ.get("BLOOM_MAX_TURNS"):
-        cfg.setdefault("rollout", {})["max_turns"] = int(os.environ["BLOOM_MAX_TURNS"])
-    if os.environ.get("BLOOM_NUM_SCENARIOS"):
-        cfg.setdefault("ideation", {})["num_scenarios"] = int(os.environ["BLOOM_NUM_SCENARIOS"])
-    if os.environ.get("BLOOM_NUM_ROUNDS"):
-        cfg.setdefault("refinement", {})["num_rounds"] = int(os.environ["BLOOM_NUM_ROUNDS"])
-    if os.environ.get("BLOOM_TARGET_MODEL"):
-        cfg.setdefault("rollout", {})["target"] = os.environ["BLOOM_TARGET_MODEL"]  # swap target model (e.g. Phi-4-mini) without editing the default
-    if os.environ.get("BLOOM_EVAL_GPU"):
-        # Move the WHOLE auditor (understanding/ideation/judgment LocalModel + rollout evaluator)
-        # onto this GPU, not just the rollout path. core._DEFAULT_LOCAL_GPU_ID is set from
-        # cfg.evaluator_gpu_id, so without this the judgment-stage auditor stays on GPU 0 and two
-        # pipelines on different GPUs collide on GPU 0 ("engine core init failed on GPU 0").
-        cfg["evaluator_gpu_id"] = int(os.environ["BLOOM_EVAL_GPU"])
+    def _envbool(v: str) -> bool:
+        return v.lower() in ("1", "true", "yes")
+
+    def _set_nested(d, path, value):
+        for k in path[:-1]:
+            d = d.setdefault(k, {})
+        d[path[-1]] = value
+
+    # Simple single-field overrides: (env var, cfg path, converter). Applied when the var is set
+    # and non-empty. Multi-field / nested overrides (eval model+thinking, jail) stay explicit below.
+    ENV_OVERRIDES = [
+        ("BLOOM_FOLDER",         ("folder_name",),                            str),
+        ("BLOOM_SEED",           ("seed",),                                   int),
+        ("BLOOM_MAX_TURNS",      ("rollout", "max_turns"),                    int),
+        ("BLOOM_NUM_SCENARIOS",  ("ideation", "num_scenarios"),               int),
+        ("BLOOM_NUM_ROUNDS",     ("refinement", "num_rounds"),                int),
+        ("BLOOM_TARGET_MODEL",   ("rollout", "target"),                       str),   # swap target without editing the default
+        # BLOOM_EVAL_GPU moves the WHOLE auditor (understanding/ideation/judgment LocalModel + rollout
+        # evaluator) onto this GPU. core._DEFAULT_LOCAL_GPU_ID is set from cfg.evaluator_gpu_id, so
+        # without this the judgment-stage auditor stays on GPU 0 and two pipelines on different GPUs
+        # collide ("engine core init failed on GPU 0").
+        ("BLOOM_EVAL_GPU",       ("evaluator_gpu_id",),                       int),
+        ("BLOOM_JUDGE_MODEL",    ("judgment", "model"),                       str),   # non-'local/' id => hosted API via litellm
+        ("BLOOM_JUDGE_THINKING", ("judgment", "thinking"),                    _envbool),
+        ("BLOOM_EVAL_MAXTOK",    ("rollout", "evaluator_max_tokens"),         int),   # raise eval cap for hosted-API eval WITH thinking (budget reserved inside max_tokens)
+        ("BLOOM_JUDGE_MAXTOK",   ("judgment", "max_tokens"),                  int),
+        ("BLOOM_KICKOFF_BANK",   ("kickoff_bank",),                           str),
+        ("BLOOM_SKIP_FINISHED",  ("refinement", "skip_finished"),             _envbool),
+        ("BLOOM_STRATEGISE",     ("refinement", "between_rounds_strategise"), _envbool),
+        ("BLOOM_INPUT_SEARCH",   ("input_search", "enabled"),                 _envbool),
+        ("BLOOM_INPUT_MAXPREFIX", ("input_search", "max_prefix_length"),      int),   # explicit int only (e.g. -50, or 0 = regenerate whole body); None handled separately
+        ("BLOOM_INPUT_ITERS",    ("input_search", "max_num_iterations"),      int),
+    ]
+    for _env, _path, _conv in ENV_OVERRIDES:
+        _v = os.environ.get(_env)
+        if _v not in (None, ""):
+            _set_nested(cfg, _path, _conv(_v))
+
+    # BLOOM_EVAL_MODEL: evaluator/red-team model for understanding + ideation + rollout turn-sampling
+    # (e.g. "claude-haiku-4-5" via litellm). A non-'local/' id => hosted API: it can only sample whole
+    # turns (token-level search must be off; enforced at evaluator load).
     if os.environ.get("BLOOM_EVAL_MODEL"):
-        # evaluator/red-team model for understanding + ideation + rollout turn-sampling
-        # (e.g. "claude-haiku-4-5" via litellm). A non-'local/' id => hosted API: it can only
-        # sample whole turns (token-level search must be off; enforced at evaluator load).
         _eval_model = os.environ["BLOOM_EVAL_MODEL"]
         cfg.setdefault("understanding", {})["model"] = _eval_model
         cfg.setdefault("ideation", {})["model"] = _eval_model
         cfg.setdefault("rollout", {})["model"] = _eval_model
-    if os.environ.get("BLOOM_JUDGE_MODEL"):
-        # judgment model (e.g. "claude-haiku-4-5"). Non-'local/' id => hosted API via litellm.
-        cfg.setdefault("judgment", {})["model"] = os.environ["BLOOM_JUDGE_MODEL"]
     if os.environ.get("BLOOM_EVAL_THINKING") is not None and os.environ.get("BLOOM_EVAL_THINKING") != "":
         # toggle reasoning for understanding+ideation+rollout-evaluator. For a hosted-API eval,
         # reasoning_effort='medium' reserves the thinking budget (2048) inside max_tokens, so the
         # small per-call caps (eval 1200, understanding 2000) would fail litellm's budget check —
         # set this 0 to run the API evaluator without extended thinking (also much cheaper).
-        _et = os.environ["BLOOM_EVAL_THINKING"].lower() in ("1", "true", "yes")
+        _et = _envbool(os.environ["BLOOM_EVAL_THINKING"])
         cfg.setdefault("understanding", {})["thinking"] = _et
         cfg.setdefault("ideation", {})["thinking"] = _et
         cfg.setdefault("rollout", {})["evaluator_thinking"] = _et
-    if os.environ.get("BLOOM_JUDGE_THINKING") is not None and os.environ.get("BLOOM_JUDGE_THINKING") != "":
-        cfg.setdefault("judgment", {})["thinking"] = os.environ["BLOOM_JUDGE_THINKING"].lower() in ("1", "true", "yes")
-    if os.environ.get("BLOOM_EVAL_MAXTOK"):
-        # raise evaluator output cap — needed for a hosted-API eval WITH thinking, where the
-        # reasoning budget (e.g. medium=2048) is reserved inside max_tokens.
-        cfg.setdefault("rollout", {})["evaluator_max_tokens"] = int(os.environ["BLOOM_EVAL_MAXTOK"])
-    if os.environ.get("BLOOM_JUDGE_MAXTOK"):
-        cfg.setdefault("judgment", {})["max_tokens"] = int(os.environ["BLOOM_JUDGE_MAXTOK"])
-    if os.environ.get("BLOOM_KICKOFF_BANK"):
-        cfg["kickoff_bank"] = os.environ["BLOOM_KICKOFF_BANK"]
-    if os.environ.get("BLOOM_SKIP_FINISHED") is not None and os.environ.get("BLOOM_SKIP_FINISHED") != "":
-        cfg.setdefault("refinement", {})["skip_finished"] = os.environ["BLOOM_SKIP_FINISHED"].lower() in ("1", "true", "yes")
-    if os.environ.get("BLOOM_STRATEGISE") is not None and os.environ.get("BLOOM_STRATEGISE") != "":
-        cfg.setdefault("refinement", {})["between_rounds_strategise"] = os.environ["BLOOM_STRATEGISE"].lower() in ("1", "true", "yes")
     # BLOOM_JAIL_MODEL: switch to DIRECT jail-sample decoding (contrastive PoE with a jailbroken
     # proposal model) instead of the corruption rewrite. Disables corruption (mutually exclusive).
     # Jail model must share the target's vocab (target itself = self-jail, or a same-family abliterated).
@@ -312,12 +315,6 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["neg_system_prompt"] = _JAIL_NEG_PRESETS.get(_k, _JAIL_NEG_PRESETS["neutral"])
         if os.environ.get("BLOOM_JAIL_NEG_PREFILL"):
             cfg["jailbroken_output"]["neg_prefill"] = os.environ["BLOOM_JAIL_NEG_PREFILL"]
-    if os.environ.get("BLOOM_INPUT_SEARCH") is not None and os.environ.get("BLOOM_INPUT_SEARCH") != "":
-        cfg.setdefault("input_search", {})["enabled"] = os.environ["BLOOM_INPUT_SEARCH"].lower() in ("1", "true", "yes")
-    if os.environ.get("BLOOM_INPUT_MAXPREFIX"):
-        cfg.setdefault("input_search", {})["max_prefix_length"] = int(os.environ["BLOOM_INPUT_MAXPREFIX"])  # BEAST max_prefix_length (e.g. -50, or 0 = regenerate whole body). None handled separately; this is for explicit ints.
-    if os.environ.get("BLOOM_INPUT_ITERS"):
-        cfg.setdefault("input_search", {})["max_num_iterations"] = int(os.environ["BLOOM_INPUT_ITERS"])  # BEAST max_num_iterations (e.g. 10).
     if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS", "BLOOM_SKIP_FINISHED")):
         _rf = cfg.get("refinement", {})
         print(f"  [env override] folder={cfg.get('folder_name')} "
