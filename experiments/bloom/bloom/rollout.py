@@ -950,7 +950,7 @@ def run_rollout_batched_local(
     target_gpu_id   = int(os.environ.get("BLOOM_TARGET_GPU", cfg.get("target_gpu_id", 1)))
     eval_gpu_util   = float(os.environ.get("BLOOM_EVAL_UTIL", cfg.get("evaluator_gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTIL)))
     target_gpu_util = cfg.get("target_gpu_memory_utilization",    DEFAULT_GPU_MEMORY_UTIL)
-    eval_max_len    = cfg.rollout.get("evaluator_max_model_len", 16384)
+    eval_max_len    = core._DEFAULT_MAX_MODEL_LEN   # cfg.rollout.evaluator_max_model_len (BLOOM_EVAL_MAXLEN overrides), set at pipeline start
     target_max_len  = cfg.rollout.get("target_max_model_len",    4096)
 
     # Jailbroken-model contrastive output decoding: when enabled, the jail model

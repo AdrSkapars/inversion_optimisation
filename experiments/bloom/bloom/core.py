@@ -588,6 +588,11 @@ _DEFAULT_LOCAL_GPU_ID: int = 0
 # None disables seeding (non-deterministic). When set, every batch_generate_local
 # and _vllm_sample_extensions call gets this seed, making the full run reproducible.
 _DEFAULT_SEED: Optional[int] = None
+# eval/auditor vLLM context window. Set from cfg.rollout.evaluator_max_model_len at pipeline start
+# (BLOOM_EVAL_MAXLEN overrides). Used whenever _get_local_model is called WITHOUT an explicit
+# max_model_len — i.e. the auditor loads (understanding/ideation/judgment/refine); target & jail
+# pass their own. The auditor is cached on first load, so this must be set before the pipeline runs.
+_DEFAULT_MAX_MODEL_LEN: int = int(os.environ.get("BLOOM_EVAL_MAXLEN", "16384"))
 
 # Cache: id(lm) → list of allowed Latin token IDs (built once per LLM)
 _LATIN_MASK_CACHE: Dict[int, List[int]] = {}
@@ -1003,16 +1008,19 @@ class LocalModel:
 
 def _get_local_model(hf_name: str, gpu_id: Optional[int] = None,
                      gpu_memory_utilization: Optional[float] = None,
-                     max_model_len: int = int(os.environ.get("BLOOM_EVAL_MAXLEN", "16384"))) -> "LocalModel":
+                     max_model_len: Optional[int] = None) -> "LocalModel":
     """Return the cached LocalModel, spawning its worker on first call.
 
     Each (spec, gpu_id) pair gets its own LocalModel — the cache key is
     "{hf_name}@gpu{gpu_id}" so the same model on a different GPU spawns a new
     worker. Spec format documented in `_parse_local_spec`.
-    gpu_id defaults to _DEFAULT_LOCAL_GPU_ID (set from cfg.rollout.evaluator_gpu_id at startup).
+    gpu_id defaults to _DEFAULT_LOCAL_GPU_ID and max_model_len to _DEFAULT_MAX_MODEL_LEN
+    (both set from cfg at pipeline start).
     """
     if gpu_id is None:
         gpu_id = _DEFAULT_LOCAL_GPU_ID
+    if max_model_len is None:
+        max_model_len = _DEFAULT_MAX_MODEL_LEN
     key = f"{hf_name}@gpu{gpu_id}"
     if key in _LOCAL_MODEL_REGISTRY:
         return _LOCAL_MODEL_REGISTRY[key]

@@ -1216,6 +1216,7 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     """Run the full 4-stage BLOOM pipeline."""
     core.DEBUG_MODE = cfg.get("debug", True)
     core._DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
+    core._DEFAULT_MAX_MODEL_LEN = int(os.environ.get("BLOOM_EVAL_MAXLEN", (cfg.get("rollout", {}) or {}).get("evaluator_max_model_len", 16384)))
     core._DEFAULT_SEED = cfg.get("seed")
     if core._DEFAULT_SEED is not None:
         random.seed(core._DEFAULT_SEED)

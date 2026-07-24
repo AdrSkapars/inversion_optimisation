@@ -341,6 +341,7 @@ if __name__ == "__main__":
         # Set the default GPU here too: run_pipeline sets it, but is skipped on resume (round_1/judgment.json exists),
         # so without this the judgment stage would spawn a redundant judge worker on GPU 0.
         core._DEFAULT_LOCAL_GPU_ID = cfg.get("evaluator_gpu_id", 0)
+        core._DEFAULT_MAX_MODEL_LEN = int(os.environ.get("BLOOM_EVAL_MAXLEN", cfg.get("rollout", {}).get("evaluator_max_model_len", 16384)))
         # Round 1: full pipeline (skipped if already complete — detected via judgment.json)
         print("\n" + "#" * 60, flush=True)
         print(f"# SELF-REFINE ROUND 1/{num_rounds}  [full pipeline]", flush=True)
