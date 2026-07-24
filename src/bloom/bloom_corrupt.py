@@ -101,9 +101,9 @@ cfg = DotDict({
     },
     "ideation": {
         "model": judge_model,                # model that generates evaluation scenarios
-        "max_tokens": 30000, #50000,         # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each)
+        "max_tokens": 120000,                # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each). ~30k sufficed for 25 scenarios; 100 scenarios needs ~4x.
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "num_scenarios": 15,                 # total scenarios to generate; more = broader coverage but slower rollout. WILT param-sweep default = 15; final experiments = 100 (set via BLOOM_NUM_SCENARIOS).
+        "num_scenarios": 100,                # total scenarios to generate; more = broader coverage but slower rollout. WILT param-sweep default = 15; final experiments = 100.
     },
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via input search
