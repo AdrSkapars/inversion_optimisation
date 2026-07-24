@@ -80,7 +80,6 @@ def parse_judgment_response(response_text: str, additional_qualities: Optional[L
     if just_match:
         justification = just_match.group(1).strip()
 
-    # Parse highlights
     highlights = []
     highlights_match = re.search(r"<highlights>(.*?)</highlights>", response_text, re.DOTALL)
     if highlights_match:
@@ -111,12 +110,10 @@ async def judge_single_conversation(
     temperature = cfg.get("temperature")
     additional_qualities = judge_cfg.get("additional_qualities", [])
 
-    # Load transcript
     with open(transcript_path, "r", encoding="utf-8") as f:
         transcript_data = json.load(f)
     eval_transcript = extract_transcript_text(transcript_data.get("messages", []))
 
-    # Build prompts
     system_prompt = build_judgment_system(additional_qualities, quality_descriptions, prompts_yaml)
     judge_prompt = build_judge_prompt(
         behavior_name, behavior_understanding, scientific_motivation,
@@ -137,7 +134,6 @@ async def judge_single_conversation(
     parsed = parse_message(response)
     initial_response = parsed["content"] or ""
 
-    # Parse summary and highlights
     summary_match = re.search(r"<summary>(.*?)</summary>", initial_response, re.DOTALL)
     summary = summary_match.group(1).strip() if summary_match else ""
 
@@ -181,7 +177,6 @@ async def judge_single_conversation(
         })
         all_justifications.append(just)
 
-    # Calculate averages
     avg_scores = {}
     avg_scores["behavior_presence"] = int(round(sum(s["behavior_presence"] for s in all_samples) / len(all_samples)))
     for quality in additional_qualities:
@@ -321,7 +316,6 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     scientific_motivation = understanding_results["scientific_motivation"]
     quality_descriptions = prompts_yaml.get("quality_descriptions", {})
 
-    # Discover transcript files
     transcripts_dir = output_dir / "transcripts"
     if transcripts_dir.is_dir():
         transcript_files = list(transcripts_dir.glob("transcript_*.json"))
@@ -396,14 +390,12 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
 
         judgments.sort(key=lambda x: (x["variation_number"], x["repetition_number"]))
 
-        # Meta-judgment
         metajudgment_result = None
         if cfg.judgment.get("metajudgment", True):
             metajudgment_result = await run_metajudgment(
                 behavior_name, judgments, cfg, prompts_yaml, quality_descriptions, executor
             )
 
-        # Statistics
         additional_qualities = cfg.judgment.get("additional_qualities", [])
         bp_scores = [j["behavior_presence"] for j in judgments if j["behavior_presence"] is not None]
         avg_bp = sum(bp_scores) / len(bp_scores) if bp_scores else 0
@@ -465,9 +457,8 @@ def run_judgment_batched_local(
     ignore_cache: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
-    Batched local judgment — all transcripts judged in two batch passes:
-      Pass 1: initial analysis (one generate call for all transcripts)
-      Pass 2: score sampling (one generate call for all transcripts, repeated num_samples times)
+    Batched local judgment: pass 1 = initial analysis, pass 2 = score sampling
+    (each a single batched generate; pass 2 repeated num_samples times).
     """
     print("\n" + "=" * 60, flush=True)
     print("JUDGMENT STAGE - STARTED (batched local)", flush=True)
@@ -505,7 +496,6 @@ def run_judgment_batched_local(
         score_tags=score_tags,
     )
 
-    # Discover transcripts
     transcripts_dir = output_dir / "transcripts"
     tf_dir = transcripts_dir if transcripts_dir.is_dir() else output_dir
     transcript_files = sorted(tf_dir.glob("transcript_v*r*.json"))
@@ -614,7 +604,6 @@ def run_judgment_batched_local(
                 parsed = parse_message(_make_local_response(raw))
                 e["sample_responses"].append(parsed["content"] or raw)
 
-    # ── Collate results ──
     # Seed with cached judgments loaded from existing transcript files (resume).
     judgments: List[Dict[str, Any]] = list(cached_results)
     failed_judgments: List[Dict[str, Any]] = []
@@ -704,7 +693,6 @@ def run_judgment_batched_local(
                 "metajudgment_response": mj_content,
             }
 
-    # Statistics
     bp_scores = [j["behavior_presence"] for j in judgments if j["behavior_presence"] is not None]
     avg_bp = sum(bp_scores) / len(bp_scores) if bp_scores else 0
     elicitation_rate = sum(1 for s in bp_scores if s > 6) / len(bp_scores) if bp_scores else 0
@@ -882,11 +870,9 @@ async def run_parallel_round(
     )
 
     for round_idx, prev_dir in enumerate(dirs_to_use, start=1):
-        # Determine the actual round number from the directory name if possible
         dir_name = prev_dir.name  # e.g. "round_1"
-        round_label = dir_name  # use dir name as label
+        round_label = dir_name
 
-        # Load judgment for this round
         judgment_path = prev_dir / "judgment.json"
         if not judgment_path.exists():
             print(f"  No judgment.json in {prev_dir}, skipping round in history", flush=True)
@@ -899,7 +885,6 @@ async def run_parallel_round(
             if v is not None:
                 judgment_map[v] = j
 
-        # Load transcripts for this round
         transcripts_dir = prev_dir / "transcripts"
         if not transcripts_dir.is_dir():
             continue
@@ -1081,13 +1066,11 @@ async def run_parallel_round(
 
         sorted_vars = sorted(history_by_var.items())  # [(var_num, history), ...]
 
-        # Build all prompts upfront
         prompts_list = []
         for var_num, history in sorted_vars:
             system, user = build_refine_prompt(cfg.behavior_name, history, prompts_yaml)
             prompts_list.append((var_num, history, system, user))
 
-        # Process in chunks
         for chunk_start in range(0, len(prompts_list), batch_size):
             chunk = prompts_list[chunk_start:chunk_start + batch_size]
             messages_list = [
@@ -1260,7 +1243,6 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     print(f"Output: {output_dir}", flush=True)
     print("=" * 60, flush=True)
 
-    # Load prompt templates
     prompts_yaml = load_prompts(cfg)
 
     # Save cfg (jail system_prompt/prefill resolved from the behaviour file so cfg.json

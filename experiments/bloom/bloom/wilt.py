@@ -229,10 +229,9 @@ def _tokbias_vector(mt, tok, device):
             _samples = 1
 
         def _last_logprobs(text):
-            """Mean next-token log-prob over _steps rolled-forward positions x _samples sampled
-            continuations. A single position-0 pass (steps=1, samples=1 — the default) is one
-            noisy sample of one position; averaging gives a steadier estimate of the vocabulary
-            the prompt actually implies."""
+            """Mean next-token log-prob over _steps rolled-forward positions x _samples
+            continuations; averaging steadies the estimate (default steps=1, samples=1 = one
+            noisy position)."""
             ids0 = tok(text, return_tensors="pt").input_ids.to(device)
             acc, n = None, 0
             for _ in range(_samples):
@@ -395,16 +394,12 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
 def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                       target_msgs_batch: List[List[Dict]], max_tokens: int,
                       temperature: float, no_think_target: bool) -> List[Dict]:
-    """[jail engine=hf_full] Exact full-vocab PoE jail sampling (n=1) — the HF
-    analogue of batch_generate_contrastive_local. Target+jail are HF models in
-    this process (reuses the corruption hf_full helpers). Jail prefix = jail
-    system prompt + closed <think> + prefill (no baseline answer); target prefix
-    = the natural chat template. Returns one dict per scenario:
-    {"best_text","best_ids","best_token_probs"} — the on-policy (unmodified-target,
-    temp=1) per-token probs are captured DURING the jail decode (return_token_lps),
-    so the run reports token stats with NO separate scoring pass, exactly like the
-    corruption target_only path. (The jail SAMPLES from z=target+beta*jail, but the
-    stored probs are of the UNMODIFIED target — the plausibility metric we report.)"""
+    """[jail engine=hf_full] n=1 full-vocab PoE jail sampling (HF analogue of
+    batch_generate_contrastive_local; target+jail both HF here). Returns one
+    {"best_text","best_ids","best_token_probs"} per scenario. GOTCHA: SAMPLES from
+    z=target+beta*jail, but best_token_probs are the on-policy UNMODIFIED-target (temp=1)
+    probs captured during the decode (return_token_lps), no separate scoring pass — that is
+    the plausibility metric we report."""
     mt, mc, tok, tok_c, device = hf["mt"], hf["mc"], hf["tok"], hf["tok_c"], hf["device"]
     pad_id, eos_id = hf["pad_id"], hf["eos_id"]
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
@@ -615,7 +610,6 @@ def _contrastive_sample_extensions(
         skip_special_tokens=False,
         ignore_eos=ignore_eos,
     )
-    # Don't restrict jail's allowed_token_ids — we want its distribution honest.
 
     for step in range(max_tokens):
         active = [i for i, d in enumerate(done) if not d]

@@ -331,8 +331,7 @@ def _beast_single_trial_local(
 
     prefix_length = len(prefix_tokens)
 
-    # All beams start as identical copies of the prefix. The first iteration's branch
-    # phase will produce num_beams * candidates_per_beam unique extensions.
+    # All beams start as identical copies of the prefix; iter-1 branch diverges them.
     beam: List[List[int]] = [list(prefix_tokens) for _ in range(num_beams)]
     pool_seqs: List[List[int]] = []
     pool_scores: List[float] = []
@@ -351,11 +350,7 @@ def _beast_single_trial_local(
                     beam[i] = beam[i] + cand_list[0]
 
         # ── Phase 2: Branch — sample candidates_per_beam extensions per beam ──
-        # eval_beam_chunk_size=None → one batched call (all beams together, default for
-        # normal BEAST where n is small). Set to 1 when candidates_per_beam is large:
-        # after iter 1 beams diverge so vLLM can't share KV pages, and a batched call
-        # across all beams allocates fully separate KV caches per sequence → OOM.
-        # Chunking keeps peak memory at (chunk * candidates_per_beam).
+        # chunk bounds peak KV memory once beams diverge (see docstring); None = one batched call.
         chunk = eval_beam_chunk_size or len(beam)
         extensions: List[List[List[int]]] = []
         for start in range(0, len(beam), chunk):
@@ -374,8 +369,7 @@ def _beast_single_trial_local(
                 candidates.append(beam_seq + ext)
 
         # ── Phase 3: Score all candidates via the caller-provided scorer ──────
-        # Signature: (candidates, prefix_length) -> scores. Caller decides the
-        # reward signal (input_search: log P(TRS | ...); output_search: log P("Yes" | ...)).
+        # scorer_fn supplies the reward signal (see docstring).
         scores = scorer_fn(candidates, prefix_length)
 
         # ── Phase 4: Select num_beams; truncate to kept_candidate_length ────
@@ -549,8 +543,7 @@ def input_search_evaluator_message(
         suffix_ids  = _strip_eos_tail(seq[prefix_length:], eos_token_id)
         suffix_text = lm_eval.tokenizer.decode(suffix_ids, skip_special_tokens=False)
         full_text   = baseline_prefix + suffix_text
-        # Extract clean message body — strips <strategy>, picks <message> contents,
-        # cuts at </message> or <targeted_response_start>. Falls back to full_text.
+        # _extract_message_tags → clean body (see helper); falls back to full_text.
         extracted_msg, _, _ = _extract_message_tags(full_text)
         msg_text    = extracted_msg if extracted_msg else full_text
         # Viewer baseline/suffix highlight: derive the carried-over body using the

@@ -638,7 +638,6 @@ class ConversationOrchestrator:
             include_trs=include_trs,
         )
 
-        # Stash the rollout prompt — run() will merge it into the first user message.
         orchestrator.pending_rollout_prompt = conversation_rollout_prompt
 
         return orchestrator
@@ -839,10 +838,8 @@ async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     is local — that path owns corruption / token-level search and (via ApiModel) also supports
     a hosted-API evaluator. The pure-async orchestrator below is used only when the target
     itself is a hosted API model (no corruption)."""
-    # The batched-local path requires a LOCAL target (corruption/search operate on the
-    # target's logits). The evaluator may be local OR a hosted API model (ApiModel routes its
-    # turn-sampling through litellm in batch_generate_local). So key the dispatch on the
-    # TARGET, not the evaluator.
+    # Dispatch on the TARGET (not evaluator): corruption/search need the target's logits.
+    # The evaluator may still be a hosted API model via ApiModel.
     if cfg.rollout.target.startswith("local/"):
         return run_rollout_batched_local(
             cfg, prompts_yaml, output_dir,
@@ -1203,7 +1200,6 @@ def run_rollout_batched_local(
     if n_skipped:
         print(f"  Resume: {n_skipped}/{len(variations)} variations already have transcripts — skipping", flush=True)
     print(f"  Setup-generation pass disabled — using fixed target_system_prompt from config", flush=True)
-    # setup_content is unused but kept for back-compat with transcript metadata schema.
     setup_contents: List[str] = [""] * len(variations)
 
     def _resume_load_variation(var_idx: int, var_desc: str) -> None:
@@ -1700,9 +1696,7 @@ def run_rollout_batched_local(
                     "evaluator_model": evaluator_model_id,
                     "target_model":    target_model_id,
                     "target_system_prompt": target_sysprompt,
-                    # setup_content is the evaluator's internal "designed system prompt"
-                    # output. Saved so round 2+ can reuse identical setup context for the
-                    # eval (keeping target sysprompt & scenario truly fixed across rounds).
+                    # setup_content: retained (always "") for transcript-schema back-compat; setup pass removed.
                     "setup_content":      setup_content,
                     "refined_strategy":   variation.get("refined_strategy", "") if isinstance(variation, dict) else "",
                     "variation_number":  var_idx,

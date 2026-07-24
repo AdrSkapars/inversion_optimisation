@@ -1,8 +1,5 @@
-"""
-bloom_corrupt.py - Single-file recreation of the BLOOM behavioral evaluation framework.
-
-Usage: Edit the cfg dict at the bottom and run `python bloom_corrupt.py`.
-Requires: pip install litellm pyyaml
+"""core.py — core primitives for the BLOOM behavioural-elicitation pipeline:
+model adapters, local vLLM workers, prompt builders, and scoring.
 
 Original BLOOM: https://github.com/anthropics/bloom
 """
@@ -280,7 +277,6 @@ def litellm_chat(
     **kwargs,
 ):
     """Simplified LiteLLM chat completion call with retries."""
-    # Dispatch to local model if model_id starts with "local/"
     if model_id.startswith("local/"):
         hf_name = model_id[len("local/"):]
         all_messages = []
@@ -301,13 +297,11 @@ def litellm_chat(
 
     litellm.modify_params = True
 
-    # Build messages list with system prompt
     chat_messages = []
     if system_prompt:
         chat_messages.append({"role": "system", "content": system_prompt})
     chat_messages.extend(messages)
 
-    # Calculate thinking budget
     thinking_budget_tokens = THINKING_BUDGETS.get(reasoning_effort, 0)
 
     if thinking_budget_tokens and thinking_budget_tokens >= max_tokens:
