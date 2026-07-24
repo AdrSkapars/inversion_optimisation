@@ -85,11 +85,11 @@ def _best_of_pool(rows, xkey):
 
 
 def _band_pick(curves_by_beta, xkey, anchor, band):
-    """Highest-elic point across all betas' curves with plaus in [anchor-band, anchor+band].
+    """Highest-elic point across all betas' curves with plaus >= anchor-band (one-sided FLOOR; more plausible than BoN is allowed).
     Returns {beta, score, plaus, runner_up, margin} or None if the band is empty."""
     per_beta_best = {}
     for beta, cv in curves_by_beta.items():
-        inb = [(p, e) for (p, e) in cv[xkey] if anchor - band <= p <= anchor + band]
+        inb = [(p, e) for (p, e) in cv[xkey] if p >= anchor - band]
         if inb:
             p, e = max(inb, key=lambda t: t[1])
             per_beta_best[beta] = (e, p)
@@ -222,7 +222,7 @@ def main():
         beta = round(beta + a.increment, 10)
 
     # ---- picks (both metrics, both bands) ----
-    picks = {"primary_metric": "arith"}
+    picks = {"primary_metric": "arith", "band_rule": "one_sided_floor"}
     for m in ("arith", "geo"):
         aval = anchor[m]
         picks[m] = {"pm3": _band_pick(curves, m, aval, 3.0),
