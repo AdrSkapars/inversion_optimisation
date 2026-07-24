@@ -189,14 +189,7 @@ cfg = DotDict({
         "target_floor": 1e-4,                     # naturalness floor ON by default: mask tokens with target prob < floor before sampling the tilt (argmax(target) fallback). 0 = off (no-floor ablation only).
         "b1": 1,                                  # target-term weight in z = b1*target + b2*jail - b3*neg (default 1). 0 = floor-only jail (drop the target term). None also accepted (legacy code path; numerically identical to 1). The cfg.tokbias_output baseline works at any b1.
         "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when enabled=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
-        "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off. Ablation: W2S logit-difference vs a neutral prompt.
-        "spp": 1,                                 # jail samples per scenario; >1 pools then selects (inert at spp=1). Post-hoc round selection is separate (analysis time).
-        "selection": "target_pick",               # within-scenario pick when spp>1: target_pick (max target-prob) | filter_target (drop repetitive d3<tau, then max target-prob)
-        "filter_tau": 0.8,                        # d3 (distinct-3-gram) threshold for selection="filter_target"
-        "neg_system_prompt": "",                  # negative-steering persona system prompt ("" = off)
-        "neg_user_prompt": "",                    # elicited-refusal user turn for the negative branch ("" = off)
-        "neg_prefill": "",                        # prefill on the negative branch ("" = off)
-        "nprompts": 0,                            # >0 caps the jail system-prompt set to the first N (promptset ablation); 0 = use all. Override with BLOOM_JAIL_NPROMPTS.
+        "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off. Ablation: W2S logit-difference vs a neutral prompt. When b3>0, the neg prompts load from the behaviour yaml (jailbroken_output_neg_system_prompt / _neg_user_prompt / _neg_prefill), or a BLOOM_JAIL_NEG preset.
     },
     "tokbias_output": {                           # static logit-bias baseline (z = target + lambda*bias over the whole vocab) — a separate elicitation method from jail. Each field overridable via BLOOM_TOKBIAS_*.
         "enabled": False,                         #   on/off: when False the bias vector is never computed (short-circuits before any prompt eval). Override with BLOOM_TOKBIAS_ENABLED.
@@ -297,12 +290,6 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+b2*jail
         if os.environ.get("BLOOM_JAIL_FLOOR"):
             cfg["jailbroken_output"]["target_floor"] = float(os.environ["BLOOM_JAIL_FLOOR"])  # mask jail samples to tokens with target prob >= floor
-        if os.environ.get("BLOOM_JAIL_SPP"):
-            cfg["jailbroken_output"]["spp"] = int(os.environ["BLOOM_JAIL_SPP"])               # s10 jail: 10 samples/scenario then select
-        if os.environ.get("BLOOM_JAIL_SELECTION"):
-            cfg["jailbroken_output"]["selection"] = os.environ["BLOOM_JAIL_SELECTION"]        # filter_target = drop repetitive (d3>=tau) then max target-prob
-        if os.environ.get("BLOOM_JAIL_FILTER_TAU"):
-            cfg["jailbroken_output"]["filter_tau"] = float(os.environ["BLOOM_JAIL_FILTER_TAU"])
         # NEGATIVE STEERING for jail: z = target + beta*jail - b3*neg, where neg is the jail expert
         # prompted with a negative persona + the SAME input (a continuation, NOT a rewrite).
         # BLOOM_JAIL_NEG selects the persona: 'rc'/'refusal' (cancel the refusal direction) or

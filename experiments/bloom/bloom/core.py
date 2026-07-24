@@ -261,7 +261,6 @@ def _cfg_for_dump(cfg: Dict, prompts_yaml: Dict) -> Dict:
     if isinstance(jc, dict) and jc.get("enabled"):
         jc = dict(jc)
         jc["system_prompt"] = prompts_yaml.get("jailbroken_output_system_prompt", "")
-        jc["system_prompts"] = prompts_yaml.get("jailbroken_output_system_prompts", []) or []
         jc["prefill"] = (prompts_yaml.get("jailbroken_output_prefill", "") or "") if jc.get("prefill", True) else ""
         d["jailbroken_output"] = jc
     # Record the BLOOM_* env the run actually saw, so cfg.json is self-describing even for knobs

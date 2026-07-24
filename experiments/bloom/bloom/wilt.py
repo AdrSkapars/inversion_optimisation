@@ -407,9 +407,6 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     beta       = float(jail_runtime_cfg.get("b2", 2.0))
     jail_b1    = jail_runtime_cfg.get("b1")                          # None => legacy z=target+beta*jail; set (e.g. 0) => z=b1*target+beta*jail, floor-masked (floor-only jail = b1=0, beta=1, floor>0)
     jail_floor = float(jail_runtime_cfg.get("target_floor", 0.0) or 0.0)
-    jail_spp   = max(1, int(jail_runtime_cfg.get("spp", 1)))         # samples per scenario (s10 = 10); >1 pools then selects
-    jail_sel   = str(jail_runtime_cfg.get("selection", "target_pick"))  # filter_target = drop repetitive (d3>=tau) then max target-prob; target_pick = max target-prob
-    jail_tau   = float(jail_runtime_cfg.get("filter_tau", 0.8))
     # ---- BoN / vanilla baseline (beta=0 WILT): plain target sampling, NO jail model, NO floor. ----
     # The vanilla reference is the unmodified target sampled once; on-policy token probs are captured
     # DURING the decode (return_token_lps) so token stats are free. No PoE / second distribution runs,
@@ -481,23 +478,6 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             if jail_neg_pf:
                 ns += jail_neg_pf
             n_prefs.append(tok_c.encode(ns, add_special_tokens=False))
-    sys_prompts = jail_runtime_cfg.get("system_prompts", []) or []
-    _np_env = int(os.environ.get("BLOOM_JAIL_NPROMPTS", jail_runtime_cfg.get("nprompts", 0)) or 0)
-    if _np_env > 0: sys_prompts = sys_prompts[:_np_env]
-    _use_promptset = bool(sys_prompts) and not neg_on
-    j_prefs_list = None
-    if _use_promptset:
-        def _build_jprefs(_sp):
-            _out = []
-            for tm in target_msgs_batch:
-                conv = [m for m in tm if m.get("role") != "system"]
-                j_msgs = ([{"role": "system", "content": _sp}] + conv) if _sp else conv
-                js = tok_c.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
-                if prefill:
-                    js += prefill
-                _out.append(tok_c.encode(js, add_special_tokens=False))
-            return _out
-        j_prefs_list = [_build_jprefs(_sp) for _sp in sys_prompts]
     def _gen_once(_jp):
         # z = b1*target + b2*jail - b3*neg (b1=None => target weight 1). The negative-steering pass
         # (n_prefs) runs only when neg_on (b3 != 0); tokbias adds a static vocab tilt when configured.
@@ -509,38 +489,15 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                                 return_token_lps=True,
                                 tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
 
-    import collections as _coll
-    def _d3(txt):
-        w = txt.split()
-        if len(w) < 3: return 1.0
-        g = [tuple(w[i:i+3]) for i in range(len(w) - 2)]
-        return len(_coll.Counter(g)) / len(g)
-    # pool jail_spp samples per scenario, then select (s10 = spp 10 + filter_target: drop
-    # repetitive d3<tau, keep most target-probable). spp=1 -> single sample (legacy behaviour).
-    B = len(t_prefs)
-    pools: List[List[Dict]] = [[] for _ in range(B)]
-    _sources = j_prefs_list if j_prefs_list else [j_prefs for _ in range(jail_spp)]
-    for _jp in _sources:
-        gen, tlps = _gen_once(_jp)
-        for bi, (g, lps) in enumerate(zip(gen, tlps)):
-            ids = [x for x in g if x != eos_id]
-            txt = tok.decode(ids, skip_special_tokens=True).strip()
-            mlp = (sum(lps) / len(lps)) if lps else None   # mean on-policy target logprob (plausibility)
-            pools[bi].append({"ids": ids, "txt": txt, "lps": lps, "mlp": mlp, "d3": _d3(txt)})
+    # One jail sample per scenario: a single PoE decode over the batch. On-policy
+    # (unmodified-target, temp=1) token probs are captured inline during the decode.
+    gen, tlps = _gen_once(j_prefs)
     out: List[Dict] = []
-    _mlp = lambda c: (c["mlp"] if c["mlp"] is not None else -1e9)
-    for pool in pools:
-        if not pool:
-            out.append({"best_text": "", "best_ids": None, "best_token_probs": []}); continue
-        if jail_sel == "filter_target":
-            surv = [c for c in pool if c["d3"] >= jail_tau]
-            best = max(surv, key=_mlp) if surv else max(pool, key=lambda c: c["d3"])
-        elif jail_sel == "target_pick":
-            best = max(pool, key=_mlp)
-        else:
-            best = pool[0]
-        tprobs = [math.exp(l) * 100 for l in best["lps"]]   # on-policy (unmodified-target, temp=1) token probs (%)
-        out.append({"best_text": best["txt"], "best_ids": best["ids"], "best_token_probs": tprobs})
+    for g, lps in zip(gen, tlps):
+        ids = [x for x in g if x != eos_id]
+        txt = tok.decode(ids, skip_special_tokens=True).strip()
+        tprobs = [math.exp(l) * 100 for l in lps]           # on-policy token probs (%)
+        out.append({"best_text": txt, "best_ids": ids, "best_token_probs": tprobs})
     return out
 
 

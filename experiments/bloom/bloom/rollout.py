@@ -1076,20 +1076,16 @@ def run_rollout_batched_local(
             "output_search_loss": jail_use_out_loss,
             "input_search_loss":  jail_use_in_loss,
             "system_prompt": jail_system_prompt,
-            "system_prompts": prompts_yaml.get("jailbroken_output_system_prompts", []) or [],
             "prefill":     (prompts_yaml.get("jailbroken_output_prefill", "") or "") if jail_cfg.get("prefill", True) else "",  # True -> behaviour-file prefill; False -> none
             "b2":          float(jail_cfg.get("b2", 2.0)),
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
             "target_floor": float(jail_cfg.get("target_floor", 1e-4)),  # naturalness floor ON by default (0 only via explicit no-floor ablation)
-            "spp":          int(jail_cfg.get("spp", 1)),                    # samples per scenario (s10=10)
-            "selection":    str(jail_cfg.get("selection", "target_pick")),  # filter_target=drop repetitive then max target-prob
-            "filter_tau":   float(jail_cfg.get("filter_tau", 0.8)),
             "b3":              float(jail_cfg.get("b3", 0.0) or 0.0),          # negative-steering weight; 0=off (legacy jail)
-            "neg_system_prompt": jail_cfg.get("neg_system_prompt", "") or "", # input-conditioned negative persona (rc/neutral)
-            "neg_user_prompt":   jail_cfg.get("neg_user_prompt", "") or "",   # harmful user turn -> ELICITED refusal direction
-            "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
+            # neg prompts load from the behaviour yaml; a BLOOM_JAIL_NEG env preset (injected into jail_cfg) overrides.
+            "neg_system_prompt": (jail_cfg.get("neg_system_prompt") or prompts_yaml.get("jailbroken_output_neg_system_prompt", "") or ""), # input-conditioned negative persona
+            "neg_user_prompt":   (jail_cfg.get("neg_user_prompt")   or prompts_yaml.get("jailbroken_output_neg_user_prompt", "")   or ""), # harmful user turn -> ELICITED refusal direction
+            "neg_prefill":       (jail_cfg.get("neg_prefill")       or prompts_yaml.get("jailbroken_output_neg_prefill", "")       or ""),
             "top_k_logprobs": (int(jail_cfg["top_k_logprobs"]) if jail_cfg.get("top_k_logprobs") is not None else None),  # vllm_topk only; None on the default hf_full path
-            "nprompts":     int(jail_cfg.get("nprompts", 0) or 0),      # promptset cap (0 = all); BLOOM_JAIL_NPROMPTS overrides
             "tokbias":      dict(cfg.get("tokbias_output", {}) or {}),  # static logit-bias baseline params (top-level cfg.tokbias_output); BLOOM_TOKBIAS_* override
         }
         if jail_vllm:
