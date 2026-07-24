@@ -759,8 +759,8 @@ async def run_single_rollout(
                 target_kickoff_prefix=target_kickoff_prefix,
                 generate_kickoff_additional=generate_kickoff_additional,
                 target_before_input=cfg.rollout.get("target_before_input", False),
-                between_turns_strategise=cfg.refinement.get("between_turns_strategise", True),
-                include_trs=bool((cfg.get("input_search", {}) or {}).get("enabled", False)),
+                between_turns_strategise=cfg.refinement_input.get("between_turns_strategise", True),
+                include_trs=bool((cfg.get("search_input", {}) or {}).get("enabled", False)),
             ),
         )
 
@@ -796,7 +796,7 @@ async def run_refinement(
     """Refine a single scenario using the full history of previous rounds."""
     system, user = build_refine_prompt(cfg.behavior_name, round_history, prompts_yaml)
 
-    refine_cfg = cfg.get("refinement", {}) or {}
+    refine_cfg = cfg.get("refinement_input", {}) or {}
     model_id = refine_cfg.get("model") or cfg.judgment.get("model")
     max_tokens = refine_cfg.get("max_tokens", cfg.judgment.get("max_tokens", 4000))
     reasoning_effort = _effort(refine_cfg.get("thinking", False))
@@ -960,8 +960,8 @@ def run_rollout_batched_local(
     #   - `output_search.jail_search_loss` AND output_search.enabled (BoN reward signal)
     #   - `input_search.jail_search_loss`  AND input_search.enabled  (TRS reward signal for BEAST)
     jail_cfg = cfg.get("jailbroken_output", {}) or {}
-    output_cfg_peek = cfg.get("output_search", {}) or {}
-    input_cfg_peek  = cfg.get("input_search", {}) or {}
+    output_cfg_peek = cfg.get("search_output", {}) or {}
+    input_cfg_peek  = cfg.get("search_input", {}) or {}
     jail_use_rollout = bool(jail_cfg.get("enabled", False))
     jail_use_out_loss = bool(output_cfg_peek.get("jail_search_loss", False)) and bool(output_cfg_peek.get("enabled", False))
     jail_use_in_loss  = bool(input_cfg_peek.get("jail_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
@@ -992,8 +992,8 @@ def run_rollout_batched_local(
     # machinery below. The input/output/jail search baselines still need the vLLM target worker, so
     # they keep it. Opt back into a vLLM target with BLOOM_TARGET_ENGINE=vllm.
     _no_search_jail = not (jail_on
-                           or bool((cfg.get("input_search", {})  or {}).get("enabled", False))
-                           or bool((cfg.get("output_search", {}) or {}).get("enabled", False)))
+                           or bool((cfg.get("search_input", {})  or {}).get("enabled", False))
+                           or bool((cfg.get("search_output", {}) or {}).get("enabled", False)))
     _force_hf_target = os.environ.get("BLOOM_TARGET_ENGINE", cfg.rollout.get("target_engine", "hf")).lower() != "vllm"
     if _no_search_jail and _force_hf_target:
         # Vanilla/BoN baseline (beta=0 WILT): route through the jail hf_full path in target_only
@@ -1022,8 +1022,8 @@ def run_rollout_batched_local(
     eval_is_local = evaluator_model_id.startswith("local/")
     if not eval_is_local:
         _api_eval_conflicts = []
-        if bool((cfg.get("input_search", {})  or {}).get("enabled", False)): _api_eval_conflicts.append("input_search")
-        if bool((cfg.get("output_search", {}) or {}).get("enabled", False)): _api_eval_conflicts.append("output_search")
+        if bool((cfg.get("search_input", {})  or {}).get("enabled", False)): _api_eval_conflicts.append("input_search")
+        if bool((cfg.get("search_output", {}) or {}).get("enabled", False)): _api_eval_conflicts.append("output_search")
         if _api_eval_conflicts:
             raise RuntimeError(
                 f"rollout.model={evaluator_model_id!r} is a hosted API model (non-'local/'). It can only "
@@ -1107,14 +1107,14 @@ def run_rollout_batched_local(
         print(f"  [jailbroken_output] engine={jail_engine} loaded {jail_model_id} on GPU {target_gpu_id} "
               f"(b2={jail_runtime_cfg['b2']})", flush=True)
 
-    search_cfg = cfg.input_search
+    search_cfg = cfg.search_input
     suffixes_per_scenario = search_cfg.suffixes_per_scenario
 
 
     # Output search (optional): regenerate target responses to maximise
     # log P("Yes") on a behavior-presence judge prompt. When disabled, the natural
     # target response is used as-is.
-    output_cfg       = cfg.output_search
+    output_cfg       = cfg.search_output
     output_search_on = output_cfg.enabled
     output_judge_template = ""
     output_behavior_name  = ""
@@ -1139,9 +1139,9 @@ def run_rollout_batched_local(
     target_kickoff_prefix    = _get_override(prompts_yaml, "target_kickoff_prefix")
     generate_kickoff_additional = _get_override(prompts_yaml, "generate_kickoff_additional")
 
-    between_turns_strategise = cfg.refinement.get("between_turns_strategise", True)
+    between_turns_strategise = cfg.refinement_input.get("between_turns_strategise", True)
     target_before_input      = cfg.rollout.get("target_before_input", False)
-    history_turns = cfg.refinement.get("history_turns", None)  # None = full history
+    history_turns = cfg.refinement_input.get("history_turns", None)  # None = full history
     input_search_on = bool(search_cfg.enabled)  # only ask the eval for a TRS when input_search will use it
     # Batched-jail eligibility: the clean jail hf_full case (no per-variation token
     # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-

@@ -863,7 +863,7 @@ async def run_parallel_round(
     history_by_var: Dict[int, List[Dict]] = {}
 
     # Limit how many past rounds to include (0 = no history shown at all)
-    max_history = cfg.get("refinement", {}).get("history_rounds", None)  # None means include all
+    max_history = cfg.get("refinement_input", {}).get("history_rounds", None)  # None means include all
     dirs_to_use = (
         all_prev_round_dirs[-max_history:] if (max_history is not None and max_history > 0)
         else ([] if max_history == 0 else all_prev_round_dirs)
@@ -944,7 +944,7 @@ async def run_parallel_round(
             print(f"  No transcript history found in previous rounds", flush=True)
             return None
 
-    refine_cfg = cfg.get("refinement", {}) or {}
+    refine_cfg = cfg.get("refinement_input", {}) or {}
     between_rounds_strategise = refine_cfg.get("between_rounds_strategise", True)
     if refine_cfg.get("num_rounds", 1) <= 1:
         between_rounds_strategise = False  # no subsequent rounds to strategise for
