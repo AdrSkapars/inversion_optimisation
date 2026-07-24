@@ -1056,10 +1056,12 @@ def run_rollout_batched_local(
     lm_jail = None
     jail_runtime_cfg: Optional[Dict] = None
     if jail_on:
-        jail_model_id = jail_cfg.get("model", "")
+        jail_model_id = (jail_cfg.get("model", "") or "").strip()
+        if jail_model_id in ("", "self", "local/self"):
+            jail_model_id = target_model_id      # self-jail: proposal model = the target model
         if not jail_model_id.startswith("local/"):
             raise RuntimeError(
-                f"jailbroken_output.model must start with 'local/', got {jail_model_id!r}"
+                f"jailbroken_output.model must start with 'local/' (or be 'self'/'' for self-jail), got {jail_model_id!r}"
             )
         jail_system_prompt = prompts_yaml.get("jailbroken_output_system_prompt", "")
         if not jail_system_prompt and not bool(jail_cfg.get("target_only")):

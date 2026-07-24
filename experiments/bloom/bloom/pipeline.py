@@ -1228,8 +1228,10 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     # Second model for the no-think wrappers: the jail proposal when jail is actually enabled,
     # else the target itself (BoN/vanilla mirrors the target, so same wrapper).
     _juse = bool((cfg.get("jailbroken_output", {}) or {}).get("enabled", False))
-    _second_name = ((cfg.get("jailbroken_output", {}) or {}).get("model") if _juse
-                    else cfg.rollout.get("target"))
+    _jmodel = ((cfg.get("jailbroken_output", {}) or {}).get("model", "") or "").strip()
+    if _jmodel in ("", "self", "local/self"):
+        _jmodel = cfg.rollout.get("target")      # self-jail: proposal mirrors the target
+    _second_name = _jmodel if _juse else cfg.rollout.get("target")
     _set_think_prefixes(cfg.rollout.get("target"), _second_name)
 
     # Resolve output directory

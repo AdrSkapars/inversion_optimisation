@@ -183,7 +183,7 @@ cfg = DotDict({
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
-        "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
+        "model": "self",                          # jail/proposal model. "self" (or "") = self-jail = the target model (default). Set local/<hf-name> for a distinct proposal (e.g. an abliterated variant). Override with BLOOM_JAIL_MODEL.
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
         "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when enabled=True
         "target_floor": 1e-4,                     # naturalness floor ON by default: mask tokens with target prob < floor before sampling the tilt (argmax(target) fallback). 0 = off (no-floor ablation only).
