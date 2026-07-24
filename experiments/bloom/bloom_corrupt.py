@@ -79,7 +79,7 @@ cfg = DotDict({
     "kickoff_bank": None,                    # dir of per-round reusable evaluator kickoffs (set via BLOOM_KICKOFF_BANK). None = generate fresh kickoffs each round. Reused across beta sweeps for the same auditor + behaviour.
 
     "temperature": 1.0,                      # sampling temperature for all LLM calls (evaluator, target, judge)
-    "seed": 42,                              # base RNG seed; rollout/judgment use seed+round_num so rounds are reproducible but distinct. None = no seeding (truly random)
+    "seed": 100,                             # base RNG seed; round R samples with seed+R (reproducible but distinct per round). Convention via BLOOM_SEED: sweep/param-selection = 1 (rounds 2..6, in-sample); FINAL experiments = 100 (rounds 101..105, out-of-sample). This standalone default = the final-experiment seed. None = no seeding.
     "max_concurrent": 10,                    # max simultaneous API requests in flight (API path only)
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
     "target_batch_size": 25,                 # target-model batch for input-search candidate scoring; defaults to batch_size if omitted. Target is much smaller so can usually go higher (up to num_beams*candidates_per_beam = 25)
