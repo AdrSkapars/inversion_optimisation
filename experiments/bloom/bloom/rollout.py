@@ -759,7 +759,7 @@ async def run_single_rollout(
                 target_kickoff_prefix=target_kickoff_prefix,
                 generate_kickoff_additional=generate_kickoff_additional,
                 target_before_input=cfg.rollout.get("target_before_input", False),
-                between_turns_strategise=cfg.rollout.get("between_turns_strategise", True),
+                between_turns_strategise=cfg.refinement.get("between_turns_strategise", True),
                 include_trs=bool((cfg.get("input_search", {}) or {}).get("enabled", False)),
             ),
         )
@@ -1139,9 +1139,9 @@ def run_rollout_batched_local(
     target_kickoff_prefix    = _get_override(prompts_yaml, "target_kickoff_prefix")
     generate_kickoff_additional = _get_override(prompts_yaml, "generate_kickoff_additional")
 
-    between_turns_strategise = cfg.rollout.get("between_turns_strategise", True)
+    between_turns_strategise = cfg.refinement.get("between_turns_strategise", True)
     target_before_input      = cfg.rollout.get("target_before_input", False)
-    history_turns = cfg.rollout.get("history_turns", None)  # None = full history
+    history_turns = cfg.refinement.get("history_turns", None)  # None = full history
     input_search_on = bool(search_cfg.enabled)  # only ask the eval for a TRS when input_search will use it
     # Batched-jail eligibility: the clean jail hf_full case (no per-variation token
     # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-

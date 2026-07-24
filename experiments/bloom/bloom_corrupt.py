@@ -112,9 +112,7 @@ cfg = DotDict({
         "evaluator_thinking": True,          # True = evaluator reasoning enabled; False = no thinking
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
-        "between_turns_strategise": False,   # True = evaluator outputs <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
-        "history_turns": None,                  # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
         "target_engine": "hf",                  # target decode engine for the WILT/BoN path: "hf" (exact full-vocab PoE) or "vllm" (vllm_topk). Override with BLOOM_TARGET_ENGINE.
     },
     "judgment": {
@@ -132,7 +130,9 @@ cfg = DotDict({
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_rounds": 5,                     # total rounds; round 1 = full pipeline, rounds 2+ = rollout + judge (fresh resamples). WILT default = 5 (set via BLOOM_NUM_ROUNDS).
         "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
+        "history_turns": None,               # within a rollout: evaluator's view of the conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
         "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
+        "between_turns_strategise": False,   # within a rollout: True = evaluator outputs a <strategy> block before each turn 2+ message (round-1 turn-1 never has one)
         "skip_finished": False,              # rounds 2+: scenarios already at finish_score skip the rollout; their freed budget is redistributed as extra reps on the unfinished scenarios (option B). Stops early once all scenarios reach finish_score. OFF for the floor-anneal curve (resample ALL scenarios every round to get per-iteration elicitation/P_t).
         "finish_score": 10,                  # behavior_presence (0-10) at/above which a scenario counts as finished
         "resample_budget": 25,               # total reps to spread across unfinished scenarios each round (~batch size); reps_per_scenario = budget // n_unfinished
