@@ -277,10 +277,10 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
     return lam, vec
 
 
-def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
+def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
                      pad_id, eos_id, device,
                      target_floor: float = 0.0,
-                     n_prefs: Optional[List[List[int]]] = None, cfg_gamma: float = 0.0,
+                     n_prefs: Optional[List[List[int]]] = None,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
                      poe_b3: Optional[float] = None, return_target_lp: bool = False,
                      return_token_lps: bool = False, tokbias=None):
@@ -309,20 +309,12 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, beta, temperature, max_new,
         taf, caf = ta, ca
         # Sampling logit is a linear combination of the three distributions:
         #     z = eb1*t + eb2*c - eb3*n
-        # where c = corruptor on the offensive rewrite prompt, n = corruptor on the NEUTRAL
-        # rewrite prompt (CFG). Coefficients come either explicitly (poe_b1/b2/b3 — the
-        # b1/b2/b3 parameterization) or, for legacy callers (e.g. jail rollout), are derived
-        # from beta/cfg_gamma:  eb1=1, eb2=beta*(1+gamma), eb3=beta*gamma
-        # (so plain PoE is eb3=0; CFG g=1 is eb2=2*beta, eb3=beta). The floor still masks on
-        # softmax(t). Neutral pass runs only when eb3!=0.
-        if poe_b2 is not None:
-            eb1 = float(poe_b1 if poe_b1 is not None else 0.0)
-            eb2 = float(poe_b2)
-            eb3 = float(poe_b3 if poe_b3 is not None else 0.0)
-        else:
-            eb1 = 1.0
-            eb2 = beta * (1.0 + cfg_gamma)
-            eb3 = beta * cfg_gamma
+        # eb1 = target weight (default 1), eb2 = jail/corruption weight (c = corruptor on the
+        # offensive prompt), eb3 = negative-steering weight (n = corruptor on the NEUTRAL prompt;
+        # 0 = off). The neutral pass runs only when eb3!=0; the floor masks on softmax(t).
+        eb1 = float(poe_b1 if poe_b1 is not None else 1.0)
+        eb2 = float(poe_b2 if poe_b2 is not None else 0.0)
+        eb3 = float(poe_b3 if poe_b3 is not None else 0.0)
         cfg_on = (eb3 != 0.0) and (n_prefs is not None)
         ncp = naf = nl = None
         if cfg_on:
@@ -500,23 +492,14 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             return _out
         j_prefs_list = [_build_jprefs(_sp) for _sp in sys_prompts]
     def _gen_once(_jp):
-        if neg_on:
-            # z = b1*target + beta*jail - b3*neg  (b1 defaults to 1; floor still masks on softmax(t))
-            _b1 = float(jail_b1) if jail_b1 is not None else 1.0
-            return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
-                                    pad_id, eos_id, device, target_floor=jail_floor,
-                                    n_prefs=n_prefs, poe_b1=_b1, poe_b2=beta, poe_b3=jail_b3,
-                                    return_token_lps=True)
-        if jail_b1 is not None:
-            # weighted / floor-only jail: z = b1*target + beta*jail, masked to target_floor (jail expert = c_prefs).
-            # tokbias passed here too so the logit-bias baseline is reachable at any b1 (b1=1 default gives the
-            # same z as the legacy b1=None path).
-            return _hf_poe_generate(mt, mc, t_prefs, _jp, 0.0, temperature, max_tokens,
-                                    pad_id, eos_id, device, target_floor=jail_floor,
-                                    poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True,
-                                    tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
-        return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
-                                pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True,
+        # z = b1*target + b2*jail - b3*neg (b1=None => target weight 1). The negative-steering pass
+        # (n_prefs) runs only when neg_on (b3 != 0); tokbias adds a static vocab tilt when configured.
+        _b1 = float(jail_b1) if jail_b1 is not None else 1.0
+        return _hf_poe_generate(mt, mc, t_prefs, _jp, temperature, max_tokens,
+                                pad_id, eos_id, device, target_floor=jail_floor,
+                                n_prefs=(n_prefs if neg_on else None),
+                                poe_b1=_b1, poe_b2=beta, poe_b3=(jail_b3 if neg_on else 0.0),
+                                return_token_lps=True,
                                 tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
 
     import collections as _coll

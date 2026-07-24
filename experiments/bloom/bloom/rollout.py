@@ -1001,7 +1001,7 @@ def run_rollout_batched_local(
         # jail path's free on-policy token-prob capture; the proposal model mirrors the target and
         # is never stepped.
         jail_cfg = {"model": target_model_id, "use_during_rollout": True, "engine": "hf_full",
-                    "beta": 0.0, "b1": 1.0, "target_floor": 0.0, "target_only": True}
+                    "b2": 0.0, "b1": 1.0, "target_floor": 0.0, "target_only": True}
         jail_use_rollout = True; jail_on = True; jail_engine = "hf_full"
         jail_vllm = False; jail_hf = True
 
@@ -1099,7 +1099,7 @@ def run_rollout_batched_local(
             jail_runtime_cfg["hf"] = _load_hf_poe_models(
                 target_model_id[len("local/"):], jail_model_id[len("local/"):], target_gpu_id)
         print(f"  [jailbroken_output] engine={jail_engine} loaded {jail_model_id} on GPU {target_gpu_id} "
-              f"(beta={jail_runtime_cfg['beta']})", flush=True)
+              f"(b2={jail_runtime_cfg['b2']})", flush=True)
 
     search_cfg = cfg.input_search
     suffixes_per_scenario = search_cfg.suffixes_per_scenario
