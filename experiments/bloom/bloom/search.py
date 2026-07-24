@@ -654,7 +654,7 @@ def output_search_target_response(
     )
     use_jail_scoring = (
         lm_jail is not None and jail_runtime_cfg is not None
-        and jail_runtime_cfg.get("output_search_loss", False)
+        and jail_runtime_cfg.get("jail_search_loss", False)
     )
 
     # Build jail's prefix once if we need it (sampling and/or scoring).

@@ -161,6 +161,7 @@ cfg = DotDict({
     },
     "output_search": {
         "enabled": False,                        # True = run output search on every target response
+        "jail_search_loss": False,               # use the jail model as the BoN reward signal (replaces judge log P("Yes")); needs jailbroken_output.model loaded. Only active when enabled=True.
         "behavior_name": "racial bias",          # what the judge asks about (independent from cfg.behavior_name so it can be set per experiment)
         "num_beams": 1,
         "candidates_per_beam": 25,               # 25 BoN candidates per target response
@@ -181,7 +182,6 @@ cfg = DotDict({
         "enabled":  False,                        # jail on/off: steer the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "var_batch": 12,                          # hf_full engine: cross-scenario batch size (slots per turn-generate) for the jail rollout. Override with BLOOM_JAIL_VAR_BATCH.
-        "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "self",                          # jail/proposal model. "self" (or "") = self-jail = the target model (default). Set local/<hf-name> for a distinct proposal (e.g. an abliterated variant). Override with BLOOM_JAIL_MODEL.
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
