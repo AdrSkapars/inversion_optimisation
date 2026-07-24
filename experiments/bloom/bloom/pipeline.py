@@ -1227,7 +1227,7 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     # Switching models therefore means changing only the cfg model name(s) — nothing else.
     # Second model for the no-think wrappers: the jail proposal when jail is actually enabled,
     # else the target itself (BoN/vanilla mirrors the target, so same wrapper).
-    _juse = bool((cfg.get("jailbroken_output", {}) or {}).get("use_during_rollout", False))
+    _juse = bool((cfg.get("jailbroken_output", {}) or {}).get("enabled", False))
     _second_name = ((cfg.get("jailbroken_output", {}) or {}).get("model") if _juse
                     else cfg.rollout.get("target"))
     _set_think_prefixes(cfg.rollout.get("target"), _second_name)

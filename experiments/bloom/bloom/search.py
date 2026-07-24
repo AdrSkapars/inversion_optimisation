@@ -650,7 +650,7 @@ def output_search_target_response(
 
     use_contrastive_sampling = (
         lm_jail is not None and jail_runtime_cfg is not None
-        and jail_runtime_cfg.get("use_during_rollout", False)
+        and jail_runtime_cfg.get("enabled", False)
     )
     use_jail_scoring = (
         lm_jail is not None and jail_runtime_cfg is not None

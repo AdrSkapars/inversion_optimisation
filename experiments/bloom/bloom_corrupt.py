@@ -179,16 +179,16 @@ cfg = DotDict({
         "latin_mask": False,                     # Target should speak naturally; leave off unless you have a specific reason
     },
     "jailbroken_output": {
-        "use_during_rollout":  False,             # use jail in the sampling step (contrastive PoE for target tokens)
+        "enabled":  False,                        # jail on/off: steer the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "local/huihui-ai/Huihui-Qwen3-4B-abliterated-v2",  # proposal model (abliterated/jailbroken)
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
-        "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when use_during_rollout=True
+        "top_k_logprobs": 1000,                   # K for top-K logprobs extracted from jail; only used when enabled=True
         "target_floor": 1e-4,                     # naturalness floor ON by default: mask tokens with target prob < floor before sampling the tilt (argmax(target) fallback). 0 = off (no-floor ablation only).
         "b1": 1,                                  # target-term weight in z = b1*target + b2*jail - b3*neg (default 1). 0 = floor-only jail (drop the target term). None also accepted (legacy code path; numerically identical to 1). The cfg.tokbias_output baseline works at any b1.
-        "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when use_during_rollout=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
+        "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when enabled=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
         "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off. Ablation: W2S logit-difference vs a neutral prompt.
         "spp": 1,                                 # jail samples per scenario; >1 pools then selects (inert at spp=1). Post-hoc round selection is separate (analysis time).
         "selection": "target_pick",               # within-scenario pick when spp>1: target_pick (max target-prob) | filter_target (drop repetitive d3<tau, then max target-prob)
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     # proposal model) instead of the corruption rewrite. Disables corruption (mutually exclusive).
     # Jail model must share the target's vocab (target itself = self-jail, or a same-family abliterated).
     if os.environ.get("BLOOM_JAIL_MODEL"):
-        cfg.setdefault("jailbroken_output", {})["use_during_rollout"] = True
+        cfg.setdefault("jailbroken_output", {})["enabled"] = True
         cfg["jailbroken_output"]["model"] = os.environ["BLOOM_JAIL_MODEL"]
         if os.environ.get("BLOOM_JAIL_BETA"):
             cfg["jailbroken_output"]["b2"] = float(os.environ["BLOOM_JAIL_BETA"])

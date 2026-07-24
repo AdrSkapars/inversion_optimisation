@@ -81,7 +81,7 @@ def batch_generate_contrastive_local(
     """Generate one target response per scenario via contrastive PoE sampling.
 
     Hooks into the natural rollout-step target generation when
-    `jailbroken_output.use_during_rollout=True`. Mirrors `batch_generate_local`'s
+    `jailbroken_output.enabled=True`. Mirrors `batch_generate_local`'s
     interface so callers can swap in based on the cfg flag.
 
     Target prefix: standard chat-template (no system prompt added here — caller

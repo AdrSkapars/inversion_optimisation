@@ -956,13 +956,13 @@ def run_rollout_batched_local(
     # Jailbroken-model contrastive output decoding: when enabled, the jail model
     # shares the target GPU. Auto-halve target_gpu_util so both vLLM workers fit.
     # Jail is loaded if any of:
-    #   - `use_during_rollout` (sampling proposal during target generation)
+    #   - `enabled` (jail steers the sampling proposal during target generation)
     #   - `output_search_loss` AND output_search.enabled (BoN reward signal)
     #   - `input_search_loss`  AND input_search.enabled  (TRS reward signal for BEAST)
     jail_cfg = cfg.get("jailbroken_output", {}) or {}
     output_cfg_peek = cfg.get("output_search", {}) or {}
     input_cfg_peek  = cfg.get("input_search", {}) or {}
-    jail_use_rollout = bool(jail_cfg.get("use_during_rollout", False))
+    jail_use_rollout = bool(jail_cfg.get("enabled", False))
     jail_use_out_loss = bool(jail_cfg.get("output_search_loss", False)) and bool(output_cfg_peek.get("enabled", False))
     jail_use_in_loss  = bool(jail_cfg.get("input_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
     jail_on          = jail_use_rollout or jail_use_out_loss or jail_use_in_loss
@@ -975,7 +975,7 @@ def run_rollout_batched_local(
             f"jailbroken_output.engine={jail_engine!r} not supported (vllm_topk | hf_full)")
     if jail_engine == "hf_full" and (jail_use_out_loss or jail_use_in_loss):
         raise RuntimeError(
-            "jailbroken_output.engine=hf_full supports use_during_rollout (basic PoE) only, "
+            "jailbroken_output.engine=hf_full supports enabled (basic PoE) only, "
             "not output_search_loss / input_search_loss")
     jail_vllm = jail_on and jail_engine == "vllm_topk"
     jail_hf   = jail_on and jail_engine == "hf_full"
@@ -1000,7 +1000,7 @@ def run_rollout_batched_local(
         # mode — plain target sampling, no jail model stepped, no naturalness floor. Reuses the
         # jail path's free on-policy token-prob capture; the proposal model mirrors the target and
         # is never stepped.
-        jail_cfg = {"model": target_model_id, "use_during_rollout": True, "engine": "hf_full",
+        jail_cfg = {"model": target_model_id, "enabled": True, "engine": "hf_full",
                     "b2": 0.0, "b1": 1.0, "target_floor": 0.0, "target_only": True}
         jail_use_rollout = True; jail_on = True; jail_engine = "hf_full"
         jail_vllm = False; jail_hf = True
@@ -1064,13 +1064,13 @@ def run_rollout_batched_local(
         jail_system_prompt = prompts_yaml.get("jailbroken_output_system_prompt", "")
         if not jail_system_prompt and not bool(jail_cfg.get("target_only")):
             raise RuntimeError(
-                "jailbroken_output.use_during_rollout=True requires "
+                "jailbroken_output.enabled=True requires "
                 "'jailbroken_output_system_prompt' in prompts.yaml"
             )
         jail_runtime_cfg = {
             "target_only":        bool(jail_cfg.get("target_only", False)),  # beta=0 vanilla/BoN fast path (plain target sampling, no jail model stepped)
             "engine":             jail_engine,
-            "use_during_rollout": jail_use_rollout,
+            "enabled":            jail_use_rollout,
             "output_search_loss": jail_use_out_loss,
             "input_search_loss":  jail_use_in_loss,
             "system_prompt": jail_system_prompt,
@@ -1569,7 +1569,7 @@ def run_rollout_batched_local(
                 # sampling against the jailbroken model; otherwise the standard
                 # vLLM generation path is used.
                 if (jail_runtime_cfg is not None
-                        and jail_runtime_cfg.get("use_during_rollout", False)):
+                        and jail_runtime_cfg.get("enabled", False)):
                     if jail_runtime_cfg.get("engine") == "hf_full":
                         _jr = _jail_generate_hf(
                             jail_runtime_cfg["hf"], jail_runtime_cfg,

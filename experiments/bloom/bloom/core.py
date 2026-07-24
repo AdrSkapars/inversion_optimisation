@@ -258,7 +258,7 @@ def _cfg_for_dump(cfg: Dict, prompts_yaml: Dict) -> Dict:
     cfg is untouched so runtime resolution is unchanged."""
     d = {k: v for k, v in cfg.items()}
     jc = d.get("jailbroken_output")
-    if isinstance(jc, dict) and jc.get("use_during_rollout"):
+    if isinstance(jc, dict) and jc.get("enabled"):
         jc = dict(jc)
         jc["system_prompt"] = prompts_yaml.get("jailbroken_output_system_prompt", "")
         jc["system_prompts"] = prompts_yaml.get("jailbroken_output_system_prompts", []) or []
