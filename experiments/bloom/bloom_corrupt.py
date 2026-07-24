@@ -182,7 +182,7 @@ cfg = DotDict({
     "jailbroken_output": {
         "enabled":  False,                        # jail on/off: steer the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
-        "var_batch": 12,                          # hf_full engine: cross-scenario batch size (slots per turn-generate) for the jail rollout. Override with BLOOM_JAIL_VAR_BATCH.
+        "var_batch": 15,                          # hf_full engine: cross-scenario batch size (slots per turn-generate) for the jail rollout. Override with BLOOM_JAIL_VAR_BATCH.
         "model": "self",                          # jail/proposal model. "self" (or "") = self-jail = the target model (default). Set local/<hf-name> for a distinct proposal (e.g. an abliterated variant). Override with BLOOM_JAIL_MODEL.
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
         "top_k_logprobs": None,                   # vllm_topk engine ONLY: K top-K jail logprobs for the approximate logit-bias PoE. Inert on the default hf_full engine (exact full-vocab PoE). None -> falls back to 1000 if vllm_topk is selected.
