@@ -91,8 +91,6 @@ cfg = DotDict({
     "evaluator_gpu_memory_utilization": 0.80,
     "target_gpu_memory_utilization":    0.80,
 
-    "target_system_prompt": "You are a helpful AI assistant. Always respond in 2-5 sentences.",  # Fixed target sysprompt — used verbatim every variation/round. Short response constraint reduces context size.
-
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
         "max_tokens": 2000,                  # max output tokens for the understanding call

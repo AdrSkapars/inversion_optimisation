@@ -747,7 +747,7 @@ async def run_single_rollout(
                 target_model_id=target_model_id,
                 evaluator_system_prompt=evaluator_system_prompt,
                 conversation_rollout_prompt=conversation_rollout_prompt,
-                target_system_prompt=cfg.get("target_system_prompt", ""),
+                target_system_prompt=prompts_yaml.get("target_system_prompt", ""),
                 target_sysprompt_prefix=target_sysprompt_prefix,
                 max_turns=rollout_cfg.max_turns,
                 evaluator_reasoning_effort=_effort(cfg.rollout.get("evaluator_thinking", False)),
@@ -1168,7 +1168,7 @@ def run_rollout_batched_local(
 
     # ── Build per-variation rollout prompts (no setup-generation pass) ────────────
     # The per-variation setup LLM call has been removed: the target system prompt
-    # is now a fixed config value (cfg.target_system_prompt), and the scenario
+    # is now a fixed value from the yaml (prompts_yaml.target_system_prompt), and the scenario
     # context is delivered to the evaluator merged into the first user turn alongside
     # the kickoff prompt. setup_content stays as an unused field (always "") for
     # back-compat with downstream code that reads it from transcript metadata.
@@ -1207,7 +1207,7 @@ def run_rollout_batched_local(
     n_skipped = sum(1 for v in range(1, len(variations) + 1) if _variation_done(v))
     if n_skipped:
         print(f"  Resume: {n_skipped}/{len(variations)} variations already have transcripts — skipping", flush=True)
-    print(f"  Setup-generation pass disabled — using fixed target_system_prompt from config", flush=True)
+    print(f"  Setup-generation pass disabled — using fixed target_system_prompt from the yaml", flush=True)
     setup_contents: List[str] = [""] * len(variations)
 
     def _resume_load_variation(var_idx: int, var_desc: str) -> None:
@@ -1270,7 +1270,7 @@ def run_rollout_batched_local(
         for sd in seeds:
             variation = sd["variation"]
             frozen_tsp = variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
-            target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
+            target_sysprompt = frozen_tsp or prompts_yaml.get("target_system_prompt", "")
             if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
                 target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
             per_var_refined_strategy = variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
@@ -1454,12 +1454,12 @@ def run_rollout_batched_local(
 
         # Resolve target system prompt:
         #   1. Frozen value from the variation override (round 2+ carries round-1's value).
-        #   2. Fall back to cfg.target_system_prompt (the fixed default for this run).
+        #   2. Fall back to prompts_yaml.target_system_prompt (the fixed default for this run).
         # Empty string is valid — target then runs with no system prompt at all.
         frozen_tsp = (
             variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
         )
-        target_sysprompt = frozen_tsp or cfg.get("target_system_prompt", "")
+        target_sysprompt = frozen_tsp or prompts_yaml.get("target_system_prompt", "")
         if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
             # Don't double-prefix when reusing an already-prefixed sysprompt from round 1.
             target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
