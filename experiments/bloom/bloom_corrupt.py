@@ -199,6 +199,7 @@ cfg = DotDict({
         "nprompts": 0,                            # >0 caps the jail system-prompt set to the first N (promptset ablation); 0 = use all. Override with BLOOM_JAIL_NPROMPTS.
     },
     "tokbias_output": {                           # static logit-bias baseline (z = target + lambda*bias over the whole vocab) — a separate elicitation method from jail. Each field overridable via BLOOM_TOKBIAS_*.
+        "enabled": False,                         #   on/off: when False the bias vector is never computed (short-circuits before any prompt eval). Override with BLOOM_TOKBIAS_ENABLED.
         "prompt": "",                             #   prompt whose next-token dist gives relevance weights (bias = log p(v|prompt)); "" = off
         "neg_prompt": "",                         #   contrast: bias = log p(v|prompt) - log p(v|neg) (cancels the frequency prior); "" = off
         "words": "",                              #   comma-separated words; bias = 1.0 on each word's first token (overrides prompt); "" = off

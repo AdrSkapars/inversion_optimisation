@@ -190,6 +190,9 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
     Instead of a second CONTEXTUAL distribution (jail / corruption rewrite), tilt the target's
     logits by a FIXED vector over the whole vocabulary:  z = target + lambda * bias.
 
+    Gated by `tokbias_output.enabled` (env BLOOM_TOKBIAS_ENABLED): when off, returns the
+    (0.0, None) no-op without computing anything. lambda==0 / no prompt is also a no-op.
+
     Modes (all optional, combine):
       BLOOM_TOKBIAS_PROMPT      prompt whose NEXT-TOKEN distribution gives relevance weights,
                                 bias = log p(v | prompt).
@@ -204,6 +207,10 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
 
     Computed once per (mode, prompt) and cached."""
     tb = tokbias_cfg or {}
+    _en = os.environ.get("BLOOM_TOKBIAS_ENABLED")
+    enabled = (_en.strip().lower() in ("1", "true", "yes", "on")) if _en is not None else bool(tb.get("enabled", False))
+    if not enabled:
+        return 0.0, None      # baseline off: never compute the bias vector
     prompt = os.environ.get("BLOOM_TOKBIAS_PROMPT", tb.get("prompt", "")) or ""
     negp   = os.environ.get("BLOOM_TOKBIAS_NEG_PROMPT", tb.get("neg_prompt", "")) or ""
     words  = os.environ.get("BLOOM_TOKBIAS_WORDS", tb.get("words", "")) or ""
