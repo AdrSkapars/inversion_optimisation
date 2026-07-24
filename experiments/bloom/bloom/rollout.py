@@ -1236,7 +1236,7 @@ def run_rollout_batched_local(
         # jail PoE. _jail_generate_hf batches the whole active chunk in ONE call per turn
         # (B slots), far more GPU-efficient than the per-variation serial path below.
         jail_var_batch = max(1, int(os.environ.get("BLOOM_JAIL_VAR_BATCH",
-                                    cfg.rollout.get("jail_var_batch", 12))))
+                                    (cfg.get("jailbroken_output", {}) or {}).get("var_batch", 12))))
         _jail_hf = jail_runtime_cfg["hf"]
 
         # One "seed" per transcript (variation x rep), honoring resume/skip. freeze_input

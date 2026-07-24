@@ -118,7 +118,6 @@ cfg = DotDict({
         "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
         "history_turns": None,                  # evaluator's view of conversation: None=full history, N=last N turn pairs only, 0=no history/setup only (target always sees full context)
         "target_engine": "hf",                  # target decode engine for the WILT/BoN path: "hf" (exact full-vocab PoE) or "vllm" (vllm_topk). Override with BLOOM_TARGET_ENGINE.
-        "jail_var_batch": 12,                   # cross-scenario batch size (slots per turn-generate) for the jail hf_full rollout. Override with BLOOM_JAIL_VAR_BATCH.
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
@@ -181,6 +180,7 @@ cfg = DotDict({
     "jailbroken_output": {
         "enabled":  False,                        # jail on/off: steer the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
+        "var_batch": 12,                          # hf_full engine: cross-scenario batch size (slots per turn-generate) for the jail rollout. Override with BLOOM_JAIL_VAR_BATCH.
         "output_search_loss":  False,             # use jail as the output_search BoN reward signal (replaces judge log P("Yes"))
         "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "self",                          # jail/proposal model. "self" (or "") = self-jail = the target model (default). Set local/<hf-name> for a distinct proposal (e.g. an abliterated variant). Override with BLOOM_JAIL_MODEL.
