@@ -191,11 +191,8 @@ cfg = DotDict({
         "b2": 4.0,                                # jail-expert weight in z = b1*target + b2*jail - b3*neg (PoE weight on log p_jailbroken); only used when enabled=True. Tuned per (model, behaviour) — the sweep sets it via BLOOM_JAIL_BETA.
         "b3": 0.0,                                # negative-steering weight in z = b1*target + b2*jail - b3*neg. 0 = off (the only knob; override BLOOM_JAIL_B3). Ablation: W2S logit-difference. When b3>0, the neg prompts load from the behaviour yaml (jailbroken_output_neg_system_prompt / _neg_user_prompt / _neg_prefill), or cfg jailbroken_output.neg_* if set.
     },
-    "tokbias_output": {                           # static logit-bias baseline (z = target + lambda*bias over the whole vocab) — a separate elicitation method from jail. Each field overridable via BLOOM_TOKBIAS_*.
+    "tokbias_output": {                           # static logit-bias baseline (z = target + lambda*bias over the whole vocab) — a separate elicitation method from jail. Numeric knobs here; the prompt content (prompt / neg_prompt / words) lives in the behaviour yaml (tokbias_output_prompt / _neg_prompt / _words). Every field overridable via BLOOM_TOKBIAS_*.
         "enabled": False,                         #   on/off: when False the bias vector is never computed (short-circuits before any prompt eval). Override with BLOOM_TOKBIAS_ENABLED.
-        "prompt": "",                             #   prompt whose next-token dist gives relevance weights (bias = log p(v|prompt)); "" = off
-        "neg_prompt": "",                         #   contrast: bias = log p(v|prompt) - log p(v|neg) (cancels the frequency prior); "" = off
-        "words": "",                              #   comma-separated words; bias = 1.0 on each word's first token (overrides prompt); "" = off
         "lambda": 0.0,                            #   tilt scale; 0.0 (or no prompt/words) = exact no-op
         "topk": 0,                                #   keep only the k highest-bias tokens (sparse tilt); 0 = dense
         "steps": 1,                               #   rolled-forward positions averaged for the relevance estimate

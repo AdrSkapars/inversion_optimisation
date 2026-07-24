@@ -1069,6 +1069,14 @@ def run_rollout_batched_local(
                 "jailbroken_output.enabled=True requires "
                 "'jailbroken_output_system_prompt' in prompts.yaml"
             )
+        # tokbias baseline: numeric knobs from cfg.tokbias_output; prompt content from the
+        # behaviour yaml (tokbias_output_prompt / _neg_prompt / _words), cfg value taking
+        # precedence if set. BLOOM_TOKBIAS_* still overrides inside _tokbias_vector.
+        _tb = dict(cfg.get("tokbias_output", {}) or {})
+        for _tk, _yk in (("prompt", "tokbias_output_prompt"),
+                         ("neg_prompt", "tokbias_output_neg_prompt"),
+                         ("words", "tokbias_output_words")):
+            _tb[_tk] = _tb.get(_tk) or prompts_yaml.get(_yk, "") or ""
         jail_runtime_cfg = {
             "target_only":        bool(jail_cfg.get("target_only", False)),  # beta=0 vanilla/BoN fast path (plain target sampling, no jail model stepped)
             "engine":             jail_engine,
@@ -1086,7 +1094,7 @@ def run_rollout_batched_local(
             "neg_user_prompt":   (jail_cfg.get("neg_user_prompt")   or prompts_yaml.get("jailbroken_output_neg_user_prompt", "")   or ""), # harmful user turn -> ELICITED refusal direction
             "neg_prefill":       (jail_cfg.get("neg_prefill")       or prompts_yaml.get("jailbroken_output_neg_prefill", "")       or ""),
             "top_k_logprobs": (int(jail_cfg["top_k_logprobs"]) if jail_cfg.get("top_k_logprobs") is not None else None),  # vllm_topk only; None on the default hf_full path
-            "tokbias":      dict(cfg.get("tokbias_output", {}) or {}),  # static logit-bias baseline params (top-level cfg.tokbias_output); BLOOM_TOKBIAS_* override
+            "tokbias":      _tb,  # static logit-bias baseline: cfg.tokbias_output knobs + yaml prompt content; BLOOM_TOKBIAS_* override
         }
         if jail_vllm:
             lm_jail = _get_local_model(jail_model_id[len("local/"):],
