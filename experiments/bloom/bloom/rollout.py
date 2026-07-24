@@ -994,7 +994,7 @@ def run_rollout_batched_local(
     _no_search_jail = not (jail_on
                            or bool((cfg.get("input_search", {})  or {}).get("enabled", False))
                            or bool((cfg.get("output_search", {}) or {}).get("enabled", False)))
-    _force_hf_target = os.environ.get("BLOOM_TARGET_ENGINE", "hf").lower() != "vllm"
+    _force_hf_target = os.environ.get("BLOOM_TARGET_ENGINE", cfg.rollout.get("target_engine", "hf")).lower() != "vllm"
     if _no_search_jail and _force_hf_target:
         # Vanilla/BoN baseline (beta=0 WILT): route through the jail hf_full path in target_only
         # mode — plain target sampling, no jail model stepped, no naturalness floor. Reuses the
@@ -1087,6 +1087,8 @@ def run_rollout_batched_local(
             "neg_user_prompt":   jail_cfg.get("neg_user_prompt", "") or "",   # harmful user turn -> ELICITED refusal direction
             "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
+            "nprompts":     int(jail_cfg.get("nprompts", 0) or 0),      # promptset cap (0 = all); BLOOM_JAIL_NPROMPTS overrides
+            "tokbias":      dict(jail_cfg.get("tokbias", {}) or {}),    # static logit-bias baseline params; BLOOM_TOKBIAS_* override
         }
         if jail_vllm:
             lm_jail = _get_local_model(jail_model_id[len("local/"):],

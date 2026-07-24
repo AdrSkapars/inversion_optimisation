@@ -184,7 +184,7 @@ def _load_hf_poe_models(target_hf: str, jail_hf: str, gpu_id: int) -> Dict:
 _TOKBIAS_CACHE = {}
 
 
-def _tokbias_vector(mt, tok, device):
+def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
     """Static, context-free vocabulary bias — the 'logit-bias' elicitation baseline.
 
     Instead of a second CONTEXTUAL distribution (jail / corruption rewrite), tilt the target's
@@ -203,15 +203,16 @@ def _tokbias_vector(mt, tok, device):
       BLOOM_TOKBIAS_LAMBDA      scale. 0 (or no prompt/words) => (0.0, None) = exact no-op.
 
     Computed once per (mode, prompt) and cached."""
-    prompt = os.environ.get("BLOOM_TOKBIAS_PROMPT") or ""
-    negp   = os.environ.get("BLOOM_TOKBIAS_NEG_PROMPT") or ""
-    words  = os.environ.get("BLOOM_TOKBIAS_WORDS") or ""
+    tb = tokbias_cfg or {}
+    prompt = os.environ.get("BLOOM_TOKBIAS_PROMPT", tb.get("prompt", "")) or ""
+    negp   = os.environ.get("BLOOM_TOKBIAS_NEG_PROMPT", tb.get("neg_prompt", "")) or ""
+    words  = os.environ.get("BLOOM_TOKBIAS_WORDS", tb.get("words", "")) or ""
     try:
-        lam = float(os.environ.get("BLOOM_TOKBIAS_LAMBDA", "0") or 0.0)
+        lam = float(os.environ.get("BLOOM_TOKBIAS_LAMBDA", tb.get("lambda", 0.0)) or 0.0)
     except ValueError:
         lam = 0.0
     try:
-        topk = int(os.environ.get("BLOOM_TOKBIAS_TOPK", "0") or 0)
+        topk = int(os.environ.get("BLOOM_TOKBIAS_TOPK", tb.get("topk", 0)) or 0)
     except ValueError:
         topk = 0
     if lam == 0.0 or (not prompt and not words):
@@ -220,11 +221,11 @@ def _tokbias_vector(mt, tok, device):
     vec = _TOKBIAS_CACHE.get(key)
     if vec is None:
         try:
-            _steps = max(1, int(os.environ.get("BLOOM_TOKBIAS_STEPS", "1") or 1))
+            _steps = max(1, int(os.environ.get("BLOOM_TOKBIAS_STEPS", tb.get("steps", 1)) or 1))
         except ValueError:
             _steps = 1
         try:
-            _samples = max(1, int(os.environ.get("BLOOM_TOKBIAS_SAMPLES", "1") or 1))
+            _samples = max(1, int(os.environ.get("BLOOM_TOKBIAS_SAMPLES", tb.get("samples", 1)) or 1))
         except ValueError:
             _samples = 1
 
@@ -482,7 +483,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                 ns += jail_neg_pf
             n_prefs.append(tok_c.encode(ns, add_special_tokens=False))
     sys_prompts = jail_runtime_cfg.get("system_prompts", []) or []
-    _np_env = int(os.environ.get("BLOOM_JAIL_NPROMPTS", "0") or 0)
+    _np_env = int(os.environ.get("BLOOM_JAIL_NPROMPTS", jail_runtime_cfg.get("nprompts", 0)) or 0)
     if _np_env > 0: sys_prompts = sys_prompts[:_np_env]
     _use_promptset = bool(sys_prompts) and not neg_on
     j_prefs_list = None
@@ -513,7 +514,7 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                                     poe_b1=float(jail_b1), poe_b2=beta, poe_b3=0.0, return_token_lps=True)
         return _hf_poe_generate(mt, mc, t_prefs, _jp, beta, temperature, max_tokens,
                                 pad_id, eos_id, device, target_floor=jail_floor, return_token_lps=True,
-                                tokbias=_tokbias_vector(mt, tok, device))
+                                tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
 
     import collections as _coll
     def _d3(txt):
