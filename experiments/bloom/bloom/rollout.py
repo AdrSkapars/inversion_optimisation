@@ -1088,7 +1088,7 @@ def run_rollout_batched_local(
             "neg_prefill":     jail_cfg.get("neg_prefill", "") or "",
             "top_k_logprobs": int(jail_cfg.get("top_k_logprobs", 1000)),
             "nprompts":     int(jail_cfg.get("nprompts", 0) or 0),      # promptset cap (0 = all); BLOOM_JAIL_NPROMPTS overrides
-            "tokbias":      dict(jail_cfg.get("tokbias", {}) or {}),    # static logit-bias baseline params; BLOOM_TOKBIAS_* override
+            "tokbias":      dict(cfg.get("tokbias_output", {}) or {}),  # static logit-bias baseline params (top-level cfg.tokbias_output); BLOOM_TOKBIAS_* override
         }
         if jail_vllm:
             lm_jail = _get_local_model(jail_model_id[len("local/"):],
