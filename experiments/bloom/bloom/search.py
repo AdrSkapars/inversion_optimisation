@@ -433,12 +433,12 @@ def input_search_evaluator_message(
     baseline_msg, trs, strategy = _extract_message_tags(content)
 
     # ── Optional: overwrite TRS with a jail-generated response ─────────────
-    # When `input_search_loss=True`, ignore the eval's TRS and instead feed the
+    # When input_search.jail_search_loss=True, ignore the eval's TRS and instead feed the
     # jailbroken model the conversation up through `baseline_msg` (as the latest
     # user turn) and use jail's response as the BEAST reward signal. The eval-
     # generated TRS is discarded; we don't try to prevent its generation.
     if (lm_jail is not None and jail_runtime_cfg is not None
-            and jail_runtime_cfg.get("input_search_loss", False)
+            and jail_runtime_cfg.get("jail_in_loss", False)
             and baseline_msg):
         jail_trs = _jail_generate_trs(
             lm_jail, jail_runtime_cfg,
@@ -654,7 +654,7 @@ def output_search_target_response(
     )
     use_jail_scoring = (
         lm_jail is not None and jail_runtime_cfg is not None
-        and jail_runtime_cfg.get("jail_search_loss", False)
+        and jail_runtime_cfg.get("jail_out_loss", False)
     )
 
     # Build jail's prefix once if we need it (sampling and/or scoring).

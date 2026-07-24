@@ -142,6 +142,7 @@ cfg = DotDict({
     "input_search": {
         # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
         "enabled": False,                        # ON: input-side BEAST search over the evaluator's <message> body
+        "jail_search_loss": False,               # overwrite the eval-generated TRS with a jail-generated TRS used as the BEAST reward signal; needs jailbroken_output.model loaded. Only active when enabled=True.
         "num_beams": 5,                          # classic BEAST: 5 beams of width 5
         "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
         "scored_candidate_length": 5,            # 5-token chunks scored per iter
@@ -182,7 +183,6 @@ cfg = DotDict({
         "enabled":  False,                        # jail on/off: steer the sampling step (contrastive PoE for target tokens)
         "engine": "hf_full",                      # vllm_topk = legacy top-K logit_bias | hf_full = exact full-vocab PoE (HF)
         "var_batch": 12,                          # hf_full engine: cross-scenario batch size (slots per turn-generate) for the jail rollout. Override with BLOOM_JAIL_VAR_BATCH.
-        "input_search_loss":   False,             # overwrite eval-generated TRS with a jail-generated TRS used as the input_search reward signal
         "model": "self",                          # jail/proposal model. "self" (or "") = self-jail = the target model (default). Set local/<hf-name> for a distinct proposal (e.g. an abliterated variant). Override with BLOOM_JAIL_MODEL.
         "prefill": True,                          # toggle: True (default) = use the behaviour file's jailbroken_output_prefill; False = no prefill
         "top_k_logprobs": None,                   # vllm_topk engine ONLY: K top-K jail logprobs for the approximate logit-bias PoE. Inert on the default hf_full engine (exact full-vocab PoE). None -> falls back to 1000 if vllm_topk is selected.

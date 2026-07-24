@@ -958,13 +958,13 @@ def run_rollout_batched_local(
     # Jail is loaded if any of:
     #   - `enabled` (jail steers the sampling proposal during target generation)
     #   - `output_search.jail_search_loss` AND output_search.enabled (BoN reward signal)
-    #   - `input_search_loss`  AND input_search.enabled  (TRS reward signal for BEAST)
+    #   - `input_search.jail_search_loss`  AND input_search.enabled  (TRS reward signal for BEAST)
     jail_cfg = cfg.get("jailbroken_output", {}) or {}
     output_cfg_peek = cfg.get("output_search", {}) or {}
     input_cfg_peek  = cfg.get("input_search", {}) or {}
     jail_use_rollout = bool(jail_cfg.get("enabled", False))
     jail_use_out_loss = bool(output_cfg_peek.get("jail_search_loss", False)) and bool(output_cfg_peek.get("enabled", False))
-    jail_use_in_loss  = bool(jail_cfg.get("input_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
+    jail_use_in_loss  = bool(input_cfg_peek.get("jail_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
     jail_on          = jail_use_rollout or jail_use_out_loss or jail_use_in_loss
     # Two jail engines, mirroring corruption: vllm_topk (legacy top-K logit_bias,
     # the current default) and hf_full (exact full-vocab PoE via HF, basic rollout
@@ -976,7 +976,7 @@ def run_rollout_batched_local(
     if jail_engine == "hf_full" and (jail_use_out_loss or jail_use_in_loss):
         raise RuntimeError(
             "jailbroken_output.engine=hf_full supports enabled (basic PoE) only, "
-            "not output_search.jail_search_loss / input_search_loss")
+            "not output_search.jail_search_loss / input_search.jail_search_loss")
     jail_vllm = jail_on and jail_engine == "vllm_topk"
     jail_hf   = jail_on and jail_engine == "hf_full"
 
@@ -1073,8 +1073,8 @@ def run_rollout_batched_local(
             "target_only":        bool(jail_cfg.get("target_only", False)),  # beta=0 vanilla/BoN fast path (plain target sampling, no jail model stepped)
             "engine":             jail_engine,
             "enabled":            jail_use_rollout,
-            "jail_search_loss":   jail_use_out_loss,
-            "input_search_loss":  jail_use_in_loss,
+            "jail_out_loss":      jail_use_out_loss,
+            "jail_in_loss":       jail_use_in_loss,
             "system_prompt": jail_system_prompt,
             "prefill":     (prompts_yaml.get("jailbroken_output_prefill", "") or "") if jail_cfg.get("prefill", True) else "",  # True -> behaviour-file prefill; False -> none
             "b2":          float(jail_cfg.get("b2", 2.0)),
