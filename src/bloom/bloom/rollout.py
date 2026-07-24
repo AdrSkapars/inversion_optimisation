@@ -1075,7 +1075,7 @@ def run_rollout_batched_local(
             "jail_out_loss":      jail_use_out_loss,
             "jail_in_loss":       jail_use_in_loss,
             "system_prompt": jail_system_prompt,
-            "prefill":     (prompts_yaml.get("jailbroken_output_prefill", "") or "") if jail_cfg.get("prefill", True) else "",  # True -> behaviour-file prefill; False -> none
+            "prefill":     (prompts_yaml.get("jailbroken_output_prefill", "") or "") if jail_cfg.get("prefill", True) else "",  # True -> behaviour-file prefill; False -> none. Inert on the target_only/BoN path (no jail model stepped).
             "b2":          float(jail_cfg.get("b2", 2.0)),
             "b1":          (float(jail_cfg["b1"]) if jail_cfg.get("b1") is not None else None),  # None=legacy target+beta*jail; 0=floor-only jail
             "target_floor": float(jail_cfg.get("target_floor", 1e-4)),  # naturalness floor ON by default (0 only via explicit no-floor ablation)
@@ -1175,12 +1175,14 @@ def run_rollout_batched_local(
             for rep in range(1, suffixes_per_scenario + 1)
         )
 
+    n_skipped = 0
     for var_idx_0based, variation in enumerate(variations):
         var_idx = var_idx_0based + 1
         vd = variation.get("description", str(variation)) if isinstance(variation, dict) else str(variation)
         var_descs.append(vd)
         if _variation_done(var_idx):
             rollout_prompt_texts.append("")
+            n_skipped += 1
             continue
         # Drop scientific_motivation in round 2+ when a refined_strategy is doing the
         # heavy lifting — it duplicates the high-level framing already covered by
@@ -1195,7 +1197,6 @@ def run_rollout_batched_local(
         )
         rollout_prompt_texts.append(rp)
 
-    n_skipped = sum(1 for v in range(1, len(variations) + 1) if _variation_done(v))
     if n_skipped:
         print(f"  Resume: {n_skipped}/{len(variations)} variations already have transcripts — skipping", flush=True)
     print(f"  Setup-generation pass disabled — using fixed target_system_prompt from the yaml", flush=True)
@@ -1415,30 +1416,7 @@ def run_rollout_batched_local(
         # Resume: variation already has all its transcripts on disk → load and skip search.
         if _variation_done(var_idx):
             print(f"\n  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
-            for rep in range(1, suffixes_per_scenario + 1):
-                tf_path = transcripts_dir / f"transcript_v{var_idx}r{rep}.json"
-                try:
-                    with open(tf_path, "r", encoding="utf-8") as f:
-                        td = json.load(f)
-                except Exception as e:
-                    print(f"    Could not read existing {tf_path.name}: {e} — will be missing from rollout summary", flush=True)
-                    continue
-                turn_lps = [
-                    m["targeted_response_start_logprob"]
-                    for m in td.get("messages", [])
-                    if m.get("targeted_response_start_logprob") is not None
-                ]
-                avg_lp = round(sum(turn_lps) / len(turn_lps), 4) if turn_lps else None
-                entry: Dict[str, Any] = {
-                    "variation_number":      var_idx,
-                    "variation_description": var_desc,
-                    "repetition_number":     rep,
-                    "num_turns":             len(td.get("messages", [])),
-                    "transcript_file":       tf_path.name,
-                }
-                if avg_lp is not None:
-                    entry["avg_logprob"] = avg_lp
-                rollouts.append(entry)
+            _resume_load_variation(var_idx, var_desc)
             continue
 
         print(f"\n  Variation {var_idx}/{len(variations)}: input search ...", flush=True)
