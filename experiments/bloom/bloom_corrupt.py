@@ -59,10 +59,13 @@ SMALL_TARGET_MODELS = [
 # architecture/vocab as the originals, so they can drive the corruption PoE (supply a strong
 # offensive direction with no refusals) while the TARGET distribution stays the original model.
 # Use via BLOOM_CORRUPT_MODEL=local/<repo> with BLOOM_TARGET_MODEL=local/<original>.
+# Keyed by the ORIGINAL target (matching TARGET_MODELS, without the local/ prefix). Llama-3.2-3B
+# (target #0) has no entry here — its abliterated variant (huihui-ai/llama-3.2-3b-instruct-abliterated)
+# exists and is registered in core._USES_THINK_BLOCK, but was never wired into this map.
 ABLITERATED_CORRUPTORS = {
-    "Qwen/Qwen3.5-4B":               "huihui-ai/Huihui-Qwen3.5-4B-abliterated",
-    "microsoft/Phi-4-mini-instruct": "huihui-ai/Phi-4-mini-instruct-abliterated",
-    "google/gemma-4-e4b-it":         "huihui-ai/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated",
+    "Qwen/Qwen3.5-4B":               "huihui-ai/Huihui-Qwen3.5-4B-abliterated",                          # 2: <- Qwen3.5-4B
+    "microsoft/Phi-4-mini-instruct": "huihui-ai/Phi-4-mini-instruct-abliterated",                        # 1: <- Phi-4-mini
+    "google/gemma-4-e4b-it":         "huihui-ai/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated", # 3: <- Gemma-4-E4B
 }
 
 judge_model  = EVAL_MODELS[0]
