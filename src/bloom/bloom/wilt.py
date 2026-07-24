@@ -97,7 +97,6 @@ def batch_generate_contrastive_local(
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
     beta       = float(jail_runtime_cfg.get("b2", 2.0))
     top_k      = int(jail_runtime_cfg.get("top_k_logprobs") or 1000)
-    allowed_token_ids: Optional[List[int]] = None
 
     results: List[str] = []
     for target_msgs in target_msgs_batch:
@@ -129,7 +128,7 @@ def batch_generate_contrastive_local(
             n=1, max_tokens=max_tokens,
             beta=beta, top_k_logprobs=top_k,
             temperature=temperature, top_p=1.0,
-            allowed_token_ids=allowed_token_ids,
+            allowed_token_ids=None,   # this jail path never Latin-masks (search.py passes a real mask)
             eos_token_id=lm_target.tokenizer.eos_token_id,
         )[0][0]
         text = lm_target.tokenizer.decode(ext, skip_special_tokens=True)
@@ -279,14 +278,10 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
                      target_floor: float = 0.0,
                      n_prefs: Optional[List[List[int]]] = None,
                      poe_b1: Optional[float] = None, poe_b2: Optional[float] = None,
-                     poe_b3: Optional[float] = None, return_target_lp: bool = False,
+                     poe_b3: Optional[float] = None,
                      return_token_lps: bool = False, tokbias=None):
     """Full-vocab PoE: sample from softmax((eb1*t_logits + eb2*c_logits - eb3*n)/temp).
 
-    When return_target_lp=True, also returns per-sequence mean true-target log-prob of the
-    sampled (non-eos) tokens: (gen, mean_lp). This is the same quantity the old separate
-    _hf_score forward computed, but captured for free during the decode (tl is already in
-    hand each step) — so callers can select/report on target_lp without a second pass.
     Both prefix lists have equal length B and are stepped in lockstep.
 
     target_floor>0 thresholds on the TRUE TARGET distribution but still samples from the
@@ -320,8 +315,6 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
             ncp = no.past_key_values; nl = no.logits[:, -1, :].float(); naf = na
         gen: List[List[int]] = [[] for _ in range(B)]
         done = torch.zeros(B, dtype=torch.bool, device=device)
-        lp_sum = torch.zeros(B, device=device)   # sum of true-target logprob of sampled tokens
-        lp_cnt = torch.zeros(B, device=device)   # count of scored (live, non-eos) tokens
         tlps: List[List[float]] = [[] for _ in range(B)]   # per-token true-target logprob (return_token_lps)
         for _ in range(max_new):
             z = eb1 * tl + eb2 * cl - (eb3 * nl if cfg_on else 0.0)
@@ -343,7 +336,7 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
                     s = masked.sum(dim=-1, keepdim=True)
                 probs = masked / s.clamp_min(1e-12)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
-            if return_target_lp or return_token_lps:
+            if return_token_lps:
                 # True-target logprob of the sampled token; tl was already computed this step
                 # so this is ~free vs a separate scoring forward. logsumexp avoids the full
                 # [B, vocab] log_softmax tensor (the OOM-prone bit of the old _hf_score). This is
@@ -351,12 +344,9 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
                 # the PoE/jail actually sampled — NOT the steered z-logprob it was drawn from.
                 tlp = tl.gather(-1, nxt.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(tl, dim=-1)
                 live = (~done) & (nxt != eos_id)
-                lp_sum = lp_sum + torch.where(live, tlp, torch.zeros_like(tlp))
-                lp_cnt = lp_cnt + live.float()
-                if return_token_lps:
-                    for i in range(B):
-                        if bool(live[i]):
-                            tlps[i].append(float(tlp[i]))
+                for i in range(B):
+                    if bool(live[i]):
+                        tlps[i].append(float(tlp[i]))
             nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             for i in range(B):
                 if not done[i]: gen[i].append(int(nxt[i]))
@@ -374,10 +364,6 @@ def _hf_poe_generate(mt, mc, t_prefs, c_prefs, temperature, max_new,
                 ncp = no.past_key_values; nl = no.logits[:, -1, :].float()
         if return_token_lps:
             return gen, tlps
-        if return_target_lp:
-            mean_lp = [(float(lp_sum[i] / lp_cnt[i]) if float(lp_cnt[i]) > 0 else None)
-                       for i in range(B)]
-            return gen, mean_lp
         return gen
 
 
@@ -430,12 +416,6 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     jail_neg_pf  = jail_runtime_cfg.get("neg_prefill", "") or ""    # default: no prefill on the negative branch
     NO_THINK = hf.get("target_no_think", core._NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", core._CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
-    # ---- COMBINE jail WITH corruption (two POSITIVE experts, no negative term) ----
-    # z = target + beta*jail + cb2*corrupt, where jail is input-conditioned (a continuation) and
-    # corrupt is OUTPUT-conditioned (a rewrite of a baseline target answer) — merging the two
-    # methods so neither has to be chosen. Implemented via the existing negative slot with a
-    # NEGATIVE coefficient (poe_b3 = -cb2), so the "subtracted" term ADDS. Needs a baseline
-    # target answer first (jail alone never produces one), generated here like the corruption path.
     neg_on = (jail_b3 != 0.0) and (bool(jail_neg_sys) or bool(jail_neg_user))
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
@@ -468,20 +448,17 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             if jail_neg_pf:
                 ns += jail_neg_pf
             n_prefs.append(tok_c.encode(ns, add_special_tokens=False))
-    def _gen_once(_jp):
-        # z = b1*target + b2*jail - b3*neg (b1=None => target weight 1). The negative-steering pass
-        # (n_prefs) runs only when neg_on (b3 != 0); tokbias adds a static vocab tilt when configured.
-        _b1 = float(jail_b1) if jail_b1 is not None else 1.0
-        return _hf_poe_generate(mt, mc, t_prefs, _jp, temperature, max_tokens,
-                                pad_id, eos_id, device, target_floor=jail_floor,
-                                n_prefs=(n_prefs if neg_on else None),
-                                poe_b1=_b1, poe_b2=beta, poe_b3=(jail_b3 if neg_on else 0.0),
-                                return_token_lps=True,
-                                tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
-
     # One jail sample per scenario: a single PoE decode over the batch. On-policy
     # (unmodified-target, temp=1) token probs are captured inline during the decode.
-    gen, tlps = _gen_once(j_prefs)
+    # z = b1*target + b2*jail - b3*neg (b1=None => target weight 1). The negative-steering pass
+    # (n_prefs) runs only when neg_on (b3 != 0); tokbias adds a static vocab tilt when configured.
+    _b1 = float(jail_b1) if jail_b1 is not None else 1.0
+    gen, tlps = _hf_poe_generate(mt, mc, t_prefs, j_prefs, temperature, max_tokens,
+                                 pad_id, eos_id, device, target_floor=jail_floor,
+                                 n_prefs=(n_prefs if neg_on else None),
+                                 poe_b1=_b1, poe_b2=beta, poe_b3=(jail_b3 if neg_on else 0.0),
+                                 return_token_lps=True,
+                                 tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
     out: List[Dict] = []
     for g, lps in zip(gen, tlps):
         ids = [x for x in g if x != eos_id]

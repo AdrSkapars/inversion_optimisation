@@ -426,6 +426,14 @@ async def run_judgment(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
                 results["metajudgment_thinking"] = metajudgment_result["metajudgment_thinking"]
             results["summary_statistics"].update(metajudgment_result["metajudgment_scores"])
 
+        # Fold in the token-prob stats computed during rollout (alongside behavior/elicitation).
+        try:
+            _ts = json.load(open(output_dir / "rollout.json", encoding="utf-8")).get("token_stats")
+            if _ts:
+                results["summary_statistics"].update(_ts)
+        except Exception:
+            pass
+
         save_json(results, output_dir / out_name)
 
         print(f"\nJUDGMENT STAGE - COMPLETED", flush=True)
@@ -922,7 +930,7 @@ async def run_parallel_round(
             }
             history_by_var.setdefault(var_num, []).append(entry)
 
-    # When refinement.history_rounds=0, history_by_var is intentionally empty — use variation
+    # When refinement_input.history_rounds=0, history_by_var is intentionally empty — use variation
     # numbers from the most recent round's transcripts so we still know how many to refine.
     if not history_by_var:
         if not dirs_to_use and all_prev_round_dirs:
@@ -966,11 +974,10 @@ async def run_parallel_round(
                     except Exception:
                         continue
                     meta = td.get("metadata", {}) or {}
-                    fk = None
                     frozen_by_var[v] = {
                         "target_system_prompt": meta.get("target_system_prompt", "") or "",
                         "setup_content":        meta.get("setup_content", "") or "",
-                        "fixed_kickoff":        fk,
+                        "fixed_kickoff":        None,
                     }
         # skip_finished (option B): scenarios that already reached finish_score (max
         # behavior_presence across completed rounds) skip the rollout this round; the budget

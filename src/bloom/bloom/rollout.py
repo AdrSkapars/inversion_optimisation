@@ -5,12 +5,10 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import litellm
-import torch
 import yaml
-from litellm import completion_with_retries
 
 # Suppress LiteLLM verbose output
 litellm.suppress_debug_info = True
@@ -225,7 +223,7 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     reasoning_effort = _effort(cfg.ideation.get("thinking", False))
     temperature = cfg.get("temperature")
     seed = cfg.get("seed")
-    max_turns = cfg.rollout.get("max_turns", 5)
+    max_turns = cfg.rollout.get("max_turns", 3)
 
     behavior_understanding = understanding_results["understanding"]
     scientific_motivation = understanding_results["scientific_motivation"]
@@ -575,9 +573,9 @@ class ConversationOrchestrator:
         # Add to evaluator history with scaffolding
         self.evaluator_messages.append({"role": "user", "content": _build_evaluator_followup(
             content, reasoning, self.current_turn, self.max_turns,
-            between_turns_strategise=getattr(self, "between_turns_strategise", True),
-            target_before_input=getattr(self, "target_before_input", False),
-            include_trs=getattr(self, "include_trs", True),
+            between_turns_strategise=self.between_turns_strategise,
+            target_before_input=self.target_before_input,
+            include_trs=self.include_trs,
         )})
 
         return parsed
@@ -644,8 +642,8 @@ class ConversationOrchestrator:
             # injection is local-batched-only for now).
             kickoff_prompt = _kickoff_message(
                 self.generate_kickoff_additional,
-                getattr(self, "target_before_input", False),
-                getattr(self, "include_trs", True),
+                self.target_before_input,
+                self.include_trs,
             )
 
             # Merge the stashed rollout prompt (scenario context) with the kickoff
@@ -922,7 +920,7 @@ def run_rollout_batched_local(
     scientific_motivation = understanding_results["scientific_motivation"]
     transcript_analyses = understanding_results.get("transcript_analyses", [])
     variations = variations_override if variations_override is not None else ideation_results["variations"]
-    max_turns    = cfg.rollout.get("max_turns", 5)
+    max_turns    = cfg.rollout.get("max_turns", 3)
     # Split eval vs target token budgets — evaluator only needs to emit a short <message>
     # + <targeted_response_start> block, while the target produces the actual response.
     # Falls back to legacy unified `max_tokens` if the split keys aren't set.
@@ -969,7 +967,7 @@ def run_rollout_batched_local(
     if jail_engine == "hf_full" and (jail_use_out_loss or jail_use_in_loss):
         raise RuntimeError(
             "jailbroken_output.engine=hf_full supports enabled (basic PoE) only, "
-            "not output_search.jail_search_loss / input_search.jail_search_loss")
+            "not search_output.jail_search_loss / search_input.jail_search_loss")
     jail_vllm = jail_on and jail_engine == "vllm_topk"
     jail_hf   = jail_on and jail_engine == "hf_full"
 
@@ -1115,13 +1113,13 @@ def run_rollout_batched_local(
         output_judge_template = prompts_yaml.get("output_search_judge_prompt", "")
         if not output_judge_template:
             raise RuntimeError(
-                "output_search.enabled=True but 'output_search_judge_prompt' is missing "
+                "search_output.enabled=True but 'output_search_judge_prompt' is missing "
                 "from prompts.yaml"
             )
         output_behavior_name = output_cfg.behavior_name
         if not output_behavior_name:
             raise RuntimeError(
-                "output_search.enabled=True requires output_search.behavior_name to be set"
+                "search_output.enabled=True requires search_output.behavior_name to be set"
             )
         # Single-token assertion on "Yes" — fails loudly if the judge tokenizer
         # splits it. Run once at startup so any failure surfaces before rollouts.
@@ -1142,7 +1140,7 @@ def run_rollout_batched_local(
     # gate the serial fallback.
     jail_batched = (jail_hf and jail_use_rollout
                     and not input_search_on and not output_search_on)
-    if cfg.rollout.get("max_turns", 1) <= 1:
+    if cfg.rollout.get("max_turns", 3) <= 1:
         between_turns_strategise = False  # no subsequent turns to strategise for
 
     def _build_kickoff_prompt(refined_strategy: str = "") -> str:

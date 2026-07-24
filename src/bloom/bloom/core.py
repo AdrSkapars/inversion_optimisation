@@ -123,7 +123,7 @@ def uses_think_block(name: str) -> bool:
     if key not in _USES_THINK_BLOCK:
         raise ValueError(
             f"Model {name!r} is not supported: add it to _USES_THINK_BLOCK at the top of "
-            f"bloom_corrupt.py (value True if its chat template auto-opens a "
+            f"bloom/core.py (value True if its chat template auto-opens a "
             f"<think> block needing a closed-think prefill, e.g. Qwen3; else False). "
             f"Registered: {sorted(_USES_THINK_BLOCK)}")
     return _USES_THINK_BLOCK[key]
@@ -136,17 +136,15 @@ def think_prefix(name: str) -> str:
 
 _NO_THINK_PREFIX = ""          # target wrapper; set by _set_think_prefixes()
 _CORRUPT_NO_THINK_PREFIX = ""  # corruptor wrapper; set by _set_think_prefixes()
-_OUTPUT_SEARCH_NO_THINK_PREFIX = ""  # output-search wrapper; set by _set_think_prefixes()
 
 
 def _set_think_prefixes(target_name: str, corrupt_name: Optional[str] = None) -> None:
     """Resolve the target/corruptor no-think wrappers from the think-block registry above.
     Raises (via uses_think_block) if either model is unregistered, so an unknown model
     fails immediately and clearly rather than silently getting the wrong wrapper."""
-    global _NO_THINK_PREFIX, _CORRUPT_NO_THINK_PREFIX, _OUTPUT_SEARCH_NO_THINK_PREFIX
+    global _NO_THINK_PREFIX, _CORRUPT_NO_THINK_PREFIX
     _NO_THINK_PREFIX = think_prefix(target_name)
     _CORRUPT_NO_THINK_PREFIX = think_prefix(corrupt_name) if corrupt_name else _NO_THINK_PREFIX
-    _OUTPUT_SEARCH_NO_THINK_PREFIX = _NO_THINK_PREFIX
 
 
 def _effort(thinking: Any) -> str:
@@ -239,7 +237,7 @@ def save_json(data: Any, path: Path) -> None:
         _ms = [m.get("prob_stats") for m in data["messages"]
                if m.get("source") == "target" and m.get("prob_stats")]
         if _ms:
-            data["prob_stats"] = _agg_prob_summaries(_ms)
+            data = {**data, "prob_stats": _agg_prob_summaries(_ms)}  # shallow copy: don't mutate the caller's dict
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -283,8 +281,10 @@ def litellm_chat(
             all_messages.append({"role": "system", "content": system_prompt})
         all_messages.extend(messages)
         temp = temperature if temperature is not None else DEFAULT_TEMPERATURE
+        # Honour the reasoning contract on the local path too: "none" => suppress thinking.
+        no_think = not (reasoning_effort and reasoning_effort != "none")
         text = local_chat(hf_name, all_messages, max_tokens=max_tokens, temperature=temp,
-                          seed=kwargs.get("seed"))
+                          seed=kwargs.get("seed"), no_think=no_think)
         return _make_local_response(text)
 
     # Temperature validation for extended thinking
@@ -1055,6 +1055,7 @@ def batch_generate_local(
     no_think: bool = False,
     seed: Optional[int] = None,
     allowed_token_ids: Optional[List[int]] = None,
+    no_think_prefix: Optional[str] = None,
 ) -> List[str]:
     """
     Batched generation via vLLM. Returns one string per input conversation, decoded
@@ -1095,7 +1096,9 @@ def batch_generate_local(
             msgs, tokenize=False, add_generation_prompt=True,
         )
         if no_think:
-            prompt += _NO_THINK_PREFIX
+            # Default (None) uses the global target wrapper; callers scoring/generating for a
+            # DIFFERENT model (e.g. the auditor via local_chat) pass that model's own prefix.
+            prompt += (no_think_prefix if no_think_prefix is not None else _NO_THINK_PREFIX)
         prompts.append(prompt)
 
     sampling_kwargs = dict(
@@ -1131,10 +1134,19 @@ def local_chat(
     max_tokens: int = 4000,
     temperature: float = 1.0,
     seed: Optional[int] = None,
+    no_think: bool = False,
 ) -> str:
-    """Single-conversation chat completion via vLLM. Preserves <think> tags."""
+    """Single-conversation chat completion via vLLM. Preserves <think> tags unless no_think
+    (then this model's own closed-<think> prefill is applied so a thinking model skips reasoning)."""
     lm = _get_local_model(hf_name)
-    return batch_generate_local(lm, [messages], max_tokens, temperature, no_think=False, seed=seed)[0]
+    pfx = None
+    if no_think:
+        try:
+            pfx = think_prefix(hf_name)   # THIS model's wrapper ("" if it has no think block)
+        except Exception:
+            pfx = ""                      # unregistered model -> no prefill (unchanged behaviour)
+    return batch_generate_local(lm, [messages], max_tokens, temperature,
+                                no_think=no_think, seed=seed, no_think_prefix=pfx)[0]
 
 
 def batch_logprob_local(
@@ -1745,7 +1757,13 @@ def _turn_end_eos(model_hf: str, tok) -> int:
                 return c
     except Exception:
         pass
-    return cands[0]
+    # No candidate's token text was found in the rendered turn (unusual for a well-formed chat
+    # template). Prefer any candidate that ISN'T the tokenizer's document eos — the turn-end token
+    # is by definition the one that ends a turn, not the document eos (which cands[0] may be, e.g.
+    # for Gemma where turn-end is element[1]). Fall back to cands[0] only if all candidates are the
+    # document eos.
+    _doc = int(tok.eos_token_id) if tok.eos_token_id is not None else None
+    return next((c for c in cands if c != _doc), cands[0])
 
 
 def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):

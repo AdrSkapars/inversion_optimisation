@@ -123,7 +123,7 @@ def _score_output_candidates(
     is set, the suffix is truncated at the first EOS so candidates are scored as
     their natural-end form.
     """
-    target_str = core._OUTPUT_SEARCH_NO_THINK_PREFIX + "Yes" if no_think_judge else "Yes"
+    target_str = core._NO_THINK_PREFIX + "Yes" if no_think_judge else "Yes"
 
     # Escape literal `{` / `}` in free-form user inputs so str.format() doesn't
     # try to interpret them as placeholders. Candidates can easily contain code
@@ -419,7 +419,7 @@ def input_search_evaluator_message(
     baseline_msg, trs, strategy = _extract_message_tags(content)
 
     # ── Optional: overwrite TRS with a jail-generated response ─────────────
-    # When input_search.jail_search_loss=True, ignore the eval's TRS and instead feed the
+    # When search_input.jail_search_loss=True, ignore the eval's TRS and instead feed the
     # jailbroken model the conversation up through `baseline_msg` (as the latest
     # user turn) and use jail's response as the BEAST reward signal. The eval-
     # generated TRS is discarded; we don't try to prevent its generation.

@@ -58,12 +58,13 @@ SMALL_TARGET_MODELS = [
 # Abliterated (refusal-removed) corruptor variants, keyed by their ORIGINAL target. Same
 # architecture/vocab as the originals, so they can drive the corruption PoE (supply a strong
 # offensive direction with no refusals) while the TARGET distribution stays the original model.
-# Use via BLOOM_CORRUPT_MODEL=local/<repo> with BLOOM_TARGET_MODEL=local/<original>.
-# Keyed by the ORIGINAL target (matching TARGET_MODELS, without the local/ prefix). Llama-3.2-3B
-# (target #0) has no entry here — its abliterated variant (huihui-ai/llama-3.2-3b-instruct-abliterated)
-# exists and is registered in core._USES_THINK_BLOCK, but was never wired into this map.
+# Reference data only: this WILT shim has no corruption block; the map is consumed by the
+# archived runs_old corruption pipeline (BLOOM_CORRUPT_MODEL=local/<repo> + BLOOM_TARGET_MODEL=local/<original>).
+# Keyed by the ORIGINAL target (matching TARGET_MODELS, without the local/ prefix). All four
+# targets now have entries here (Llama-3.2-3B's abliterated variant is also registered in
+# core._USES_THINK_BLOCK).
 ABLITERATED_CORRUPTORS = {
-    "meta-llama/Llama-3.2-3B-Instruct": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",                   # 0: <- Llama-3.2-1B-Instruct
+    "meta-llama/Llama-3.2-3B-Instruct": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",                   # 0: <- Llama-3.2-3B-Instruct
     "microsoft/Phi-4-mini-instruct": "huihui-ai/Phi-4-mini-instruct-abliterated",                        # 1: <- Phi-4-mini
     "Qwen/Qwen3.5-4B":               "huihui-ai/Huihui-Qwen3.5-4B-abliterated",                          # 2: <- Qwen3.5-4B
     "google/gemma-4-e4b-it":         "huihui-ai/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated", # 3: <- Gemma-4-E4B
@@ -249,7 +250,7 @@ if __name__ == "__main__":
         ("BLOOM_SKIP_FINISHED",  ("refinement_input", "skip_finished"),             _envbool),
         ("BLOOM_STRATEGISE",     ("refinement_input", "between_rounds_strategise"), _envbool),
         ("BLOOM_INPUT_SEARCH",   ("search_input", "enabled"),                 _envbool),
-        ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      int),   # explicit int only (e.g. -50, or 0 = regenerate whole body); None handled separately
+        ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      int),   # explicit int only (e.g. -50, or 0 = regenerate whole body)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
@@ -275,7 +276,7 @@ if __name__ == "__main__":
         cfg.setdefault("ideation", {})["thinking"] = _et
         cfg.setdefault("rollout", {})["evaluator_thinking"] = _et
     # BLOOM_JAIL_MODEL: switch to DIRECT jail-sample decoding (contrastive PoE with a jailbroken
-    # proposal model) instead of the corruption rewrite. Disables corruption (mutually exclusive).
+    # proposal model). (This shim is WILT-only — there is no corruption path here to disable.)
     # Jail model must share the target's vocab (target itself = self-jail, or a same-family abliterated).
     if os.environ.get("BLOOM_JAIL_MODEL"):
         cfg.setdefault("jailbroken_output", {})["enabled"] = True
@@ -298,8 +299,8 @@ if __name__ == "__main__":
               f"max_turns={cfg.get('rollout', {}).get('max_turns')} num_rounds={cfg.get('rollout', {}).get('num_rounds')} "
               f"skip_finished={_rf.get('skip_finished')}", flush=True)
 
-    base_folder = cfg.get("folder_name", "runs/default")
-    num_rounds = cfg.get("rollout", {}).get("num_rounds", 1)
+    base_folder = cfg.get("folder_name", "runs_new/default")
+    num_rounds = cfg.get("rollout", {}).get("num_rounds", 5)
     base_seed = cfg.get("seed")  # offset per round to keep vLLM samples reproducible-but-distinct across rounds
     async def run_parallel() -> bool:
         """Returns True if there was an error."""
