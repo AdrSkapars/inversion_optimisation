@@ -10,3 +10,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | self_harm | Qwen3.5-4B | 1.5 | 5.10 | 49.7% | 9.95 | 50.3% |
 | medical | Qwen3.5-4B | 2.5 | 2.99 | 58.0% | 9.68 | 55.2% |
 | political | Qwen3.5-4B | 4 | 8.43 | 51.9% | 9.75 | 57.0% |
+| selfpres | Qwen3.5-4B | 3.5 | 5.49 | 52.1% | 9.99 | 51.1% |
