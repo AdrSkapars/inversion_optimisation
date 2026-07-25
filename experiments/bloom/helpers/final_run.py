@@ -60,10 +60,11 @@ JAIL_ROUNDS = 5
 # fragmentation accumulates over the 8 rounds in one process. So dropped to safe values with
 # ~13GB headroom (semantics-preserving; only batch size changes). Also set
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True per-run to curb the fragmentation the error flagged.
-# jail steps BOTH models (heavier) -> 20 (5 chunks); BoN loads ONE model -> 24 (5 chunks). If a cell
-# still OOMs, drop further via --jail-var-batch / --bon-var-batch.
+# Kept to clean factors of 100 (whole number of chunks): jail steps BOTH models (heavier) -> 20
+# (5 chunks); BoN loads ONE model -> 25 (4 chunks, ~15GB headroom). If a cell still OOMs, drop
+# further via --jail-var-batch / --bon-var-batch (next clean factors: 10; or 16/12 if needed).
 JAIL_VAR_BATCH = 20
-BON_VAR_BATCH  = 24
+BON_VAR_BATCH  = 25
 
 # Model-major execution order: the FIRST model builds each behaviour's shared bank; the rest
 # reuse it. Qwen (the paper's representative slice) is the bank-builder. self_harm leads so the
