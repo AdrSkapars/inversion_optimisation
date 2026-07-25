@@ -107,12 +107,14 @@ def main():
 
     batches = [int(x) for x in a.batches.split(",") if x.strip()]
     fmax = torch.cuda.get_device_properties(a.gpu).total_memory / 2**20
-    print(f"[bench] device total={fmax:.0f}MiB  max_tokens={a.max_tokens}  fill={a.fill}\n"
-          f"{'batch':>6}{'ctxmax':>8}{'peakMiB':>10}{'reservMiB':>11}{'sec':>8}{'tok/s':>9}  status", flush=True)
+    print(f"[bench] device total={fmax:.0f}MiB  max_tokens={a.max_tokens}  fill={a.fill}  "
+          f"(proj = 1-turn wall time for 100 scenarios = ceil(100/B) chunks x sec)\n"
+          f"{'batch':>6}{'ctxmax':>8}{'peakMiB':>10}{'reservMiB':>11}{'sec':>8}{'tok/s':>9}{'chunks':>7}{'proj':>9}  status", flush=True)
     for B in batches:
         pool = ctxs_sorted if a.fill == "long" else ctxs
         batch = [pool[i % len(pool)] for i in range(B)]
         cmax = max(ctx_len(c) for c in batch)
+        torch.cuda.empty_cache()                        # clean slate so each batch is measured fresh
         torch.cuda.reset_peak_memory_stats(a.gpu)
         torch.cuda.synchronize(a.gpu)
         t0 = time.time()
@@ -123,14 +125,13 @@ def main():
             ntok = sum(len(r.get("best_ids") or []) for r in res)
             peak = torch.cuda.max_memory_allocated(a.gpu) / 2**20
             reserv = torch.cuda.max_memory_reserved(a.gpu) / 2**20
-            print(f"{B:>6}{cmax:>8}{peak:>10.0f}{reserv:>11.0f}{dt:>8.1f}{ntok/dt:>9.0f}  OK", flush=True)
+            # per-100-scenario projection: ceil(100/B) sequential chunks at this per-chunk time
+            chunks = -(-100 // B); proj = chunks * dt
+            print(f"{B:>6}{cmax:>8}{peak:>10.0f}{reserv:>11.0f}{dt:>8.1f}{ntok/dt:>9.0f}{chunks:>7}{proj:>9.1f}  OK", flush=True)
         except RuntimeError as e:
             oom = "out of memory" in str(e).lower()
-            print(f"{B:>6}{cmax:>8}{'-':>10}{'-':>11}{'-':>8}{'-':>9}  {'OOM' if oom else 'ERR'}: {str(e)[:80]}", flush=True)
-            torch.cuda.empty_cache()
-            if oom:
-                print(f"[bench] ceiling for mode={a.mode}: last OK batch < {B}", flush=True)
-                break
+            print(f"{B:>6}{cmax:>8}{'-':>10}{'-':>11}{'-':>8}{'-':>9}{'-':>7}{'-':>9}  {'OOM' if oom else 'ERR'}: {str(e)[:70]}", flush=True)
+            torch.cuda.empty_cache()                     # recover and keep testing the remaining batches
     print("[bench] done", flush=True)
 
 
