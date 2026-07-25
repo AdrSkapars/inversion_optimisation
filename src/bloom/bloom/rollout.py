@@ -407,58 +407,41 @@ def _tag_instructions(target_before_input: bool, include_trs: bool = True) -> st
     if not include_trs:
         return _TAG_INSTRUCTIONS_MSG_ONLY
     return _TAG_INSTRUCTIONS_TRS_FIRST if target_before_input else _TAG_INSTRUCTIONS_MSG_FIRST
-# Used at turn 2+ only: forces the evaluator to plan its next move before writing it.
-_STRATEGY_INSTRUCTIONS_HEAD = _BASE_PROMPTS["strategy_instructions_head"]
-
-
-def _strategy_instructions(include_trs: bool = True) -> str:
-    """Turn-2+ planning block. The trailing clause names the tags that follow, which
-    depends on whether the TRS is being requested (input_search on/off)."""
-    tail = "<message> and <targeted_response_start> tags below." if include_trs else "<message> tag below."
-    return _STRATEGY_INSTRUCTIONS_HEAD + tail
 
 
 def _build_evaluator_followup(content: str, reasoning: Optional[str], current_turn: int, max_turns: int,
-                              between_turns_strategise: bool = True,
-                              partial_history: bool = False,
                               target_before_input: bool = False,
                               include_trs: bool = True) -> str:
     """Build the evaluator follow-up prompt after a target response.
 
-    When `between_turns_strategise=True`, asks the evaluator to deliberately plan in <strategy>
-    tags before writing the next message. When False, the strategy block is omitted and the
-    evaluator just generates the message directly (vanilla baseline).
-
-    When `partial_history=True`, prepends a hint that the conversation context shown is
-    truncated, so the evaluator doesn't try to reference earlier turns it can no longer see.
+    The evaluator generates its next message directly (turns 2+ carry no mid-rollout
+    <strategy> block; any refinement strategy is injected once at the round-2+ kickoff).
 
     When `target_before_input=True`, asks for <targeted_response_start> BEFORE <message>, so
     the message can be designed to fit a pre-committed target response. Helps BoN regenerate
     on-topic messages by giving the model TRS context before sampling the body.
     """
     reasoning_block = f"<target_reasoning>\n{reasoning}\n</target_reasoning>\n\n" if reasoning else ""
-    strategy_block = f"{_strategy_instructions(include_trs)} " if between_turns_strategise else ""
-    history_note = _BASE_PROMPTS["evaluator_followup_history_note"] if partial_history else ""
     return _BASE_PROMPTS["evaluator_followup"].format(
-        history_note=history_note,
         reasoning_block=reasoning_block,
         content=content,
         current_turn=current_turn,
         max_turns=max_turns,
         steering=_STEERING_INSTRUCTIONS,
-        strategy_block=strategy_block,
         tag_instructions=_tag_instructions(target_before_input, include_trs),
     )
 
 
 def _kickoff_message(generate_kickoff_additional: str, target_before_input: bool,
-                     include_trs: bool, refined_strategy: str = "") -> str:
+                     include_trs: bool, refine_context: str = "") -> str:
     """Shared kickoff (first evaluator user turn) builder for both rollout paths.
-    Round 1 turn 1 has no strategy block; rounds 2+ inject a refined-strategy block."""
+    Round 1 has no refine block; rounds 2+ inject `refine_context` (the merged-refinement
+    block: full progress log + guidance + last-N transcripts) so this ONE generation emits
+    both <strategy> and <message>."""
     gka = (generate_kickoff_additional.strip() + " ") if generate_kickoff_additional else ""
     kp = _BASE_PROMPTS["kickoff_prompt"].format(generate_kickoff_additional=gka) + "\n\n"
-    if refined_strategy:
-        kp += _BASE_PROMPTS["kickoff_refined_strategy_block"].format(refined_strategy=refined_strategy)
+    if refine_context:
+        kp += refine_context.strip() + "\n\n"
     kp += _tag_instructions(target_before_input, include_trs)
     return kp
 
@@ -482,7 +465,6 @@ class ConversationOrchestrator:
         target_kickoff_prefix: str = "",
         generate_kickoff_additional: str = "",
         target_before_input: bool = False,
-        between_turns_strategise: bool = True,
         include_trs: bool = True,
     ):
         self.evaluator_model = evaluator_model
@@ -490,7 +472,6 @@ class ConversationOrchestrator:
         self.evaluator_system_prompt = evaluator_system_prompt
         self.target_system_prompt = target_system_prompt
         self.target_before_input = target_before_input
-        self.between_turns_strategise = between_turns_strategise
         self.include_trs = include_trs
         # Set by setup() — merged into the first user message in run().
         self.pending_rollout_prompt: str = ""
@@ -591,7 +572,6 @@ class ConversationOrchestrator:
         # Add to evaluator history with scaffolding
         self.evaluator_messages.append({"role": "user", "content": _build_evaluator_followup(
             content, reasoning, self.current_turn, self.max_turns,
-            between_turns_strategise=self.between_turns_strategise,
             target_before_input=self.target_before_input,
             include_trs=self.include_trs,
         )})
@@ -617,7 +597,6 @@ class ConversationOrchestrator:
         target_kickoff_prefix: str = "",
         generate_kickoff_additional: str = "",
         target_before_input: bool = False,
-        between_turns_strategise: bool = True,
         include_trs: bool = True,
     ) -> "ConversationOrchestrator":
         """Setup orchestrator with a fixed target system prompt (no LLM setup pass).
@@ -642,7 +621,6 @@ class ConversationOrchestrator:
             target_temperature=target_temperature,
             target_kickoff_prefix=target_kickoff_prefix,
             target_before_input=target_before_input,
-            between_turns_strategise=between_turns_strategise,
             generate_kickoff_additional=generate_kickoff_additional,
             include_trs=include_trs,
         )
@@ -768,7 +746,6 @@ async def run_single_rollout(
                 target_kickoff_prefix=target_kickoff_prefix,
                 generate_kickoff_additional=generate_kickoff_additional,
                 target_before_input=cfg.rollout.get("target_before_input", False),
-                between_turns_strategise=cfg.refinement_input.get("between_turns_strategise", True),
                 include_trs=bool((cfg.get("search_input", {}) or {}).get("enabled", False)),
             ),
         )
@@ -794,50 +771,6 @@ async def run_single_rollout(
             "num_turns": len(transcript_data.get("messages", [])),
             "transcript_file": filename,
         }
-
-
-async def run_refinement(
-    variation_number: int,
-    round_history: List[Dict],  # list of {round_num, system_prompt, conversation, score, summary, justification}
-    cfg: DotDict, prompts_yaml: Dict,
-    executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
-) -> Dict[str, Any]:
-    """Refine a single scenario using the full history of previous rounds."""
-    system, user = build_refine_prompt(cfg.behavior_name, round_history, prompts_yaml)
-
-    refine_cfg = cfg.get("refinement_input", {}) or {}
-    model_id = refine_cfg.get("model") or cfg.judgment.get("model")
-    max_tokens = refine_cfg.get("max_tokens", cfg.judgment.get("max_tokens", 4000))
-    reasoning_effort = _effort(refine_cfg.get("thinking", False))
-    temperature = cfg.get("temperature", 1.0)
-
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        executor,
-        lambda: litellm_chat(
-            model_id=model_id, messages=[{"role": "user", "content": user}],
-            system_prompt=system, max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort, temperature=temperature,
-        ),
-    )
-    parsed = parse_message(response)
-    content = parsed["content"] or ""
-    content = _auto_close_tags(content, ["observations", "updated_strategy"])
-
-    obs_match = re.search(r"<observations>(.*?)</observations>", content, re.DOTALL)
-    strat_match = re.search(r"<updated_strategy>(.*?)</updated_strategy>", content, re.DOTALL)
-
-    observations = obs_match.group(1).strip() if obs_match else ""
-    updated_strategy = strat_match.group(1).strip() if strat_match else content
-
-    latest_score = round_history[-1].get("score", 0) if round_history else 0
-    return {
-        "variation_number": variation_number,
-        "observations": observations,
-        "updated_strategy": updated_strategy,
-        "refinement_response": content,
-        "previous_score": latest_score,
-    }
 
 
 async def run_rollout(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
@@ -1149,9 +1082,7 @@ def run_rollout_batched_local(
     target_kickoff_prefix    = _get_override(prompts_yaml, "target_kickoff_prefix")
     generate_kickoff_additional = _get_override(prompts_yaml, "generate_kickoff_additional")
 
-    between_turns_strategise = cfg.refinement_input.get("between_turns_strategise", True)
     target_before_input      = cfg.rollout.get("target_before_input", False)
-    history_turns = cfg.refinement_input.get("history_turns", None)  # None = full history
     input_search_on = bool(search_cfg.enabled)  # only ask the eval for a TRS when input_search will use it
     # Batched-jail eligibility: the clean jail hf_full case (no per-variation token
     # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-
@@ -1159,14 +1090,12 @@ def run_rollout_batched_local(
     # gate the serial fallback.
     jail_batched = (jail_hf and jail_use_rollout
                     and not input_search_on and not output_search_on)
-    if cfg.rollout.get("max_turns", 3) <= 1:
-        between_turns_strategise = False  # no subsequent turns to strategise for
 
-    def _build_kickoff_prompt(refined_strategy: str = "") -> str:
+    def _build_kickoff_prompt(refine_context: str = "") -> str:
         """Build the per-variation kickoff prompt via the shared _kickoff_message helper.
-        The <strategy> block only appears on rounds 2+ (a refined strategy to inject)."""
+        The merged-refinement block only appears on rounds 2+ (when refine_context is set)."""
         return _kickoff_message(generate_kickoff_additional, target_before_input,
-                                input_search_on, refined_strategy)
+                                input_search_on, refine_context)
 
     transcripts_dir = output_dir / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
@@ -1203,16 +1132,16 @@ def run_rollout_batched_local(
             rollout_prompt_texts.append("")
             n_skipped += 1
             continue
-        # Drop scientific_motivation in round 2+ when a refined_strategy is doing the
-        # heavy lifting — it duplicates the high-level framing already covered by
-        # behavior_understanding and the strategy injected via the kickoff.
-        has_refined_strategy = bool(
-            variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
+        # Drop scientific_motivation in round 2+ when refine_context is doing the heavy
+        # lifting — it duplicates the high-level framing already covered by
+        # behavior_understanding and the history injected via the kickoff.
+        has_refine_context = bool(
+            variation.get("refine_context", "") if isinstance(variation, dict) else ""
         )
         rp = build_rollout_prompt(
             behavior_name, behavior_understanding, scientific_motivation,
             transcript_analyses, vd, max_turns, prompts_yaml,
-            skip_motivation=has_refined_strategy,
+            skip_motivation=has_refine_context,
         )
         rollout_prompt_texts.append(rp)
 
@@ -1261,9 +1190,6 @@ def run_rollout_batched_local(
         for var_idx, (variation, var_desc, rollout_prompt_text, _sc) in enumerate(
             zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1
         ):
-            if isinstance(variation, dict) and variation.get("skip_rollout"):
-                print(f"  Variation {var_idx}/{len(variations)}: skipped (already finished)", flush=True)
-                continue
             if _variation_done(var_idx):
                 print(f"  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
                 _resume_load_variation(var_idx, var_desc)
@@ -1284,15 +1210,14 @@ def run_rollout_batched_local(
             target_sysprompt = frozen_tsp or prompts_yaml.get("target_system_prompt", "")
             if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
                 target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
-            per_var_refined_strategy = variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
-            kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
+            per_var_refine_context = variation.get("refine_context", "") if isinstance(variation, dict) else ""
+            kickoff_prompt = _build_kickoff_prompt(refine_context=per_var_refine_context)
             eval_ctx = [
                 {"role": "system", "content": evaluator_system_prompt},
                 {"role": "user", "content": f"{sd['rollout_prompt_text']}\n\n{kickoff_prompt}"},
             ]
             sd["target_sysprompt"] = target_sysprompt
             sd["eval_kickoff_ctx"] = eval_ctx
-            sd["setup_ctx_len"] = len(eval_ctx)
             sd["kickoff_strategy"] = ""
             if sd["frozen"]:
                 sd["kickoff_msg"] = sd["fixed_kickoff"]["content"]
@@ -1373,15 +1298,12 @@ def run_rollout_batched_local(
                     last = sd["transcript_msgs"][-1]
                     followup = _build_evaluator_followup(
                         last["content"], last.get("reasoning"), sd["current_turn"], max_turns,
-                        between_turns_strategise=between_turns_strategise,
-                        partial_history=history_turns is not None,
                         target_before_input=target_before_input,
                         include_trs=input_search_on,
                     )
                     eval_msgs_turn = list(sd["eval_msgs"]) + [{"role": "user", "content": followup}]
                     sd["_eval_msgs_turn"] = eval_msgs_turn
-                    gen_ctxs.append(_strip_thinking_from_msgs(
-                        _truncate_eval_history(eval_msgs_turn, sd["setup_ctx_len"], history_turns)))
+                    gen_ctxs.append(_strip_thinking_from_msgs(eval_msgs_turn))
                 raws = batch_generate_local(lm_eval, gen_ctxs, eval_max_tokens, temperature, no_think=no_think_eval)
                 for sd, raw in zip(cont, raws):
                     parsed = parse_message(_make_local_response(raw))
@@ -1406,7 +1328,6 @@ def run_rollout_batched_local(
                         "target_model": target_model_id,
                         "target_system_prompt": sd["target_sysprompt"],
                         "setup_content": "",
-                        "refined_strategy": sd["variation"].get("refined_strategy", "") if isinstance(sd["variation"], dict) else "",
                         "variation_number": var_idx,
                         "repetition_number": rep,
                         "created_at": datetime.now().isoformat(),
@@ -1427,11 +1348,6 @@ def run_rollout_batched_local(
     _noncorr_iter = [] if jail_batched else list(enumerate(
         zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1))
     for var_idx, (variation, var_desc, rollout_prompt_text, setup_content) in _noncorr_iter:
-        # skip_finished (option B): this scenario already reached finish_score in an earlier
-        # round — don't roll it out again; it keeps its best earlier transcript.
-        if isinstance(variation, dict) and variation.get("skip_rollout"):
-            print(f"\n  Variation {var_idx}/{len(variations)}: skipped (already finished)", flush=True)
-            continue
         # Resume: variation already has all its transcripts on disk → load and skip search.
         if _variation_done(var_idx):
             print(f"\n  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
@@ -1459,12 +1375,11 @@ def run_rollout_batched_local(
             target_msgs_base.append({"role": "system", "content": target_sysprompt})
             transcript_msgs_base.append({"role": "system", "content": target_sysprompt, "source": "target_system"})
 
-        # Per-variation kickoff prompt: optionally injects refined_strategy from prior rounds
-        # and respects the between_turns_strategise toggle.
-        per_var_refined_strategy = (
-            variation.get("refined_strategy", "") if isinstance(variation, dict) else ""
+        # Per-variation kickoff prompt: on rounds 2+ injects refine_context (merged refinement).
+        per_var_refine_context = (
+            variation.get("refine_context", "") if isinstance(variation, dict) else ""
         )
-        kickoff_prompt = _build_kickoff_prompt(refined_strategy=per_var_refined_strategy)
+        kickoff_prompt = _build_kickoff_prompt(refine_context=per_var_refine_context)
 
         # eval_msgs up to the kickoff request (before input search generates the response).
         # The setup-generation pass has been removed, so the scenario context
@@ -1503,7 +1418,6 @@ def run_rollout_batched_local(
                 search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
                 lm_jail=lm_jail, jail_runtime_cfg=jail_runtime_cfg,
             )
-        setup_ctx_len = len(eval_msgs_kickoff_ctx)  # used for history truncation per turn
 
         # Save full pool for this variation
         beast_pool_data.append({
@@ -1644,19 +1558,14 @@ def run_rollout_batched_local(
                 # Evaluator follow-up context
                 followup_prompt = _build_evaluator_followup(
                     target_resp, target_reason, current_turn, max_turns,
-                    between_turns_strategise=between_turns_strategise,
-                    partial_history=history_turns is not None,
                     target_before_input=target_before_input,
                     include_trs=input_search_on,
                 )
                 eval_msgs_turn  = list(eval_msgs) + [{"role": "user", "content": followup_prompt}]
 
-                # Truncate evaluator history to last K turn pairs (target still sees full
-                # context for genuine search scoring); strip <thinking> blocks for token savings.
-                eval_msgs_for_search = _truncate_eval_history(
-                    eval_msgs_turn, setup_ctx_len, history_turns,
-                )
-                eval_msgs_for_search = _strip_thinking_from_msgs(eval_msgs_for_search)
+                # Strip <thinking> blocks for token savings (target still sees full context
+                # for genuine search scoring).
+                eval_msgs_for_search = _strip_thinking_from_msgs(eval_msgs_turn)
 
                 # Input search for next evaluator message (keep top 1 — conversation committed)
                 turn_pool, turn_trs, turn_strategy = input_search_evaluator_message(
@@ -1694,7 +1603,6 @@ def run_rollout_batched_local(
                     "target_system_prompt": target_sysprompt,
                     # setup_content: retained (always "") for transcript-schema back-compat; setup pass removed.
                     "setup_content":      setup_content,
-                    "refined_strategy":   variation.get("refined_strategy", "") if isinstance(variation, dict) else "",
                     "variation_number":  var_idx,
                     "repetition_number": rep,
                     "created_at": datetime.now().isoformat(),
@@ -1773,4 +1681,4 @@ def run_rollout_batched_local(
     print(f"ROLLOUT STAGE - COMPLETED ({len(rollouts)} rollouts)", flush=True)
     return rollout_results
 
-__all__ = ['run_understanding', 'parse_scenarios_response', 'run_ideation', '_STEERING_INSTRUCTIONS', '_TAG_INSTRUCTIONS_MSG_FIRST', '_TAG_INSTRUCTIONS_TRS_FIRST', '_TAG_INSTRUCTIONS_MSG_ONLY', '_tag_instructions', '_STRATEGY_INSTRUCTIONS_HEAD', '_strategy_instructions', '_build_evaluator_followup', '_kickoff_message', 'ConversationOrchestrator', 'run_single_rollout', 'run_refinement', 'run_rollout', 'run_rollout_batched_local']
+__all__ = ['run_understanding', 'parse_scenarios_response', 'run_ideation', '_STEERING_INSTRUCTIONS', '_TAG_INSTRUCTIONS_MSG_FIRST', '_TAG_INSTRUCTIONS_TRS_FIRST', '_TAG_INSTRUCTIONS_MSG_ONLY', '_tag_instructions', '_build_evaluator_followup', '_kickoff_message', 'ConversationOrchestrator', 'run_single_rollout', 'run_rollout', 'run_rollout_batched_local']

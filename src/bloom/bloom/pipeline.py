@@ -863,8 +863,8 @@ async def run_parallel_round(
     # history_by_var: {var_num: [oldest_entry, ..., newest_entry]}
     history_by_var: Dict[int, List[Dict]] = {}
 
-    # Limit how many past rounds to include (0 = no history shown at all)
-    max_history = cfg.get("refinement_input", {}).get("history_rounds", None)  # None means include all
+    # Limit how many past rounds of FULL transcripts to show (None=all, 0=none, N=last N)
+    max_history = cfg.get("refinement_input", {}).get("history_transcript_rounds", None)
     dirs_to_use = (
         all_prev_round_dirs[-max_history:] if (max_history is not None and max_history > 0)
         else ([] if max_history == 0 else all_prev_round_dirs)
@@ -930,7 +930,7 @@ async def run_parallel_round(
             }
             history_by_var.setdefault(var_num, []).append(entry)
 
-    # When refinement_input.history_rounds=0, history_by_var is intentionally empty — use variation
+    # When refinement_input.history_transcript_rounds=0, history_by_var is intentionally empty — use variation
     # numbers from the most recent round's transcripts so we still know how many to refine.
     if not history_by_var:
         if not dirs_to_use and all_prev_round_dirs:
@@ -946,16 +946,16 @@ async def run_parallel_round(
             return None
 
     refine_cfg = cfg.get("refinement_input", {}) or {}
-    between_rounds_strategise = refine_cfg.get("between_rounds_strategise", True)
+    refine_enabled = refine_cfg.get("enabled", False)
     if cfg.get("rollout", {}).get("num_rounds", 1) <= 1:
-        between_rounds_strategise = False  # no subsequent rounds to strategise for
+        refine_enabled = False  # no subsequent rounds to refine for
 
-    # If strategy-injection is disabled, skip the refiner entirely. We still want to
-    # re-run the rollout against the FROZEN scenario + sysprompt (pure resample baseline),
-    # so build a no-strategy override directly from the original ideation + round 1's frozen
-    # setup, and jump past the refinement block.
-    if not between_rounds_strategise:
-        print(f"\nREFINEMENT STAGE - skipped (between_rounds_strategise=False); "
+    # If refinement is disabled, skip it entirely. We still re-run the rollout against the
+    # FROZEN scenario + sysprompt (pure resample / BoN baseline), so build a no-refinement
+    # override directly from the original ideation + round 1's frozen setup, and jump past
+    # the refinement block.
+    if not refine_enabled:
+        print(f"\nREFINEMENT STAGE - skipped (refinement_input.enabled=False); "
               f"running fresh rollouts against frozen scenarios", flush=True)
         original_variations = ideation_results.get("variations", [])
         round_1_dir = all_prev_round_dirs[0] if all_prev_round_dirs else None
@@ -979,34 +979,9 @@ async def run_parallel_round(
                         "setup_content":        meta.get("setup_content", "") or "",
                         "fixed_kickoff":        None,
                     }
-        # skip_finished (option B): scenarios that already reached finish_score (max
-        # behavior_presence across completed rounds) skip the rollout this round; the budget
-        # they would have used is redistributed as EXTRA reps on the still-unfinished scenarios
-        # (batch stays full, more tries where they're needed). Scenario numbering is preserved
-        # (all scenarios stay in the list, finished ones flagged skip_rollout).
-        skip_finished = bool(refine_cfg.get("skip_finished", False))
-        finish_score  = float(refine_cfg.get("finish_score", 10))
-        best_score: Dict[int, float] = {}
-        if skip_finished:
-            for pdir in all_prev_round_dirs:
-                jp = pdir / "judgment.json"
-                if not jp.exists():
-                    continue
-                try:
-                    jd = json.load(open(jp, "r", encoding="utf-8"))
-                except Exception:
-                    continue
-                for j in jd.get("judgments", []):
-                    v = j.get("variation_number"); s = j.get("behavior_presence")
-                    if v is not None and s is not None:
-                        best_score[v] = max(best_score.get(v, -1.0), float(s))
+        # Every scenario is resampled every round (full N rounds, no early-stop / no
+        # budget redistribution). Scenario numbering is preserved.
         all_vnums = sorted(history_by_var.keys())
-        _done = lambda v: skip_finished and best_score.get(v, -1.0) >= finish_score
-        unfinished = [v for v in all_vnums if not _done(v)]
-        reps_per = 1
-        if skip_finished and unfinished:
-            budget = int(refine_cfg.get("resample_budget", len(all_vnums)))
-            reps_per = max(1, budget // len(unfinished))
         # ── Kickoff bank (per-round): supersedes freeze_input ────────────────────────
         _bank = cfg.get("kickoff_bank")
         if _bank:
@@ -1030,16 +1005,11 @@ async def run_parallel_round(
             frozen = frozen_by_var.get(v_num, {})
             variations_override.append({
                 "description":          description,
-                "refined_strategy":     "",  # explicitly empty
+                # no refine_context: pure resample against the frozen scenario (BoN baseline)
                 "target_system_prompt": frozen.get("target_system_prompt", ""),
                 "setup_content":        frozen.get("setup_content", ""),
                 "fixed_kickoff":        frozen.get("fixed_kickoff"),
-                "skip_rollout":         _done(v_num),
-                "n_reps":               (0 if _done(v_num) else reps_per),
             })
-        if skip_finished:
-            print(f"  skip_finished: {len(all_vnums)-len(unfinished)}/{len(all_vnums)} scenarios done; "
-                  f"resampling {len(unfinished)} x {reps_per} reps each (batch ~{len(unfinished)*reps_per})", flush=True)
         rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results,
                                             ideation_results, variations_override=variations_override)
         if not rollout_results:
@@ -1048,115 +1018,49 @@ async def run_parallel_round(
                                                ideation_results, variations_override=variations_override)
         return judgment_results
 
-    history_label = f"{len(dirs_to_use)} rounds of history" if dirs_to_use else "no history (fresh generation)"
-    print(f"\nREFINEMENT STAGE - refining {len(history_by_var)} scenarios "
-          f"({history_label})", flush=True)
+    n_prior = len(all_prev_round_dirs)
+    history_label = f"last {len(dirs_to_use)} round(s) shown" if dirs_to_use else "no transcripts shown"
+    print(f"\nREFINEMENT STAGE (merged) - {len(history_by_var)} scenarios "
+          f"({history_label}; full progress log across {n_prior} prior round(s))", flush=True)
 
-    model_id = refine_cfg.get("model") or cfg.judgment.get("model")
-    refinements = []
+    # Full-horizon (round, score, strategy) log per variation. Feeds the strategic guidance and
+    # lets the evaluator rebuild from the best round even when only the last `history_transcript_rounds`
+    # transcripts are shown. Each round's strategy is the <strategy> emitted at its kickoff
+    # (stored on the first evaluator message); round 1 has none.
+    full_log_by_var: Dict[int, List[Dict]] = {}
+    for prev_dir in all_prev_round_dirs:
+        round_label = prev_dir.name
+        jmap: Dict[int, Dict] = {}
+        jp = prev_dir / "judgment.json"
+        if jp.exists():
+            try:
+                jd = json.load(open(jp, "r", encoding="utf-8"))
+                for j in jd.get("judgments", []):
+                    v = j.get("variation_number")
+                    if v is not None:
+                        jmap[v] = j
+            except Exception:
+                pass
+        tdir = prev_dir / "transcripts"
+        if not tdir.is_dir():
+            continue
+        for tf in sorted(tdir.glob("transcript_v*r1.json")):
+            m = re.match(r"transcript_v(\d+)r1\.json", tf.name)
+            if not m:
+                continue
+            v = int(m.group(1))
+            try:
+                td = json.load(open(tf, "r", encoding="utf-8"))
+            except Exception:
+                continue
+            msgs = td.get("messages", [])
+            strategy = next((mm.get("strategy", "") for mm in msgs if mm.get("source") == "evaluator"), "")
+            full_log_by_var.setdefault(v, []).append({
+                "round_num": round_label,
+                "score": jmap.get(v, {}).get("behavior_presence", "?"),
+                "strategy": strategy,
+            })
 
-    if model_id and model_id.startswith("local/"):
-        # ── Batched local path ───────────────────────────────────────────────
-        hf_name = model_id[len("local/"):]
-        lm = _get_local_model(hf_name)
-        batch_size = cfg.get("batch_size", 4)
-        max_tokens = refine_cfg.get("max_tokens", cfg.judgment.get("max_tokens", 4000))
-        temperature = cfg.get("temperature", DEFAULT_TEMPERATURE)
-        no_think = not refine_cfg.get("thinking", False)
-
-        sorted_vars = sorted(history_by_var.items())  # [(var_num, history), ...]
-
-        prompts_list = []
-        for var_num, history in sorted_vars:
-            system, user = build_refine_prompt(cfg.behavior_name, history, prompts_yaml)
-            prompts_list.append((var_num, history, system, user))
-
-        for chunk_start in range(0, len(prompts_list), batch_size):
-            chunk = prompts_list[chunk_start:chunk_start + batch_size]
-            messages_list = [
-                [{"role": "system", "content": system}, {"role": "user", "content": user}]
-                for _, _, system, user in chunk
-            ]
-            print(f"  Refining scenarios {[v for v, _, _, _ in chunk]}...", flush=True)
-            outputs = batch_generate_local(lm, messages_list, max_tokens, temperature, no_think=no_think)
-
-            for (var_num, history, _, _), raw in zip(chunk, outputs):
-                parsed = parse_message(_make_local_response(raw))
-                content = parsed["content"] or raw
-                content = _auto_close_tags(content, ["observations", "updated_strategy"])
-                obs_match = re.search(r"<observations>(.*?)</observations>", content, re.DOTALL)
-                strat_match = re.search(r"<updated_strategy>(.*?)</updated_strategy>", content, re.DOTALL)
-                latest_score = history[-1].get("score", 0) if history else 0
-                refinements.append({
-                    "variation_number": var_num,
-                    "observations": obs_match.group(1).strip() if obs_match else "",
-                    "updated_strategy": strat_match.group(1).strip() if strat_match else content,
-                    "refinement_response": content,
-                    "previous_score": latest_score,
-                })
-    else:
-        # ── Async API path ───────────────────────────────────────────────────
-        max_concurrent = cfg.get("max_concurrent", 15)
-        semaphore = asyncio.Semaphore(max_concurrent)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-
-        async def refine_with_semaphore(var_num: int, history: List[Dict]) -> Dict:
-            async with semaphore:
-                latest_score = history[-1].get("score", "?") if history else "?"
-                print(f"  Refining v{var_num} (latest score: {latest_score}, "
-                      f"{len(history)} rounds of history)...", flush=True)
-                return await run_refinement(var_num, history, cfg, prompts_yaml, executor)
-
-        try:
-            refinement_tasks = [
-                refine_with_semaphore(v, hist)
-                for v, hist in sorted(history_by_var.items())
-            ]
-            refinement_results = await asyncio.gather(*refinement_tasks, return_exceptions=True)
-        finally:
-            executor.shutdown(wait=True)
-
-        for r in refinement_results:
-            if isinstance(r, Exception):
-                print(f"  Refinement failed: {r}", flush=True)
-            else:
-                refinements.append(r)
-
-    if not refinements:
-        print("  All refinements failed!", flush=True)
-        return None
-
-    save_json({"refinements": refinements}, output_dir / "refinements.json")
-    print(f"  Refined {len(refinements)} scenarios", flush=True)
-
-    # Write refinement output back into the transcripts of the round that was just analysed.
-    # Each transcript gets a "refinement" block in its metadata: {observations, updated_strategy}.
-    # This makes transcripts self-contained — the viewer can show what was learned from each run.
-    prev_transcripts_dir = all_prev_round_dirs[-1] / "transcripts"
-    if prev_transcripts_dir.is_dir():
-        for r in refinements:
-            var_num = r["variation_number"]
-            refinement_block = {
-                "observations":    r.get("observations", ""),
-                "updated_strategy": r.get("updated_strategy", ""),
-            }
-            for tf in sorted(prev_transcripts_dir.glob(f"transcript_v{var_num}r*.json")):
-                try:
-                    with open(tf, "r", encoding="utf-8") as f:
-                        td = json.load(f)
-                    td.setdefault("metadata", {})["refinement"] = refinement_block
-                    save_json(td, tf)
-                    debug_print(f"Wrote refinement back to {tf.name}")
-                except Exception as e:
-                    debug_print(f"Failed to write refinement back to {tf}: {e}")
-        print(f"  Wrote refinement blocks back to {prev_transcripts_dir.parent.name}/transcripts/",
-              flush=True)
-
-    # Build variations_override carrying:
-    #   - description:       FROZEN scenario from the original ideation (never refined)
-    #   - target_system_prompt + setup_content: FROZEN from round 1's transcripts
-    #   - refined_strategy:  the new strategy produced this round (injected into kickoff)
-    refinements.sort(key=lambda r: r["variation_number"])
     original_variations = ideation_results.get("variations", [])
     # Read round 1 transcripts to recover the frozen target_sysprompt + setup_content per var
     round_1_dir = all_prev_round_dirs[0] if all_prev_round_dirs else None
@@ -1180,19 +1084,34 @@ async def run_parallel_round(
                     "setup_content":        meta.get("setup_content", "") or "",
                 }
 
+    # How many (round, score, strategy) log rows to show/derive guidance from (None=all, 0=none, N=last N)
+    strat_rounds = refine_cfg.get("history_strategy_rounds", None)
+    def _trim_log(log: List[Dict]) -> List[Dict]:
+        if strat_rounds is None:
+            return log
+        if strat_rounds <= 0:
+            return []
+        return log[-strat_rounds:]
+
+    # Build variations_override: frozen scenario + a per-scenario refine_context injected into
+    # the round-2+ kickoff, so ONE evaluator generation emits both <strategy> and <message>.
     variations_override: List[Dict] = []
-    for r in refinements:
-        v = r["variation_number"]
+    for v in sorted(history_by_var.keys()):
         # Frozen description from the original ideation (1-indexed → 0-indexed)
         if 1 <= v <= len(original_variations):
             ov = original_variations[v - 1]
             description = ov.get("description", str(ov)) if isinstance(ov, dict) else str(ov)
         else:
             description = ""
+        refine_context = build_refine_context(
+            history_by_var.get(v, []),          # last `history_transcript_rounds` full transcripts
+            _trim_log(full_log_by_var.get(v, [])),  # last `history_strategy_rounds` (round, score, strategy) rows
+            prompts_yaml,
+        )
         frozen = frozen_by_var.get(v, {})
         variations_override.append({
             "description":          description,
-            "refined_strategy":     r.get("updated_strategy", ""),
+            "refine_context":       refine_context,
             "target_system_prompt": frozen.get("target_system_prompt", ""),
             "setup_content":        frozen.get("setup_content", ""),
         })
