@@ -199,6 +199,7 @@ def main():
     ap.add_argument("--runs-final", default="runs_final", help="output tree under experiments/bloom (default runs_final)")
     ap.add_argument("--only", default=None, help="run a single cell '<behaviour>/<model_dir>' (e.g. self_harm/Qwen_Qwen3.5-4B)")
     ap.add_argument("--behaviours", default=None, help="comma-sep behaviour filter (this box's slice), e.g. self_harm,medical,selfpres")
+    ap.add_argument("--models", default=None, help="comma-sep model substring filter (for rebalancing), e.g. qwen,gemma or phi. Matched case-insensitively against the target model id.")
     ap.add_argument("--jail-var-batch", type=int, default=JAIL_VAR_BATCH, help=f"override jail var_batch (default {JAIL_VAR_BATCH}; drop to 20 if a cell OOMs)")
     ap.add_argument("--bon-var-batch", type=int, default=BON_VAR_BATCH, help=f"override BoN var_batch (default {BON_VAR_BATCH})")
     ap.add_argument("--eval-gpu", type=int, default=0)
@@ -223,6 +224,11 @@ def main():
         cells = [c for c in cells if c["beh"] in want]
         if not cells:
             sys.exit(f"--behaviours {a.behaviours!r} matched no cell. Behaviours: {BEH_ORDER}")
+    if a.models:
+        toks = [m.strip().lower() for m in a.models.split(",") if m.strip()]
+        cells = [c for c in cells if any(t in c["model"].lower() for t in toks)]
+        if not cells:
+            sys.exit(f"--models {a.models!r} matched no cell. Models: {MODEL_ORDER}")
 
     if a.list:
         print(f"{'#':>2}  {'behaviour/model':52}{'pm3':>5}   jail arm")
