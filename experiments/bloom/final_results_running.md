@@ -16,3 +16,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | reward_hacking | Qwen3.5-4B | 3 | 9.47 | 58.5% | 9.43 | 76.7% |
 | delusions | Qwen3.5-4B | 1.5 | 6.74 | 49.0% | 9.98 | 52.4% |
 | goblin | Qwen3.5-4B | 3 | 1.19 | 54.3% | 9.71 | 60.9% |
+| self_harm | gemma-4-e4b | 0.5 | 3.46 | 63.9% | 5.42 | 63.0% |
