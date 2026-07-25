@@ -1112,7 +1112,8 @@ def run_rollout_batched_local(
                                        max_model_len=target_max_len)
         else:  # hf_full — load HF target + jail in-process on the target GPU
             jail_runtime_cfg["hf"] = _load_hf_poe_models(
-                target_model_id[len("local/"):], jail_model_id[len("local/"):], target_gpu_id)
+                target_model_id[len("local/"):], jail_model_id[len("local/"):], target_gpu_id,
+                target_only=bool(jail_runtime_cfg.get("target_only")))   # BoN loads ONE model
         print(f"  [jailbroken_output] engine={jail_engine} loaded {jail_model_id} on GPU {target_gpu_id} "
               f"(b2={jail_runtime_cfg['b2']})", flush=True)
 

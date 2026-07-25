@@ -53,6 +53,17 @@ TURNS      = 3
 BON_ROUNDS = 8
 JAIL_ROUNDS = 5
 
+# var_batch (per-turn cross-scenario decode batch) — chosen from the box A6000 (49GB) probe
+# (helpers/batchbench.py, Qwen self_harm turn-3 WORST case = a chunk padded to the longest ctx):
+#   JAIL steps BOTH models (target + jail PoE), so it's memory-bound: 25 fits (4 chunks over 100
+#     scenarios) but TIGHT (~0.8GB margin); 34 OOMs. >>> IF A CELL OOMs ON THE JAIL ARM, drop
+#     JAIL_VAR_BATCH to 20 (5 chunks, ~14GB margin). <<<
+#   BoN loads ONE model (target_only skips the proposal copy) so it fits 34 comfortably (3 chunks,
+#     ~8GB margin). 40 is the SAME 3 chunks with less margin and no throughput gain (tok/s peaks
+#     ~34), so 34 is the pick. Both go via BLOOM_JAIL_VAR_BATCH (BoN routes through the jail path).
+JAIL_VAR_BATCH = 25
+BON_VAR_BATCH  = 34
+
 # Model-major execution order: the FIRST model builds each behaviour's shared bank; the rest
 # reuse it. Qwen (the paper's representative slice) is the bank-builder. self_harm leads so the
 # natural first cell is the checkpoint cell (Qwen x self_harm). Any model/behaviour not listed
@@ -124,6 +135,8 @@ def _run_arm(cell, arm, out_dir: Path, rounds: int, beta: float,
         "BLOOM_NUM_SCENARIOS": str(SCENARIOS),
         "BLOOM_SEED":          str(SEED),
         "BLOOM_KICKOFF_BANK":  str(cell["bank"]),
+        # per-arm decode batch: jail (2 models) tighter than BoN (1 model). See constants above.
+        "BLOOM_JAIL_VAR_BATCH": str(JAIL_VAR_BATCH if arm == "jail" else BON_VAR_BATCH),
     })
     if arm == "jail":                       # self-jail at the chosen beta (floor on by default)
         env["BLOOM_JAIL_MODEL"] = "local/" + cell["model"]

@@ -136,7 +136,7 @@ def batch_generate_contrastive_local(
     return results
 
 
-def _load_hf_poe_models(target_hf: str, jail_hf: str, gpu_id: int) -> Dict:
+def _load_hf_poe_models(target_hf: str, jail_hf: str, gpu_id: int, target_only: bool = False) -> Dict:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     dev = f"cuda:{gpu_id}"
     # Target and corruptor may be DIFFERENT models — load each model's OWN tokenizer and
@@ -148,8 +148,15 @@ def _load_hf_poe_models(target_hf: str, jail_hf: str, gpu_id: int) -> Dict:
     tok_c = tok if same else AutoTokenizer.from_pretrained(jail_hf)
     mt = AutoModelForCausalLM.from_pretrained(
         target_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
-    mc = AutoModelForCausalLM.from_pretrained(
-        jail_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
+    if target_only:
+        # BoN / vanilla baseline: only the TARGET is ever stepped (no PoE, no jail forward) —
+        # see _jail_generate_hf's target_only branch. So do NOT load a second copy; point mc at
+        # mt. Frees a full model's VRAM (~8GB for a 4B model), which is what lets the BoN arm run
+        # a larger var_batch than the jail arm (which must hold + step both). mc is never used.
+        mc = mt
+    else:
+        mc = AutoModelForCausalLM.from_pretrained(
+            jail_hf, torch_dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
     # PoE adds the target and jail-proposal logits index-for-index (z = b1*t + b2*c - b3*n), so
     # the two models MUST share a vocabulary. A mismatch (e.g. Phi 200064 vs Qwen 151936)
     # otherwise surfaces only as a cryptic CUDA device-side assert deep inside generation —
