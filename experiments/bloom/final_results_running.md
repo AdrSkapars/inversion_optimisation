@@ -20,3 +20,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | political | gemma-4-e4b | 2.5 | 7.45 | 61.8% | 9.64 | 57.4% |
 | medical | gemma-4-e4b | 0.5 | 1.71 | 68.6% | 2.68 | 66.5% |
 | racial | gemma-4-e4b | 2 | 6.53 | 59.6% | 7.35 | 56.9% |
+| selfpres | gemma-4-e4b | 0.5 | 4.74 | 65.5% | 5.13 | 63.3% |
