@@ -190,9 +190,13 @@ def _run_cell(cell, eval_gpu, target_gpu, resume, bon_rounds, jail_rounds) -> bo
 
 
 def main():
+    global JAIL_VAR_BATCH, BON_VAR_BATCH
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs-final", default="runs_final", help="output tree under experiments/bloom (default runs_final)")
     ap.add_argument("--only", default=None, help="run a single cell '<behaviour>/<model_dir>' (e.g. self_harm/Qwen_Qwen3.5-4B)")
+    ap.add_argument("--behaviours", default=None, help="comma-sep behaviour filter (this box's slice), e.g. self_harm,medical,selfpres")
+    ap.add_argument("--jail-var-batch", type=int, default=JAIL_VAR_BATCH, help=f"override jail var_batch (default {JAIL_VAR_BATCH}; drop to 20 if a cell OOMs)")
+    ap.add_argument("--bon-var-batch", type=int, default=BON_VAR_BATCH, help=f"override BoN var_batch (default {BON_VAR_BATCH})")
     ap.add_argument("--eval-gpu", type=int, default=0)
     ap.add_argument("--target-gpu", type=int, default=1)
     ap.add_argument("--no-resume", action="store_true", help="re-run arms even if their final judgment.json exists")
@@ -201,6 +205,8 @@ def main():
     ap.add_argument("--jail-rounds", type=int, default=JAIL_ROUNDS, help=f"jail rounds (default {JAIL_ROUNDS}; use 1 for the quick checkpoint -- still reuses the bank)")
     ap.add_argument("--list", action="store_true", help="print the cell plan (betas, arms) and exit")
     a = ap.parse_args()
+    JAIL_VAR_BATCH = a.jail_var_batch
+    BON_VAR_BATCH = a.bon_var_batch
 
     cells = _cells(a.runs_final)
     if a.only:
@@ -208,6 +214,11 @@ def main():
         cells = [c for c in cells if f"{c['beh']}/{c['model_dir']}" == want]
         if not cells:
             sys.exit(f"--only {a.only!r} matched no cell. Use --list to see valid ids.")
+    if a.behaviours:
+        want = set(b.strip() for b in a.behaviours.split(",") if b.strip())
+        cells = [c for c in cells if c["beh"] in want]
+        if not cells:
+            sys.exit(f"--behaviours {a.behaviours!r} matched no cell. Behaviours: {BEH_ORDER}")
 
     if a.list:
         print(f"{'#':>2}  {'behaviour/model':52}{'pm3':>5}   jail arm")
