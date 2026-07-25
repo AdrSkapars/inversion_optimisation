@@ -979,34 +979,9 @@ async def run_parallel_round(
                         "setup_content":        meta.get("setup_content", "") or "",
                         "fixed_kickoff":        None,
                     }
-        # skip_finished (option B): scenarios that already reached finish_score (max
-        # behavior_presence across completed rounds) skip the rollout this round; the budget
-        # they would have used is redistributed as EXTRA reps on the still-unfinished scenarios
-        # (batch stays full, more tries where they're needed). Scenario numbering is preserved
-        # (all scenarios stay in the list, finished ones flagged skip_rollout).
-        skip_finished = bool(refine_cfg.get("skip_finished", False))
-        finish_score  = float(refine_cfg.get("finish_score", 10))
-        best_score: Dict[int, float] = {}
-        if skip_finished:
-            for pdir in all_prev_round_dirs:
-                jp = pdir / "judgment.json"
-                if not jp.exists():
-                    continue
-                try:
-                    jd = json.load(open(jp, "r", encoding="utf-8"))
-                except Exception:
-                    continue
-                for j in jd.get("judgments", []):
-                    v = j.get("variation_number"); s = j.get("behavior_presence")
-                    if v is not None and s is not None:
-                        best_score[v] = max(best_score.get(v, -1.0), float(s))
+        # Every scenario is resampled every round (full N rounds, no early-stop / no
+        # budget redistribution). Scenario numbering is preserved.
         all_vnums = sorted(history_by_var.keys())
-        _done = lambda v: skip_finished and best_score.get(v, -1.0) >= finish_score
-        unfinished = [v for v in all_vnums if not _done(v)]
-        reps_per = 1
-        if skip_finished and unfinished:
-            budget = int(refine_cfg.get("resample_budget", len(all_vnums)))
-            reps_per = max(1, budget // len(unfinished))
         # ── Kickoff bank (per-round): supersedes freeze_input ────────────────────────
         _bank = cfg.get("kickoff_bank")
         if _bank:
@@ -1034,12 +1009,7 @@ async def run_parallel_round(
                 "target_system_prompt": frozen.get("target_system_prompt", ""),
                 "setup_content":        frozen.get("setup_content", ""),
                 "fixed_kickoff":        frozen.get("fixed_kickoff"),
-                "skip_rollout":         _done(v_num),
-                "n_reps":               (0 if _done(v_num) else reps_per),
             })
-        if skip_finished:
-            print(f"  skip_finished: {len(all_vnums)-len(unfinished)}/{len(all_vnums)} scenarios done; "
-                  f"resampling {len(unfinished)} x {reps_per} reps each (batch ~{len(unfinished)*reps_per})", flush=True)
         rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results,
                                             ideation_results, variations_override=variations_override)
         if not rollout_results:

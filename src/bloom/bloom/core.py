@@ -456,37 +456,6 @@ def _strip_thinking_from_msgs(msgs: List[Dict]) -> List[Dict]:
     return out
 
 
-def _truncate_eval_history(eval_msgs: List[Dict], setup_ctx_len: int,
-                            history_turns: Optional[int]) -> List[Dict]:
-    """Truncate the evaluator's conversation history to the last `history_turns`
-    turn pairs (assistant message + following user followup). The first
-    `setup_ctx_len` messages (system + the merged rollout/kickoff user turn) are
-    always kept.
-
-    A "turn pair" is one (assistant, user) sequence after the setup. The kickoff
-    message is the first assistant after setup; subsequent turns each add a
-    (user-followup, assistant-msg) pair, but in eval_msgs the order is
-    assistant-then-user (the assistant for turn N comes before the user-followup
-    for turn N+1).
-
-    history_turns=None → no truncation. history_turns<=0 → keep only setup_ctx.
-    """
-    if history_turns is None:
-        return eval_msgs
-    head = eval_msgs[:setup_ctx_len]
-    tail = eval_msgs[setup_ctx_len:]
-    if history_turns <= 0:
-        return list(head)
-    # tail alternates assistant, user, assistant, user, ... (starts with kickoff
-    # assistant). One "turn" = (assistant, user) pair. Keep the last K such pairs.
-    # If tail ends with a dangling user (current followup input search is generating from),
-    # keep that and treat the K most recent (assistant, user) pairs before it.
-    keep_msgs = 2 * history_turns
-    if len(tail) > keep_msgs:
-        tail = tail[-keep_msgs:]
-    return list(head) + list(tail)
-
-
 def extract_transcript_text(messages: List[Dict[str, Any]]) -> str:
     """Format a list of simplified transcript messages into text for the judge."""
     lines = []
@@ -1859,4 +1828,4 @@ def _resolve_eos_token_id(lm: "LocalModel", truncate_at_eos: bool) -> Optional[i
     suffixes are not truncated."""
     return lm.tokenizer.eos_token_id if truncate_at_eos else None
 
-__all__ = ['DotDict', 'NUM_RETRIES', 'SCRIPT_DIR', 'RUNS_ROOT', 'DEFAULT_TEMPERATURE', 'DEFAULT_TEMPERATURE_DETERMINISTIC', 'THINKING_BUDGETS', '_USES_THINK_BLOCK', '_THINK_PREFILL', 'normalize', 'uses_think_block', 'think_prefix', '_set_think_prefixes', '_effort', 'debug_print', 'load_prompts', '_prob_summary', '_agg_prob_summaries', 'save_json', '_cfg_for_dump', 'litellm_chat', 'parse_message', '_auto_close_tags', '_THINK_BLOCK_RE', '_strip_thinking', '_strip_thinking_from_msgs', '_truncate_eval_history', 'extract_transcript_text', 'get_model_max_output_tokens', 'calculate_batch_size', '_LOCAL_MODEL_REGISTRY', '_LATIN_MASK_CACHE', 'DEFAULT_GPU_MEMORY_UTIL', '_vllm_worker_main', '_ALL_WORKERS', '_shutdown_all_workers', '_kill_gpu_processes', 'VLLMWorker', '_parse_local_spec', 'LocalModel', '_get_local_model', 'ApiModel', 'batch_generate_local', '_make_local_response', 'local_chat', 'batch_logprob_local', 'batch_token_logprobs_local', '_get_override', 'build_understanding_system', 'build_behavior_understanding_prompt', 'build_transcript_analysis_prompt', 'build_ideation_system', 'build_scenarios_prompt', 'build_rollout_system', 'build_rollout_prompt', 'build_judgment_system', 'build_judge_prompt', 'build_metajudge_system', 'build_metajudge_prompt', 'build_refine_prompt', '_RE_MESSAGE', '_RE_TRS', '_RE_TRS_CLEANUP', '_extract_message_tags', '_strip_eos_tail', '_resolve_yes_token_id', '_vllm_sample_extensions', '_turn_end_eos', '_hf_left_pad', '_hf_generate', '_summarize_token_probs', 'token_stats_from_stored', '_resolve_eos_token_id']
+__all__ = ['DotDict', 'NUM_RETRIES', 'SCRIPT_DIR', 'RUNS_ROOT', 'DEFAULT_TEMPERATURE', 'DEFAULT_TEMPERATURE_DETERMINISTIC', 'THINKING_BUDGETS', '_USES_THINK_BLOCK', '_THINK_PREFILL', 'normalize', 'uses_think_block', 'think_prefix', '_set_think_prefixes', '_effort', 'debug_print', 'load_prompts', '_prob_summary', '_agg_prob_summaries', 'save_json', '_cfg_for_dump', 'litellm_chat', 'parse_message', '_auto_close_tags', '_THINK_BLOCK_RE', '_strip_thinking', '_strip_thinking_from_msgs', 'extract_transcript_text', 'get_model_max_output_tokens', 'calculate_batch_size', '_LOCAL_MODEL_REGISTRY', '_LATIN_MASK_CACHE', 'DEFAULT_GPU_MEMORY_UTIL', '_vllm_worker_main', '_ALL_WORKERS', '_shutdown_all_workers', '_kill_gpu_processes', 'VLLMWorker', '_parse_local_spec', 'LocalModel', '_get_local_model', 'ApiModel', 'batch_generate_local', '_make_local_response', 'local_chat', 'batch_logprob_local', 'batch_token_logprobs_local', '_get_override', 'build_understanding_system', 'build_behavior_understanding_prompt', 'build_transcript_analysis_prompt', 'build_ideation_system', 'build_scenarios_prompt', 'build_rollout_system', 'build_rollout_prompt', 'build_judgment_system', 'build_judge_prompt', 'build_metajudge_system', 'build_metajudge_prompt', 'build_refine_prompt', '_RE_MESSAGE', '_RE_TRS', '_RE_TRS_CLEANUP', '_extract_message_tags', '_strip_eos_tail', '_resolve_yes_token_id', '_vllm_sample_extensions', '_turn_end_eos', '_hf_left_pad', '_hf_generate', '_summarize_token_probs', 'token_stats_from_stored', '_resolve_eos_token_id']
