@@ -130,11 +130,11 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "refinement_input": {
-        "model": judge_model,                # model that learns from prior rounds (defaults to judge model)
-        "max_tokens": 400,                   # max output tokens per refinement call — reduced to keep strategy concise
-        "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
-        "history_rounds": None,              # rounds of history fed into refinement prompt: None=all, 0=none (fresh each round), N=last N
-        "between_rounds_strategise": False,   # True = refiner observes prior transcripts and produces a strategy injected into round N+1's kickoff. False = each round is a fresh resample with no learning.
+        # Merged (PAIR-style) refinement: on rounds 2+ the evaluator itself sees prior history at
+        # the kickoff and emits <strategy>+<message> in one pass (no separate refiner model/call).
+        "enabled": False,                    # True = merged refinement (round-2+ kickoff sees prior history + guidance and emits <strategy>+<message>). False = each round is a fresh resample with no learning (BoN baseline).
+        "history_transcript_rounds": 2,      # how many prior FULL transcripts are shown at the kickoff: None=all, 0=none, N=last N
+        "history_strategy_rounds": None,     # how many prior (round, score, strategy) log rows are shown (also drives the guidance): None=all, 0=none, N=last N
     },
     "search_input": {
         # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
@@ -243,7 +243,7 @@ if __name__ == "__main__":
         ("BLOOM_EVAL_MAXTOK",    ("rollout", "evaluator_max_tokens"),         int),   # raise eval cap for hosted-API eval WITH thinking (budget reserved inside max_tokens)
         ("BLOOM_JUDGE_MAXTOK",   ("judgment", "max_tokens"),                  int),
         ("BLOOM_KICKOFF_BANK",   ("kickoff_bank",),                           str),
-        ("BLOOM_STRATEGISE",     ("refinement_input", "between_rounds_strategise"), _envbool),
+        ("BLOOM_REFINE",         ("refinement_input", "enabled"),                   _envbool),
         ("BLOOM_INPUT_SEARCH",   ("search_input", "enabled"),                 _envbool),
         ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      int),   # explicit int only (e.g. -50, or 0 = regenerate whole body)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
@@ -343,8 +343,8 @@ if __name__ == "__main__":
         # and the pure-resample/freeze path) read these as the FROZEN per-variation
         # `description`. Previously this was emptied to {"variations": []}, so every
         # round-2+ scenario description fell through to "" — which made all 25 kickoff
-        # prompts identical and collapsed the inputs to a single scenario. Refinements add
-        # `refined_strategy` on top via variations_override; they don't replace the scenarios.
+        # prompts identical and collapsed the inputs to a single scenario. Refinement adds
+        # `refine_context` on top via variations_override; it doesn't replace the scenarios.
         with open(round_1_dir / "ideation.json", "r", encoding="utf-8") as f:
             ideation_results = json.load(f)
         prompts_yaml = load_prompts(cfg)

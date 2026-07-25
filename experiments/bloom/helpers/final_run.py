@@ -13,7 +13,7 @@ For each (behaviour x model) cell it runs two arms into a distinct results tree:
                      extra rounds for compute-fairness).
 
 The kickoff bank (understanding + ideation + per-round kickoffs) is generated entirely by the
-AUDITOR and, with between_rounds_strategise=False (each round a fresh resample), is fully
+AUDITOR and, with refinement_input.enabled=False (each round a fresh resample), is fully
 TARGET-INDEPENDENT. So it is shared PER BEHAVIOUR across all models: bank lives at
 <runs-final>/<beh>/_bank, and every model for that behaviour is evaluated on the identical
 adversarial inputs. Cells run model-major (the first model builds each behaviour's bank; the
