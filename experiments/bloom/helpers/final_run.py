@@ -53,16 +53,17 @@ TURNS      = 3
 BON_ROUNDS = 8
 JAIL_ROUNDS = 5
 
-# var_batch (per-turn cross-scenario decode batch) — chosen from the box A6000 (49GB) probe
-# (helpers/batchbench.py, Qwen self_harm turn-3 WORST case = a chunk padded to the longest ctx):
-#   JAIL steps BOTH models (target + jail PoE), so it's memory-bound: 25 fits (4 chunks over 100
-#     scenarios) but TIGHT (~0.8GB margin); 34 OOMs. >>> IF A CELL OOMs ON THE JAIL ARM, drop
-#     JAIL_VAR_BATCH to 20 (5 chunks, ~14GB margin). <<<
-#   BoN loads ONE model (target_only skips the proposal copy) so it fits 34 comfortably (3 chunks,
-#     ~8GB margin). 40 is the SAME 3 chunks with less margin and no throughput gain (tok/s peaks
-#     ~34), so 34 is the pick. Both go via BLOOM_JAIL_VAR_BATCH (BoN routes through the jail path).
-JAIL_VAR_BATCH = 25
-BON_VAR_BATCH  = 34
+# var_batch (per-turn cross-scenario decode batch). Initially probed at 25/34 on a turn-3 bench,
+# but a REAL 8-round run OOMed on the BoN arm at round 7: single-model BoN@34 hit 44.6GB (needed
+# ~2.95GB more than free). The bench under-estimated because (a) real 100-scenario contexts run
+# longer than the 15-scenario transcripts it used, and (b) ~1.2GB of cross-round allocator
+# fragmentation accumulates over the 8 rounds in one process. So dropped to safe values with
+# ~13GB headroom (semantics-preserving; only batch size changes). Also set
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True per-run to curb the fragmentation the error flagged.
+# jail steps BOTH models (heavier) -> 20 (5 chunks); BoN loads ONE model -> 24 (5 chunks). If a cell
+# still OOMs, drop further via --jail-var-batch / --bon-var-batch.
+JAIL_VAR_BATCH = 20
+BON_VAR_BATCH  = 24
 
 # Model-major execution order: the FIRST model builds each behaviour's shared bank; the rest
 # reuse it. Qwen (the paper's representative slice) is the bank-builder. self_harm leads so the
@@ -137,6 +138,8 @@ def _run_arm(cell, arm, out_dir: Path, rounds: int, beta: float,
         "BLOOM_KICKOFF_BANK":  str(cell["bank"]),
         # per-arm decode batch: jail (2 models) tighter than BoN (1 model). See constants above.
         "BLOOM_JAIL_VAR_BATCH": str(JAIL_VAR_BATCH if arm == "jail" else BON_VAR_BATCH),
+        # curb cross-round allocator fragmentation (a real 8-round run OOMed partly on it).
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
     if arm == "jail":                       # self-jail at the chosen beta (floor on by default)
         env["BLOOM_JAIL_MODEL"] = "local/" + cell["model"]
