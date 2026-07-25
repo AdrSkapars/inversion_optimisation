@@ -155,22 +155,23 @@ def _run_arm(cell, arm, out_dir: Path, rounds: int, beta: float,
     return ok
 
 
-def _run_cell(cell, eval_gpu, target_gpu, resume) -> bool:
+def _run_cell(cell, eval_gpu, target_gpu, resume, bon_rounds, jail_rounds) -> bool:
     beh, model, beta = cell["beh"], cell["model"], cell["pm3_beta"]
     print(f"\n=== CELL {beh} x {model}  |  pm3 beta={beta:g}  |  "
-          f"BoN {SCENARIOS}x{BON_ROUNDS}x{TURNS}, jail {SCENARIOS}x{JAIL_ROUNDS}x{TURNS} ===", flush=True)
-    # 1) BoN (generates the shared bank).
-    if not _run_arm(cell, "bon", cell["base"] / "bon", BON_ROUNDS, 0.0,
+          f"BoN {SCENARIOS}x{bon_rounds}x{TURNS}, jail {SCENARIOS}x{jail_rounds}x{TURNS} ===", flush=True)
+    # 1) BoN (generates the shared bank: understanding + ideation + per-round kickoffs).
+    if not _run_arm(cell, "bon", cell["base"] / "bon", bon_rounds, 0.0,
                     eval_gpu, target_gpu, resume):
         print(f"  ABORT cell: BoN failed.", flush=True)
         return False
-    # 2) jail at pm3 beta (reuses the bank). beta==0 -> no steering selected; skip.
+    # 2) jail at pm3 beta. REUSES the bank (understanding/ideation/kickoffs) BoN just built, even at
+    # 1 round. beta==0 -> no steering selected; skip.
     if beta == 0.0:
         print(f"  [jail] pm3 beta is 0 -> sweep selected NO steering; chosen method is the "
-              f"8-round BoN itself. Skipping jail arm.", flush=True)
+              f"BoN run itself. Skipping jail arm.", flush=True)
     else:
         jdir = cell["base"] / f"jail_b{beta:g}"   # matches the sweep's folder convention
-        if not _run_arm(cell, "jail", jdir, JAIL_ROUNDS, beta,
+        if not _run_arm(cell, "jail", jdir, jail_rounds, beta,
                         eval_gpu, target_gpu, resume):
             print(f"  ABORT cell: jail failed.", flush=True)
             return False
@@ -178,7 +179,8 @@ def _run_cell(cell, eval_gpu, target_gpu, resume) -> bool:
     try:
         json.dump({"behaviour": beh, "model": model, "pm3_beta": beta,
                    "scenarios": SCENARIOS, "seed": SEED, "turns": TURNS,
-                   "bon_rounds": BON_ROUNDS, "jail_rounds": JAIL_ROUNDS,
+                   "bon_rounds": bon_rounds, "jail_rounds": jail_rounds,
+                   "jail_var_batch": JAIL_VAR_BATCH, "bon_var_batch": BON_VAR_BATCH,
                    "auditor": cell["auditor"],
                    "jail_skipped_beta0": (beta == 0.0)},
                   open(cell["base"] / "cell.json", "w", encoding="utf-8"), indent=2)
@@ -195,6 +197,8 @@ def main():
     ap.add_argument("--target-gpu", type=int, default=1)
     ap.add_argument("--no-resume", action="store_true", help="re-run arms even if their final judgment.json exists")
     ap.add_argument("--keep-going", action="store_true", help="continue to later cells after a cell fails (default: HALT on first failure -- we do not advance past a broken cell)")
+    ap.add_argument("--bon-rounds", type=int, default=BON_ROUNDS, help=f"BoN rounds (default {BON_ROUNDS}; use 1 for the quick checkpoint)")
+    ap.add_argument("--jail-rounds", type=int, default=JAIL_ROUNDS, help=f"jail rounds (default {JAIL_ROUNDS}; use 1 for the quick checkpoint -- still reuses the bank)")
     ap.add_argument("--list", action="store_true", help="print the cell plan (betas, arms) and exit")
     a = ap.parse_args()
 
@@ -215,12 +219,12 @@ def main():
         return
 
     resume = not a.no_resume
-    print(f"== FINAL WILT run | {len(cells)} cell(s) | out=experiments/bloom/{a.runs_final} | "
-          f"eval-gpu {a.eval_gpu} target-gpu {a.target_gpu} | resume={resume} | "
-          f"halt-on-error={not a.keep_going} ==", flush=True)
+    print(f"== FINAL WILT run | {len(cells)} cell(s) | BoN {a.bon_rounds}rd + jail {a.jail_rounds}rd | "
+          f"out=experiments/bloom/{a.runs_final} | eval-gpu {a.eval_gpu} target-gpu {a.target_gpu} | "
+          f"resume={resume} | halt-on-error={not a.keep_going} ==", flush=True)
     ok, bad = 0, []
     for c in cells:
-        if _run_cell(c, a.eval_gpu, a.target_gpu, resume):
+        if _run_cell(c, a.eval_gpu, a.target_gpu, resume, a.bon_rounds, a.jail_rounds):
             ok += 1
         else:
             bad.append(f"{c['beh']}/{c['model_dir']}")
