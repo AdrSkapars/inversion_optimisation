@@ -236,54 +236,72 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
     )
 
     if model_id.startswith("local/"):
-        # ── Local model fast path ────────────────────────────────────────────
-        # No API output token cap, so generate all scenarios in a single call.
-        print(f"Generating {num_scenarios} scenarios in 1 call (local model)...", flush=True)
-        prompt = build_scenarios_prompt(
-            behavior_name, num_scenarios,
-            behavior_understanding, scientific_motivation, transcript_analyses,
-            prompts_yaml,
-            start_idx=1, end_idx=num_scenarios,
-        )
+        # ── Local model: CHUNKED generation ──────────────────────────────────
+        # The local auditor has a FIXED context window (evaluator_max_model_len, default 16384),
+        # so a single all-scenarios call cannot fit large num_scenarios (100 scenarios ~= 50-60k
+        # output tokens >> the window). Generate in fixed-size chunks; each chunk is a FRESH,
+        # NON-accumulating call with a new seed, carrying only a COMPACT one-line list of prior
+        # scenarios for de-duplication — so the prompt stays ~constant regardless of num_scenarios.
+        # (The old single-call + accumulating top-up silently capped out once the accumulated
+        # context filled the window; see run_ideation history.) Short chunks are simply re-asked.
         hf_name = model_id[len("local/"):]
         lm = _get_local_model(hf_name)
-        raw = batch_generate_local(
-            lm,
-            [[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]],
-            max_new_tokens=max_tokens,
-            temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
-            no_think=reasoning_effort == "none",
-            seed=seed,
-        )[0]
-        all_scenarios = parse_scenarios_response(raw)
-        print(f"Got {len(all_scenarios)} scenarios (expected {num_scenarios})", flush=True)
-        # Robust top-up: the local model sometimes emits N-1 scenarios and stops at EOS. Rather
-        # than fail, continue from the accumulated context asking ONLY for the missing ones
-        # (renumbered to resume), up to a few attempts — mirrors the API multi-batch path.
-        _ide_msgs = [{"role": "system", "content": system_prompt},
-                     {"role": "user", "content": prompt},
-                     {"role": "assistant", "content": raw}]
+        chunk_size = int(cfg.ideation.get("chunk_size", 10))
+        # Per-call budget: leave room in the window for context + dedup list + the thinking block.
+        per_call_max = min(int(max_tokens), 800 * chunk_size + 3000)
+        # Behaviour context (understanding + motivation): build_scenarios_prompt only emits it on
+        # start_idx==1, so replicate it for later chunks (the ideation SYSTEM prompt does NOT carry
+        # the understanding text) to keep every chunk grounded.
+        ctx = ""
+        if behavior_understanding:
+            ctx += f"\nBEHAVIOR UNDERSTANDING:\n{behavior_understanding}\n"
+        if scientific_motivation:
+            ctx += f"\nSCIENTIFIC MOTIVATION:\n{scientific_motivation}\n"
+        all_scenarios: List[Dict[str, Any]] = []
+        _seen = set()
+        max_attempts = -(-num_scenarios // chunk_size) + 6      # ceil(num/chunk) + slack for short chunks
+        print(f"Generating {num_scenarios} scenarios in chunks of {chunk_size} "
+              f"(local model, per-call cap {per_call_max})...", flush=True)
         _attempt = 0
-        while len(all_scenarios) < num_scenarios and _attempt < 3:
+        while len(all_scenarios) < num_scenarios and _attempt < max_attempts:
             _attempt += 1
-            _have = len(all_scenarios)
-            _topup = build_scenarios_prompt(
+            have = len(all_scenarios)
+            start_idx = have + 1
+            end_idx = min(have + chunk_size, num_scenarios)
+            chunk_prompt = build_scenarios_prompt(
                 behavior_name, num_scenarios,
                 behavior_understanding, scientific_motivation, transcript_analyses,
-                prompts_yaml, start_idx=_have + 1, end_idx=num_scenarios,
+                prompts_yaml, start_idx=start_idx, end_idx=end_idx,
             )
-            print(f"  Top-up {_attempt}/3: have {_have}, requesting scenarios {_have + 1}-{num_scenarios}...", flush=True)
-            _ide_msgs.append({"role": "user", "content": _topup})
-            _raw2 = batch_generate_local(
-                lm, [_ide_msgs], max_new_tokens=max_tokens,
+            if start_idx > 1:
+                # later chunks: builder omits the context block -> prepend it + a bounded, compact
+                # dedup list (most-recent priors, one truncated line each) so context stays small.
+                prior = "\n".join(f"- {(s.get('description', '') or '')[:110]}"
+                                  for s in all_scenarios[-60:])
+                chunk_prompt = (f"{ctx}\n{chunk_prompt}\n\nYou have ALREADY written the {have} "
+                                f"scenarios below (most recent shown). Generate NEW, materially "
+                                f"different scenarios — do not repeat any of these:\n{prior}")
+            _seed = (seed + _attempt) if seed is not None else None   # new seed each chunk
+            raw = batch_generate_local(
+                lm, [[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": chunk_prompt}]],
+                max_new_tokens=per_call_max,
                 temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
                 no_think=reasoning_effort == "none",
-                seed=seed,   # keep the run's seed; the growing context (prior answer + new ask) differs each attempt
+                seed=_seed,
             )[0]
-            _ide_msgs.append({"role": "assistant", "content": _raw2})
-            _more = parse_scenarios_response(_raw2)
-            all_scenarios.extend(_more)
-            print(f"    Got {len(_more)} more (total {len(all_scenarios)}/{num_scenarios})", flush=True)
+            got = parse_scenarios_response(raw)
+            added = 0
+            for s in got:
+                key = re.sub(r"\s+", " ", (s.get("description", "") or "")).strip().lower()[:200]
+                if key and key not in _seen:          # drop exact cross-chunk duplicates
+                    _seen.add(key)
+                    all_scenarios.append(s)
+                    added += 1
+                    if len(all_scenarios) >= num_scenarios:
+                        break
+            print(f"  chunk {_attempt}: parsed {len(got)}, +{added} new "
+                  f"-> {len(all_scenarios)}/{num_scenarios}", flush=True)
     else:
         # ── API path: multi-batch with accumulated context ───────────────────
         # Needed because API models have a hard output token cap.

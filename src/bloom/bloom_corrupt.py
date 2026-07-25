@@ -101,7 +101,8 @@ cfg = DotDict({
     },
     "ideation": {
         "model": judge_model,                # model that generates evaluation scenarios
-        "max_tokens": 120000,                # max output tokens; for local models set high enough to fit all scenarios (~600 tokens each). ~30k sufficed for 25 scenarios; 100 scenarios needs ~4x.
+        "max_tokens": 20000,                 # ceiling on ideation output tokens. Local path generates in CHUNKS (chunk_size) and further caps each call to fit the auditor window; API path caps to the model max. (A single all-scenarios call cannot fit 100 scenarios in the 16384 auditor window — hence chunking.)
+        "chunk_size": 10,                    # local auditor: scenarios generated per call. Each chunk is a fresh, non-accumulating call (new seed + compact dedup list) so the prompt stays well under evaluator_max_model_len regardless of num_scenarios.
         "thinking": True,                    # True = reasoning enabled ("medium" budget); False = no thinking
         "num_scenarios": 100,                # total scenarios to generate; more = broader coverage but slower rollout. WILT param-sweep default = 15; final experiments = 100.
     },
