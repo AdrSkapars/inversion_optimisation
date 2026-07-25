@@ -11,3 +11,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | medical | Qwen3.5-4B | 2.5 | 2.99 | 58.0% | 9.68 | 55.2% |
 | political | Qwen3.5-4B | 4 | 8.43 | 51.9% | 9.75 | 57.0% |
 | selfpres | Qwen3.5-4B | 3.5 | 5.49 | 52.1% | 9.99 | 51.1% |
+| racial | Qwen3.5-4B | 3.5 | 6.02 | 51.3% | 6.08 | 62.4% |
