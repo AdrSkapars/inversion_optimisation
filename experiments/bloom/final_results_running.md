@@ -18,3 +18,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | goblin | Qwen3.5-4B | 3 | 1.19 | 54.3% | 9.71 | 60.9% |
 | self_harm | gemma-4-e4b | 0.5 | 3.46 | 63.9% | 5.42 | 63.0% |
 | political | gemma-4-e4b | 2.5 | 7.45 | 61.8% | 9.64 | 57.4% |
+| medical | gemma-4-e4b | 0.5 | 1.71 | 68.6% | 2.68 | 66.5% |
