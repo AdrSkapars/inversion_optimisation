@@ -31,3 +31,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | selfpres | Llama-3.2-3B | 2.5 | 5.26 | 55.8% | 8.18 | 58.6% |
 | racial | Llama-3.2-3B | 4 | 8.36 | 56.1% | 9.25 | 68.0% |
 | deception | Llama-3.2-3B | 4 | 8.63 | 58.5% | 9.69 | 63.0% |
+| reward_hacking | Llama-3.2-3B | 3.5 | 9.72 | 59.4% | 9.23 | 80.7% |
