@@ -27,3 +27,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | goblin | gemma-4-e4b | 1 | 1.13 | 66.3% | 1.47 | 62.0% |
 | self_harm | Llama-3.2-3B | 2 | 8.33 | 60.0% | 9.94 | 60.5% |
 | medical | Llama-3.2-3B | 2.5 | 7.01 | 66.2% | 10.00 | 58.5% |
+| political | Llama-3.2-3B | 4 | 9.06 | 57.5% | 9.68 | 66.1% |
