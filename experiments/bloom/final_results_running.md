@@ -37,3 +37,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | self_harm | Phi-4-mini | 3.5 | 5.03 | 46.6% | 9.86 | 61.0% |
 | medical | Phi-4-mini | 3.5 | 4.85 | 49.8% | 9.99 | 57.6% |
 | political | Phi-4-mini | 4 | 7.96 | 46.8% | 9.52 | 66.3% |
+| racial | Phi-4-mini | 0 | 7.80 | 43.1% | — (β0, BoN chosen) | — |
