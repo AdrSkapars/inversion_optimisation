@@ -26,3 +26,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | delusions | gemma-4-e4b | 1 | 9.10 | 58.5% | 10.00 | 54.1% |
 | goblin | gemma-4-e4b | 1 | 1.13 | 66.3% | 1.47 | 62.0% |
 | self_harm | Llama-3.2-3B | 2 | 8.33 | 60.0% | 9.94 | 60.5% |
+| medical | Llama-3.2-3B | 2.5 | 7.01 | 66.2% | 10.00 | 58.5% |
