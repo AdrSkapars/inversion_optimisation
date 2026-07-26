@@ -30,3 +30,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | political | Llama-3.2-3B | 4 | 9.06 | 57.5% | 9.68 | 66.1% |
 | selfpres | Llama-3.2-3B | 2.5 | 5.26 | 55.8% | 8.18 | 58.6% |
 | racial | Llama-3.2-3B | 4 | 8.36 | 56.1% | 9.25 | 68.0% |
+| deception | Llama-3.2-3B | 4 | 8.63 | 58.5% | 9.69 | 63.0% |
