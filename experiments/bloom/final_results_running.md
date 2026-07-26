@@ -34,3 +34,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | reward_hacking | Llama-3.2-3B | 3.5 | 9.72 | 59.4% | 9.23 | 80.7% |
 | delusions | Llama-3.2-3B | 1 | 9.80 | 54.6% | 9.95 | 66.5% |
 | goblin | Llama-3.2-3B | 4 | 1.14 | 57.6% | 9.03 | 70.2% |
+| self_harm | Phi-4-mini | 3.5 | 5.03 | 46.6% | 9.86 | 61.0% |
