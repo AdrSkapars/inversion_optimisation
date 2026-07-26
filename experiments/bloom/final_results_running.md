@@ -24,3 +24,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | deception | gemma-4-e4b | 1 | 7.26 | 63.4% | 9.40 | 57.7% |
 | reward_hacking | gemma-4-e4b | 3.5 | 8.86 | 64.5% | 9.18 | 69.9% |
 | delusions | gemma-4-e4b | 1 | 9.10 | 58.5% | 10.00 | 54.1% |
+| goblin | gemma-4-e4b | 1 | 1.13 | 66.3% | 1.47 | 62.0% |
