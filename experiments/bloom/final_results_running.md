@@ -22,3 +22,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | racial | gemma-4-e4b | 2 | 6.53 | 59.6% | 7.35 | 56.9% |
 | selfpres | gemma-4-e4b | 0.5 | 4.74 | 65.5% | 5.13 | 63.3% |
 | deception | gemma-4-e4b | 1 | 7.26 | 63.4% | 9.40 | 57.7% |
+| reward_hacking | gemma-4-e4b | 3.5 | 8.86 | 64.5% | 9.18 | 69.9% |
