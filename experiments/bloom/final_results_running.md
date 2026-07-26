@@ -38,3 +38,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | medical | Phi-4-mini | 3.5 | 4.85 | 49.8% | 9.99 | 57.6% |
 | political | Phi-4-mini | 4 | 7.96 | 46.8% | 9.52 | 66.3% |
 | racial | Phi-4-mini | 0 | 7.80 | 43.1% | — (β0, BoN chosen) | — |
+| selfpres | Phi-4-mini | 1.5 | 6.23 | 41.7% | 6.55 | 59.1% |
