@@ -28,3 +28,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | self_harm | Llama-3.2-3B | 2 | 8.33 | 60.0% | 9.94 | 60.5% |
 | medical | Llama-3.2-3B | 2.5 | 7.01 | 66.2% | 10.00 | 58.5% |
 | political | Llama-3.2-3B | 4 | 9.06 | 57.5% | 9.68 | 66.1% |
+| selfpres | Llama-3.2-3B | 2.5 | 5.26 | 55.8% | 8.18 | 58.6% |
