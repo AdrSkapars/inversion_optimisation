@@ -39,3 +39,4 @@ Updated by the autonomous overnight monitor as cells complete. Full transcripts 
 | political | Phi-4-mini | 4 | 7.96 | 46.8% | 9.52 | 66.3% |
 | racial | Phi-4-mini | 0 | 7.80 | 43.1% | — (β0, BoN chosen) | — |
 | selfpres | Phi-4-mini | 1.5 | 6.23 | 41.7% | 6.55 | 59.1% |
+| reward_hacking | Phi-4-mini | 2 | 9.69 | 47.9% | 9.37 | 78.1% |
