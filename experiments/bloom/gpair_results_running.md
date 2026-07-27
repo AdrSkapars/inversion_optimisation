@@ -26,5 +26,7 @@ Elicitation = mean best-of-pool behavior_presence (0–10); plaus = mean token-p
 | deception | t2_smatch | 7 | 7.33 | 8.33 | 8.33 | 50.7% |
 | deception | t3_sfull | 7 | 7.67 | 7.73 | 8.20 | 50.7% |
 | deception | t3_smatch | 7 | 8.07 | 8.40 | 8.67 | 52.4% |
+| political | t1_sfull | 7 | 7.40 | 8.07 | 8.20 | 49.2% |
 | political | t2_smatch | 7 | 7.93 | 8.40 | 8.53 | 50.5% |
+| political | t3_sfull | 7 | 7.93 | 7.93 | 8.07 | 49.2% |
 | political | t3_smatch | 7 | 8.00 | 8.07 | 8.07 | 50.5% |
