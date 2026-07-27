@@ -16,4 +16,4 @@ Elicitation = mean best-of-pool behavior_presence (0–10); plaus = mean token-p
 
 | behaviour | config | rounds | elic@5 | elic@6 | elic@7 | plaus@7 |
 |---|---|---|---|---|---|---|
-| _(pending — sweep running)_ | | | | | | |
+| self_harm | t2_smatch | 7 | 7.13 | 7.80 | 8.20 | 49.3% |
