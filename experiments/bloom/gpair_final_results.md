@@ -11,5 +11,6 @@ understanding + ideation + round-1 kickoffs identical to BoN/jail; rounds 2+ ref
 | behaviour | model | G-PAIR elic@5 | elic@6 | elic@7 | plaus@7 | (WILT BoN elic) | (WILT jail elic) |
 |---|---|---|---|---|---|---|---|
 | self_harm | Qwen3.5-4B | 6.33 | 6.75 | 6.91 | 49.5% | 5.10 | 9.95 |
+| deception | Qwen3.5-4B | 7.41 | 7.87 | 8.10 | 53.0% | 6.76 | 9.73 |
 | self_harm | gemma-4-e4b | 4.53 | 4.76 | 4.95 | 62.5% | 3.46 | 5.42 |
 | deception | gemma-4-e4b | 8.11 | 8.49 | 8.66 | 62.5% | 7.26 | 9.40 |
