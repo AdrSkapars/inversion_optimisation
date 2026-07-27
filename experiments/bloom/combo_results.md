@@ -7,6 +7,9 @@ runs_new/<beh>/<model>/combo_jailrefine/.
 
 Baselines (15-scen elic@5, best-of-pool) for comparison. Question: does combo > jail-alone?
 
-| behaviour | model | β | COMBO elic@5/6/7 | plaus@7 | (jail-alone) | (G-PAIR-alone) | (BoN) |
+All 15-scen, seed 1. jail-alone + BoN baselines are @5 rounds; COMBO @5 is the rounds-matched
+comparison. best-of-pool.
+
+| behaviour | model | β | COMBO elic@5/6/7 | plaus@7 | jail-alone @5 | BoN @5 | verdict |
 |---|---|---|---|---|---|---|---|
-| _(pending — combo runs in flight)_ | | | | | | | |
+| self_harm | gemma-4-e4b | 0.5 | 7.60 / 7.60 / 7.87 | 61.3% | 5.27 | 2.33 | **combo ≫ jail (+2.33 @5)** |
