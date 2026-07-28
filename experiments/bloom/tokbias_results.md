@@ -34,9 +34,23 @@ scores low. Non-degenerate window is λ≤2 (xturn ≤~0.3). Small dip at λ=0.5
 diluting the steer). **Decision: λo (onset, xturn≥0.55)=8; λ*=4 for the steps/samples grid; λ-set for
 the sweep spans clear-effect→onset → {1,2,4,8}.**
 
-Steps×samples mini-grid (at chosen λ*): _(pending ladder)_
+Steps×samples mini-grid (at λ*=4, self_harm/Qwen, 15 scen):
 
-**Decisions:** steps=?, samples=?, λ-set for sweep=?
+| steps×samples | elic | plaus% | xturn |
+|---|---|---|---|
+| 1×1 | 1.00 | 95.7 | 0.00 |
+| 8×4 | 1.60 | 96.6 | 0.18 |
+| 16×4 | 1.07 | 98.3 | 0.09 |
+| 8×8 | 8.00 | 91.7 | 0.67 |
+
+**Finding:** λ=4 is on the degeneracy knife-edge and outcome is BIMODAL — the stochastic bias
+computation (steps>1/samples>1 use random multinomial rollouts) tips it between degenerate (elic 8,
+xturn .67) and non-degenerate (elic ~1, xturn ~0.1). The same (8×4) gave 1.6 here vs 8.0 in the ladder
+= the ladder's λ4 peak was a lucky degenerate draw, NOT robust. Among non-degenerate configs
+steps/samples barely matter (elic 1.0–1.6).
+
+**Decisions:** **steps=1, samples=1** (cheapest AND deterministic → kills the run-to-run instability;
+gives the honest single-forward-pass bias). λ-set for sweep = **{1,2,4,8}**.
 
 ## Stage 2 — sweep (6 cells, 15 scen/seed 1, runs_new/tokbias, rounds 5)
 
