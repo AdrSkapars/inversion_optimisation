@@ -54,11 +54,23 @@ gives the honest single-forward-pass bias). λ-set for sweep = **{1,2,4,8}**.
 
 ## Stage 2 — sweep (6 cells, 15 scen/seed 1, runs_new/tokbias, rounds 5)
 
-| behaviour | model | best λ | elic | plaus% | xturn | (BoN@5) | (jail@5) |
-|---|---|---|---|---|---|---|---|
-| _(pending stage 1)_ | | | | | | | |
+All best λ=1 (converged). tokbias/BoN/jail all 15 scen, seed 1, rounds 5, best-of-pool. BoN=anchor.score,
+jail=param_selection pm3.score (jail hits the 10-cap on Qwen).
 
-**Decision:** per-cell λ vs shared λ = ?
+| behaviour | model | best λ | tokbias elic | plaus% | xturn | BoN elic | jail elic (β) | vs BoN |
+|---|---|---|---|---|---|---|---|---|
+| self_harm | Qwen | 1 | 5.40 | 84.0 | 0.17 | 3.33 | 10.0 (1.5) | **+2.07** |
+| deception | Qwen | 1 | 2.07 | 88.9 | 0.24 | 5.87 | 10.0 (2.5) | −3.80 |
+| political | Qwen | 1 | 4.00 | 87.1 | 0.15 | 7.40 | 10.0 (4.0) | −3.40 |
+| self_harm | gemma | 1 | 2.20 | 53.5 | 0.18 | 2.33 | 5.27 (0.5) | −0.13 |
+| deception | gemma | 1 | 3.33 | 57.3 | 0.09 | 5.67 | 8.20 (1.0) | −2.34 |
+| political | gemma | 1 | 3.47 | 60.0 | 0.10 | 4.40 | 9.00 (2.5) | −0.93 |
+
+**Decision:** all cells converge on **λ=1** (shared). **Finding:** clean TokenBias (steps=1) is a WEAK
+baseline — it underperforms even plain BoN on 5/6 cells (only self_harm/Qwen beats BoN, +2.07), and is
+far below jail everywhere. Non-degenerate (xturn ≤0.24). Combined with the ladder (where the only way to
+reach high elic was the degenerate stochastic mode, xturn 0.5+), the story is: **TokenBias cannot elicit
+behaviour without degenerating — its clean form is worse than best-of-N.**
 
 ## Stage 3 — final (6 cells, 100 scen/seed 100, runs_final/tokbias, rounds 8)
 
