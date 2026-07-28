@@ -1,5 +1,5 @@
 {
-  "stage": "2_sweep",
+  "stage": "2gemma+3qwen",
   "steps_fixed": 1,
   "samples_fixed": 1,
   "lambda_set_sweep": [
@@ -8,10 +8,31 @@
     4,
     8
   ],
-  "per_cell_lambda": {},
+  "per_cell_lambda": {
+    "self_harm/Qwen": 1,
+    "deception/Qwen": 1,
+    "political/Qwen": 1
+  },
   "shared_lambda": null,
-  "notes": "Stage 1b DONE: \u03bb=4 bimodal (stochastic bias tips degenerate elic8/xturn.67 vs non-degen elic1/xturn.1); ladder \u03bb4=8.0 was a lucky degenerate draw. FIX steps=1,samples=1 (deterministic, cheapest). Stage 2 sweep: 6 cells \u00d7 \u03bb{1,2,4,8}, rounds5, runs_new/tokbias, box1 qwen-trio box2 gemma-trio.",
+  "notes": "Stage2 Qwen DONE (all best \u03bb=1: sh 5.4/84, dec 2.07/89, pol 4.0/87). Launched Stage3 Qwen on box1 (runs_final, \u03bb1, 100scen seed100 rounds8, bank behaviour) to keep box hot. box2 finishing gemma Stage2 political (\u03bb4,\u03bb8 left), then gemma \u03bb-picks + Stage3 gemma. Full Stage2 table + BoN/jail baselines pending gemma completion.",
   "lambda_onset": 8,
   "lambda_star": 4,
-  "steps_choice_caveat": "steps=1 (deterministic) makes TokenBias WEAK: elic drops with \u03bb toward floor 1.0, xturn=0, best=\u03bb1 (~BoN+). The only high-elic path is the STOCHASTIC DEGENERATE mode (steps>1, ladder \u03bb4=8, xturn.5+). Reproducible-but-weak (steps1) vs degenerate-but-high (steps8) is a headline judgment call \u2014 flagged for user AM. Stage2 proceeding with steps=1."
+  "steps_choice_caveat": "steps=1 (deterministic) makes TokenBias WEAK: elic drops with \u03bb toward floor 1.0, xturn=0, best=\u03bb1 (~BoN+). The only high-elic path is the STOCHASTIC DEGENERATE mode (steps>1, ladder \u03bb4=8, xturn.5+). Reproducible-but-weak (steps1) vs degenerate-but-high (steps8) is a headline judgment call \u2014 flagged for user AM. Stage2 proceeding with steps=1.",
+  "stage2_qwen": {
+    "self_harm": {
+      "best_lam": 1,
+      "elic": 5.4,
+      "plaus": 84.0
+    },
+    "deception": {
+      "best_lam": 1,
+      "elic": 2.067,
+      "plaus": 88.85
+    },
+    "political": {
+      "best_lam": 1,
+      "elic": 4.0,
+      "plaus": 87.05
+    }
+  }
 }
