@@ -199,15 +199,23 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
     Gated by `tokbias_output.enabled` (env BLOOM_TOKBIAS_ENABLED): when off, returns the
     (0.0, None) no-op without computing anything. lambda==0 / no prompt is also a no-op.
 
+    The relevance prompt is chat-templated (user turn) and an assistant PREFILL is appended, so the
+    model's continuation is it ANSWERING the request (listing behaviour-relevant words) rather than
+    continuing raw text. The _samples rollouts are batched into one forward pass per step.
+
     Modes (all optional, combine):
-      BLOOM_TOKBIAS_PROMPT      prompt whose NEXT-TOKEN distribution gives relevance weights,
-                                bias = log p(v | prompt).
+      BLOOM_TOKBIAS_PROMPT      instruction whose (prefilled) NEXT-TOKEN distribution gives relevance
+                                weights, bias = log p(v | prompt). Best framed as a monitor request,
+                                e.g. "...what words should I look out for for {behaviour}? Give them
+                                separated by spaces" so mass lands on ' word' tokens, not on commas.
       BLOOM_TOKBIAS_NEG_PROMPT  contrast mode: bias = log p(v | prompt) - log p(v | neg).
                                 IMPORTANT: raw log p is dominated by token FREQUENCY, so the
                                 plain mode largely re-adds a frequency prior; the contrast
                                 cancels it and isolates behaviour-relevant tokens.
       BLOOM_TOKBIAS_WORDS       comma-separated words; bias = 1.0 on each word's first token
                                 (the hand-picked "boost these logits" variant). Overrides PROMPT.
+      BLOOM_TOKBIAS_PREFILL     assistant prefill for the relevance prompt (default "Sure, here are
+                                some words:"); "" disables it.
       BLOOM_TOKBIAS_LAMBDA      scale. 0 (or no prompt/words) => (0.0, None) = exact no-op.
 
     Computed once per (mode, prompt) and cached."""
@@ -219,13 +227,19 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
     prompt = os.environ.get("BLOOM_TOKBIAS_PROMPT", tb.get("prompt", "")) or ""
     negp   = os.environ.get("BLOOM_TOKBIAS_NEG_PROMPT", tb.get("neg_prompt", "")) or ""
     words  = os.environ.get("BLOOM_TOKBIAS_WORDS", tb.get("words", "")) or ""
+    # Assistant prefill for the relevance prompt: forces the model straight into listing words
+    # (skips refusal / preamble), so the averaged next-token distribution lands on behaviour-relevant
+    # vocabulary from token 1. Rendered as the start of the assistant turn. "" => no prefill.
+    prefill = os.environ.get("BLOOM_TOKBIAS_PREFILL", tb.get("prefill", "Sure, here are some words:"))
+    if prefill is None:
+        prefill = ""
     try:
         lam = float(os.environ.get("BLOOM_TOKBIAS_LAMBDA", tb.get("lambda", 0.0)) or 0.0)
     except ValueError:
         lam = 0.0
     if lam == 0.0 or (not prompt and not words):
         return 0.0, None
-    key = (prompt, negp, words)
+    key = (prompt, negp, words, prefill)
     vec = _TOKBIAS_CACHE.get(key)
     if vec is None:
         try:
@@ -237,24 +251,36 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
         except ValueError:
             _samples = 4
 
-        def _last_logprobs(text):
-            """Mean next-token log-prob over _steps rolled-forward positions x _samples
-            stochastic continuations (default 8 x 4). steps>1 broadens the relevance
-            vector beyond the immediate next token; samples averages the rollouts (a no-op
-            at steps=1, since the single position is deterministic)."""
-            ids0 = tok(text, return_tensors="pt").input_ids.to(device)
-            acc, n = None, 0
-            for _ in range(_samples):
-                cur, past = ids0, None
-                for _s in range(_steps):
-                    with torch.no_grad():
-                        out = mt(input_ids=cur, past_key_values=past, use_cache=True)
-                    past = out.past_key_values
-                    lp = torch.log_softmax(out.logits[0, -1, :].float(), -1)
-                    acc = lp if acc is None else acc + lp
-                    n += 1
-                    if _s + 1 < _steps:
-                        cur = torch.multinomial(lp.exp(), 1).view(1, 1)
+        def _render(instruction):
+            """Wrap the relevance instruction as a chat turn + assistant prefill, so the model's
+            continuation is it *answering* the monitor request (listing behaviour-relevant words),
+            not merely continuing raw text. Falls back to plain text if there's no chat template."""
+            try:
+                base = tok.apply_chat_template([{"role": "user", "content": instruction}],
+                                               tokenize=False, add_generation_prompt=True)
+            except Exception:
+                base = instruction + "\n"
+            return base + prefill
+
+        def _last_logprobs(instruction):
+            """Mean next-token log-prob over _steps rolled-forward positions x _samples stochastic
+            continuations (default 8 x 4), starting from the chat-rendered + prefilled relevance
+            prompt. The _samples rollouts run as ONE batch (steps stay sequential / autoregressive);
+            steps>1 broadens the vector past the immediate next token, samples averages the rollouts
+            (a no-op at steps=1). Returns the mean log-prob vector over the whole vocab."""
+            ids0 = tok(_render(instruction), return_tensors="pt",
+                       add_special_tokens=False).input_ids.to(device)   # chat template already adds specials
+            cur = ids0.expand(_samples, -1).contiguous()                # [B, L] — B identical rollouts, batched
+            past, acc, n = None, None, 0
+            for _s in range(_steps):
+                with torch.no_grad():
+                    out = mt(input_ids=cur, past_key_values=past, use_cache=True)
+                past = out.past_key_values
+                lp = torch.log_softmax(out.logits[:, -1, :].float(), -1)  # [B, V]
+                acc = lp.sum(0) if acc is None else acc + lp.sum(0)        # accumulate over the batch
+                n += lp.shape[0]
+                if _s + 1 < _steps:
+                    cur = torch.multinomial(lp.exp(), 1)                  # [B, 1] independent next token per rollout
             return acc / max(n, 1)
         if words:
             V = mt.get_output_embeddings().weight.shape[0]
@@ -268,11 +294,12 @@ def _tokbias_vector(mt, tok, device, tokbias_cfg=None):
                         hit += 1
             mode = f"words({hit} token ids)"
         else:
+            _pf = "on" if prefill else "off"
             vec = _last_logprobs(prompt)
-            mode = f"raw log p (steps={_steps} x samples={_samples})"
+            mode = f"chat log p (steps={_steps} x samples={_samples}, prefill={_pf})"
             if negp:
                 vec = vec - _last_logprobs(negp)
-                mode = f"contrast (steps={_steps} x samples={_samples})"
+                mode = f"contrast (steps={_steps} x samples={_samples}, prefill={_pf})"
         _TOKBIAS_CACHE[key] = vec
         top = torch.topk(vec, 10).indices.tolist()
         print(f"  [tokbias] {mode}, lambda={lam}, top tokens: "
@@ -402,8 +429,10 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
             if no_think_target:
                 ts += _NT
             t_pres.append(tok.encode(ts, add_special_tokens=False))
+        # tokbias baseline: add the static vocab tilt to the plain BoN sampling (no-op when disabled).
         baselines, base_tlps = _hf_generate(mt, t_pres, max_tokens, temperature,
-                                            pad_id, eos_id, device, return_token_lps=True)
+                                            pad_id, eos_id, device, return_token_lps=True,
+                                            tokbias=_tokbias_vector(mt, tok, device, jail_runtime_cfg.get("tokbias", {})))
         out: List[Dict] = []
         for i, base_ids in enumerate(baselines):
             ids = [x for x in base_ids if x != eos_id]

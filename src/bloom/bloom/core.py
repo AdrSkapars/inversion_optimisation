@@ -1763,14 +1763,21 @@ def _hf_left_pad(seqs: List[List[int]], pad_id: int, device):
 
 
 def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: float,
-                 pad_id: int, eos_id: int, device, return_token_lps: bool = False):
+                 pad_id: int, eos_id: int, device, return_token_lps: bool = False, tokbias=None):
     """Plain batched sampling from one HF model.
 
     return_token_lps: also return, per sequence, the list of per-token true-model logprobs of
     the sampled (non-eos) tokens — captured for FREE from the logits already computed each step
-    (the on-policy token probabilities), so the caller needs no separate scoring forward pass."""
+    (the on-policy token probabilities), so the caller needs no separate scoring forward pass.
+
+    tokbias: optional (lam, vec) static vocab tilt (the logit-bias baseline). When given, sample
+    from the BIASED logits z = logits + lam*vec, but still capture the token-prob from the TRUE
+    (unbiased) logits, so plausibility stays an honest naturalness measure. (0.0, None)/None = no-op."""
     with torch.no_grad():
         B = len(prefixes)
+        _tb = None
+        if tokbias is not None and tokbias[1] is not None and tokbias[0]:
+            _tb = (float(tokbias[0]) * tokbias[1]).to(device)   # [V] static tilt, broadcast over the batch
         inp, attn = _hf_left_pad(prefixes, pad_id, device)
         out = model(input_ids=inp, attention_mask=attn, use_cache=True, logits_to_keep=1)
         past = out.past_key_values; logits = out.logits[:, -1, :].float(); af = attn
@@ -1778,7 +1785,8 @@ def _hf_generate(model, prefixes: List[List[int]], max_new: int, temperature: fl
         tlps: List[List[float]] = [[] for _ in range(B)]   # per-token logprob of sampled non-eos token
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for _ in range(max_new):
-            probs = torch.softmax(logits / max(temperature, 1e-6), -1)
+            sl = logits if _tb is None else logits + _tb       # biased sampling logits (true logits kept for token-prob)
+            probs = torch.softmax(sl / max(temperature, 1e-6), -1)
             nxt = torch.multinomial(probs, 1).squeeze(-1)
             if return_token_lps:
                 lp = logits.gather(-1, nxt.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(logits, dim=-1)
