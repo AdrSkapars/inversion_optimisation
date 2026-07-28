@@ -82,7 +82,7 @@ All λ=1, 100 scen/seed 100, rounds 8, steps=1 samples=1, best-of-pool. BoN/jail
 | self_harm | gemma | 1 | 3.93 | 57.4 | 0.17 | 3.46 | 5.42 | 4.95 |
 | deception | Qwen | 1 | 2.97 | 90.1 | 0.21 | 6.76 | 9.73 | 8.10 |
 | deception | gemma | 1 | 4.71 | 59.2 | 0.13 | 7.26 | 9.40 | 8.66 |
-| political | Qwen | 1 | _(pending)_ | | | 8.43 | 9.75 | 8.98 |
+| political | Qwen | 1 | 5.63 | 88.8 | 0.12 | 8.43 | 9.75 | 8.98 |
 | political | gemma | 1 | _(pending)_ | | | 7.45 | 9.64 | 8.70 |
 
 Partial read (self_harm only): at 100scen/8rd, tokbias λ=1 slightly BEATS BoN on both self_harm cells
