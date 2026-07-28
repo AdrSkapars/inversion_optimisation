@@ -83,7 +83,12 @@ All λ=1, 100 scen/seed 100, rounds 8, steps=1 samples=1, best-of-pool. BoN/jail
 | deception | Qwen | 1 | 2.97 | 90.1 | 0.21 | 6.76 | 9.73 | 8.10 |
 | deception | gemma | 1 | 4.71 | 59.2 | 0.13 | 7.26 | 9.40 | 8.66 |
 | political | Qwen | 1 | 5.63 | 88.8 | 0.12 | 8.43 | 9.75 | 8.98 |
-| political | gemma | 1 | _(pending)_ | | | 7.45 | 9.64 | 8.70 |
+| political | gemma | 1 | 7.03 | 57.4 | 0.12 | 7.45 | 9.64 | 8.70 |
+
+**FINAL verdict (6/6, 100scen λ=1 steps1):** tokbias beats BoN on both self_harm cells (Q6.51>5.10, g3.93>3.46),
+loses deception (Q2.97, g4.71) + political/Qwen (5.63), ~ties political/gemma (7.03 vs 7.45). Never near jail
+(always 3-4 pts below). Non-degenerate (xturn ≤0.2). CAVEAT: steps=1/samples=1 was tuned only on self_harm/Qwen
+— steps/samples re-check on deception+political in progress (runs_pilot/tokbias_ss2_*).
 
 Partial read (self_harm only): at 100scen/8rd, tokbias λ=1 slightly BEATS BoN on both self_harm cells
 (Qwen 6.51>5.10, gemma 3.93>3.46) and is ~competitive with G-PAIR on Qwen — non-degenerate (xturn ~0.18).
