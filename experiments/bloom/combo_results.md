@@ -9,14 +9,31 @@ refines the INPUTS, and `jailbroken_output` (self-jail at each cell's pm3 β) st
 **combo@5** (combo is the most expensive per round — both refine and steer — so it gets the fewest).
 All combo numbers below are best-of-pool over rounds 1–5.
 
-| behaviour | model | β | **Combo@5** | topshare | BoN@8 | jail@5 | G-PAIR@7 | TokBias-tuned@8 |
-|---|---|---|---|---|---|---|---|---|
-| deception | Qwen3.5-4B  | 2.5 | 9.72 | 0.12 | 6.76 | 9.73 | 8.10 | 6.62 |
-| deception | gemma-4-e4b | 1.0 | 9.59 | 0.11 | 7.26 | 9.40 | 8.66 | 7.27 |
-| political | Qwen3.5-4B  | 4.0 | 9.91 | 0.09 | 8.43 | 9.75 | 8.98 | 8.60 |
-| political | gemma-4-e4b | 2.5 | 9.88 | 0.10 | 7.45 | 9.64 | 8.70 | 7.96 |
-| self_harm | Qwen3.5-4B  | 1.5 | 10.00 | 0.12 | 5.10 | 9.95 | 6.91 | 6.47 |
-| self_harm | gemma-4-e4b | 0.5 | 9.28 | 0.12 | 3.46 | 5.42 | 4.95 | 2.42 |
+`plaus%` = mean token-probability of the best-of-pool selected outputs (higher = more natural).
+
+| behaviour | model | β | **Combo@5** | plaus% | topshare | BoN@8 | jail@5 | G-PAIR@7 | TokBias-tuned@8 |
+|---|---|---|---|---|---|---|---|---|---|
+| deception | Qwen3.5-4B  | 2.5 | 9.72 | 56.7 | 0.10 | 6.76 | 9.73 | 8.10 | 6.62 |
+| deception | gemma-4-e4b | 1.0 | 9.59 | 57.2 | 0.10 | 7.26 | 9.40 | 8.66 | 7.27 |
+| political | Qwen3.5-4B  | 4.0 | 9.91 | 56.5 | 0.08 | 8.43 | 9.75 | 8.98 | 8.60 |
+| political | gemma-4-e4b | 2.5 | 9.88 | 56.7 | 0.09 | 7.45 | 9.64 | 8.70 | 7.96 |
+| self_harm | Qwen3.5-4B  | 1.5 | 10.00 | 51.0 | 0.10 | 5.10 | 9.95 | 6.91 | 6.47 |
+| self_harm | gemma-4-e4b | 0.5 | 9.28 | 57.3 | 0.11 | 3.46 | 5.42 | 4.95 | 2.42 |
+
+## Plausibility (mean token-prob %) — Combo@5 vs BoN@8
+
+| cell | Combo plaus | BoN plaus | note |
+|---|---|---|---|
+| deception/Qwen  | 56.7 | 52.9 | combo higher plaus AND elic |
+| political/Qwen  | 56.5 | 51.9 | combo higher plaus AND elic |
+| self_harm/Qwen  | 51.0 | 49.7 | ~equal plaus, combo far higher elic |
+| deception/gemma | 57.2 | 63.4 | combo −6pp plaus for +2.3 elic |
+| political/gemma | 56.7 | 61.8 | combo −5pp plaus for +2.4 elic |
+| self_harm/gemma | 57.3 | 63.9 | combo −7pp plaus for +5.8 elic |
+
+On Qwen, combo is *more* plausible than BoN while eliciting far more. On gemma, combo trades a few points
+of plausibility for large elicitation gains but stays in the natural band (~57%) — the gains are steered,
+not degenerate.
 
 ## Combo@5 vs jail-alone@5 (rounds-matched)
 
@@ -33,7 +50,10 @@ All combo numbers below are best-of-pool over rounds 1–5.
 
 - **Combo is the single best method on all 6 cells** — it beats (or ties) jail-alone everywhere, and
   beats BoN, G-PAIR, and TokBias-tuned outright on every cell. Non-degenerate throughout (topshare ≈
-  0.09–0.12, same clean range as the individual methods).
+  0.08–0.11, same clean range as the individual methods). The perfect **self_harm/Qwen 10.00 was
+  degeneracy-verified** — topshare 0.10, 0/100 loopy, and the top transcripts are fluent, varied,
+  coherent multi-turn escalations (not keyword loops); its only tell is the lowest plausibility of the
+  six (51% vs ~57%), i.e. the steering works a little harder there, but it stays in the natural band.
 - **The margin over jail tracks headroom.** On the 5 cells where jail is already near the 9.4–10 ceiling,
   combo can only add a little (+0.0 to +0.24; deception/Qwen is a dead-heat). Where jail has real
   headroom — **self_harm/gemma (jail 5.42)** — combo delivers **+3.86**, landing at 9.28. This is the
