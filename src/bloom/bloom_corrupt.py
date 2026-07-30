@@ -244,6 +244,7 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_SEARCH",   ("search_input", "enabled"),                 _envbool),
         ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      _int_or_none),   # int (e.g. -50, 0=regen whole body) or "none"=keep whole body (suffix attack)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
+        ("BLOOM_INPUT_EVAL_CHUNK", ("search_input", "eval_beam_chunk_size"),  int),   # beams per eval vLLM call during BEAST candidate gen; 1 = sequential (cuts GPU-0 peak ~num_beams x), None default = all beams at once
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
         _v = os.environ.get(_env)
