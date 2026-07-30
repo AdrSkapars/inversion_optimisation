@@ -247,6 +247,7 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_EVAL_CHUNK", ("search_input", "eval_beam_chunk_size"),  int),   # beams per eval vLLM call during BEAST candidate gen; 1 = sequential (cuts GPU-0 peak ~num_beams x), None default = all beams at once
         ("BLOOM_INPUT_SCORED_LEN", ("search_input", "scored_candidate_length"), int),  # tokens scored per BEAST iter (keep == kept_candidate_length)
         ("BLOOM_INPUT_KEPT_LEN",   ("search_input", "kept_candidate_length"),   int),  # tokens committed per BEAST iter (must be <= scored_candidate_length)
+        ("BLOOM_INPUT_REWARD_LEN", ("search_input", "max_reward_output_length"), int),  # first N tokens of self-jail TRS used as the BEAST reward signal (0 = full TRS)
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
         _v = os.environ.get(_env)
