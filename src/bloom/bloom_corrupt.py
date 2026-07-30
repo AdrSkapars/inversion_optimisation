@@ -108,7 +108,7 @@ cfg = DotDict({
     "rollout": {
         "model": judge_model,                # evaluator model — generates adversarial messages via input search
         "target": target_model,              # model under evaluation
-        "evaluator_max_tokens": 1200,        # cap on evaluator output (just emits <message>+<targeted_response_start> blocks; tags auto-closed if truncated)
+        "evaluator_max_tokens": 1200,        # cap on evaluator output (just emits <message> blocks; tags auto-closed if truncated)
         "target_max_tokens": 250,            # cap on target response length — reduced to match 2-5 sentence constraint
         "evaluator_max_model_len": 16384,    # vLLM context window for the eval model (Gemma-4 supports far more; 8192 was too tight — long understanding/ideation or 3-turn judgment prompts overflow it)
         "target_max_model_len": 8192,        # vLLM context window for the target model — 8192 (was 4096) since turn-3 conversations with eval_max_tokens=1200 can exceed 4096
@@ -245,6 +245,8 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      _int_or_none),   # int (e.g. -50, 0=regen whole body) or "none"=keep whole body (suffix attack)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
         ("BLOOM_INPUT_EVAL_CHUNK", ("search_input", "eval_beam_chunk_size"),  int),   # beams per eval vLLM call during BEAST candidate gen; 1 = sequential (cuts GPU-0 peak ~num_beams x), None default = all beams at once
+        ("BLOOM_INPUT_SCORED_LEN", ("search_input", "scored_candidate_length"), int),  # tokens scored per BEAST iter (keep == kept_candidate_length)
+        ("BLOOM_INPUT_KEPT_LEN",   ("search_input", "kept_candidate_length"),   int),  # tokens committed per BEAST iter (must be <= scored_candidate_length)
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
         _v = os.environ.get(_env)
