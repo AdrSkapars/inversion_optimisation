@@ -189,7 +189,7 @@ def _select_beam_indices(scores: List[float], num_to_select: int,
 _TRIAL_KWARGS_KEYS: Tuple[str, ...] = (
     "num_beams", "candidates_per_beam",
     "scored_candidate_length", "kept_candidate_length",
-    "unscored_filler_length", "max_num_iterations", "max_pool_size",
+    "max_num_iterations", "max_pool_size",
     "temperature", "top_p", "beast_temperature", "eval_beam_chunk_size",
 )
 
@@ -270,7 +270,6 @@ def _beast_single_trial_local(
     candidates_per_beam: int,
     scored_candidate_length: int,
     kept_candidate_length: int,
-    unscored_filler_length: int,
     max_num_iterations: int,
     max_pool_size: int,
     temperature: float,
@@ -280,29 +279,27 @@ def _beast_single_trial_local(
     eval_beam_chunk_size: Optional[int] = None,
     eos_token_id: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[float]]:
-    """One BEAST trial: token-level beam search with optional lookahead and unscored filler.
+    """One BEAST trial: token-level beam search with optional lookahead.
 
     Role-agnostic: `lm_sampler` generates candidate token sequences; `scorer_fn` scores
     them with whatever reward signal the caller wires up (input_search → log P(TRS | ...);
     output_search → log P("Yes" | judge prompt + candidate)).
 
     Per iteration:
-      1. Filler:  each beam grows by `unscored_filler_length` randomly sampled tokens (unscored).
-                  Drawn one token at a time so each draw is independent per beam.
-      2. Branch:  each beam → `candidates_per_beam` continuations of `scored_candidate_length`
+      1. Branch:  each beam → `candidates_per_beam` continuations of `scored_candidate_length`
                   tokens (vLLM call with n=candidates_per_beam, max_tokens=scored_candidate_length).
                   `eval_beam_chunk_size=None` issues one batched call across all beams (default,
                   cheap for small n); set to 1 when n is large to avoid OOM after iter-1 beam
                   divergence (vLLM can no longer share KV pages across beams).
-      3. Score:   all `num_beams * candidates_per_beam` candidates → scorer_fn(candidates, prefix_length).
-      4. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
+      2. Score:   all `num_beams * candidates_per_beam` candidates → scorer_fn(candidates, prefix_length).
+      3. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
                   tokens. Selection is hard top-K when `beast_temperature == 0` (classic BEAST),
                   or SMC-style multinomial resampling on softmax(scores / T) with replacement
                   when `beast_temperature > 0`. Setting kept < scored gives lookahead (score
                   with more context, commit fewer tokens).
 
-    Per-iteration token growth = unscored_filler_length + kept_candidate_length.
-    Implicit max suffix length = max_num_iterations * (kept + filler).
+    Per-iteration token growth = kept_candidate_length.
+    Implicit max suffix length = max_num_iterations * kept_candidate_length.
 
     Sampling is via vLLM SamplingParams (allowed_token_ids enforces the Latin mask).
     Returns (pool_seqs, pool_scores) — token sequences and their log-prob scores.
@@ -323,19 +320,7 @@ def _beast_single_trial_local(
     pool_scores: List[float] = []
 
     for iteration in range(max_num_iterations):
-        # ── Phase 1: Unscored filler ─────────────────────────────────────────
-        # One random token per beam per filler step (independent draws).
-        for _ in range(unscored_filler_length):
-            filler = _vllm_sample_extensions(
-                lm_sampler, beam, n=1, max_tokens=1,
-                temperature=temperature, top_p=top_p,
-                allowed_token_ids=latin_token_ids,
-            )
-            for i, cand_list in enumerate(filler):
-                if cand_list and cand_list[0]:
-                    beam[i] = beam[i] + cand_list[0]
-
-        # ── Phase 2: Branch — sample candidates_per_beam extensions per beam ──
+        # ── Phase 1: Branch — sample candidates_per_beam extensions per beam ──
         # chunk bounds peak KV memory once beams diverge (see docstring); None = one batched call.
         chunk = eval_beam_chunk_size or len(beam)
         extensions: List[List[List[int]]] = []
@@ -354,11 +339,11 @@ def _beast_single_trial_local(
             for ext in extensions[i]:
                 candidates.append(beam_seq + ext)
 
-        # ── Phase 3: Score all candidates via the caller-provided scorer ──────
+        # ── Phase 2: Score all candidates via the caller-provided scorer ──────
         # scorer_fn supplies the reward signal (see docstring).
         scores = scorer_fn(candidates, prefix_length)
 
-        # ── Phase 4: Select num_beams; truncate to kept_candidate_length ────
+        # ── Phase 3: Select num_beams; truncate to kept_candidate_length ────
         # All beams had the same length L at iteration start; all candidates have
         # length L + scored_candidate_length. Truncate to L + kept_candidate_length.
         # beast_temperature=0 → hard top-K (classic BEAST). >0 → SMC resampling.

@@ -853,8 +853,8 @@ def run_rollout_batched_local(
 ) -> Dict[str, Any]:
     """
     Input-search rollout — processes one variation at a time (serial).
-    For each variation: setup → kickoff input search → run top suffixes_per_scenario
-    candidates as separate transcript reps → (optionally) input search for subsequent turns.
+    For each variation: setup → kickoff input search → run the top input-search
+    candidate as one transcript rep → (optionally) input search for subsequent turns.
     Saves beast_pool.json with the full search pool for every variation.
     """
     print("\n" + "=" * 60, flush=True)
@@ -1062,7 +1062,6 @@ def run_rollout_batched_local(
                   f"(b2={jail_runtime_cfg['b2']})", flush=True)
 
     search_cfg = cfg.search_input
-    suffixes_per_scenario = search_cfg.suffixes_per_scenario
 
 
     # Output search (optional): regenerate target responses to maximise
@@ -1126,13 +1125,10 @@ def run_rollout_batched_local(
     rollout_prompt_texts: List[str] = []
 
     # Resume: figure out which variations are already complete on disk so we can skip them
-    # entirely (no input search, no rollout). A variation counts as complete if all of its expected
-    # reps (transcript_v{var_idx}r{1..suffixes_per_scenario}.json) exist.
+    # entirely (no input search, no rollout). A variation counts as complete if its single
+    # transcript rep (transcript_v{var_idx}r1.json) exists.
     def _variation_done(var_idx_1based: int) -> bool:
-        return all(
-            (transcripts_dir / f"transcript_v{var_idx_1based}r{rep}.json").exists()
-            for rep in range(1, suffixes_per_scenario + 1)
-        )
+        return (transcripts_dir / f"transcript_v{var_idx_1based}r1.json").exists()
 
     n_skipped = 0
     for var_idx_0based, variation in enumerate(variations):
@@ -1162,8 +1158,8 @@ def run_rollout_batched_local(
     setup_contents: List[str] = [""] * len(variations)
 
     def _resume_load_variation(var_idx: int, var_desc: str) -> None:
-        """Load an already-complete variation's transcripts into `rollouts` (resume path)."""
-        for rep in range(1, suffixes_per_scenario + 1):
+        """Load an already-complete variation's transcript into `rollouts` (resume path)."""
+        for rep in (1,):
             tf_path = transcripts_dir / f"transcript_v{var_idx}r{rep}.json"
             try:
                 with open(tf_path, "r", encoding="utf-8") as f:
@@ -1446,9 +1442,9 @@ def run_rollout_batched_local(
             ],
         })
 
-        # Frozen kickoff: run all replicated reps (n_reps). Otherwise take the top
-        # suffixes_per_scenario input-search candidates as reps.
-        top_candidates = kickoff_pool if use_frozen_kickoff else kickoff_pool[:suffixes_per_scenario]
+        # Frozen kickoff: run all replicated reps (n_reps). Otherwise take the single
+        # top input-search candidate as the one rep.
+        top_candidates = kickoff_pool if use_frozen_kickoff else kickoff_pool[:1]
         print(f"  v{var_idx}: pool_size={len(kickoff_pool)}, running {len(top_candidates)} as reps", flush=True)
 
         # ── Run each top candidate as a separate transcript rep ──────────
@@ -1665,7 +1661,7 @@ def run_rollout_batched_local(
         "rollouts":        rollouts,
         "successful_count": len(rollouts),
         "failed_count":    0,
-        "total_count":     len(variations) * suffixes_per_scenario,
+        "total_count":     len(variations),
         "logprob_summary": {
             "mean_avg_logprob": mean_avg_logprob,
             "num_scored":       len(all_lps),

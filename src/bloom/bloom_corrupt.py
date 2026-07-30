@@ -142,10 +142,8 @@ cfg = DotDict({
         "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
         "scored_candidate_length": 5,            # 5-token chunks scored per iter
         "kept_candidate_length": 5,              # commit 5 tokens per iter
-        "unscored_filler_length": 0,             # extra random tokens appended per iter without scoring (0 = pure BEAST)
         "max_num_iterations": 20,                # 20 iters × 5 tokens = ~100-token search
         "max_pool_size": 20,                     # max candidates accumulated across the search
-        "suffixes_per_scenario": 1,              # top-N pool candidates rolled out as separate transcript reps (v{var}r1, v{var}r2, ...)
         "temperature": 1.0,                      # sampling temperature for token expansion
         "top_p": 1.0,                            # nucleus sampling p for token expansion
         "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
@@ -163,7 +161,6 @@ cfg = DotDict({
         "candidates_per_beam": 25,               # 25 BoN candidates per target response
         "scored_candidate_length": 200,          # full target response length
         "kept_candidate_length": 200,
-        "unscored_filler_length": 0,
         "max_num_iterations": 1,                 # single pass — Best-of-N has no iteration
         "max_pool_size": 20,
         "max_prefix_length": 0,                  # how much of the natural target response is preloaded before the cursor. None = full response (suffix attack); 0 = regenerate from scratch (typical BoN); N>0 = first N tokens; N<0 = drop last |N|.
