@@ -1208,9 +1208,30 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     # Bank: persist understanding + ideation for later beta runs to reuse (no-op if already banked).
     _bank_save_stages(cfg.get("kickoff_bank"), cfg.rollout.model, output_dir)
 
+    # Kickoff bank at round 1 — INPUT-SEARCH ONLY. Reuse this round's banked kickoffs as each
+    # variation's fixed_kickoff so the search starts from them as its BASELINE (see the batched
+    # input_search rollout), rather than regenerating the Phase-1 message. This makes
+    # rounds=1 + reuse-kickoffs work; the rounds-2+ resample stage already loads the bank.
+    # Scoped to search_input.enabled so WILT/BoN/combo round-1 behaviour is unchanged. Read-only
+    # (round 1 never calls _bank_save_round). No bank / no matching round → fresh kickoffs.
+    _ko_override = None
+    _bank_dir = cfg.get("kickoff_bank")
+    if _bank_dir and bool((cfg.get("search_input") or {}).get("enabled", False)):
+        _cur_round = int(Path(output_dir).name.rsplit("_", 1)[-1])
+        _bk = _bank_load_round(_bank_dir, _cur_round, cfg.rollout.model)
+        if _bk:
+            _ko_override = []
+            for _i, _ov in enumerate(ideation_results.get("variations", []), 1):
+                _v = dict(_ov) if isinstance(_ov, dict) else {"description": str(_ov)}
+                _v["fixed_kickoff"] = _bk.get(_i)
+                _ko_override.append(_v)
+            print(f"  [kickoff-bank] round {_cur_round}: reused {len(_bk)} kickoffs from bank "
+                  f"(input-search baseline)", flush=True)
+
     # Stage 3: Rollout
     try:
-        rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results, ideation_results)
+        rollout_results = await run_rollout(cfg, prompts_yaml, output_dir, understanding_results,
+                                            ideation_results, variations_override=_ko_override)
     except Exception as e:
         print(f"\nERROR: Rollout stage failed: {e}", flush=True)
         if core.DEBUG_MODE:
