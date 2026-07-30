@@ -109,6 +109,11 @@ def _jail_generate_trs_batch(
         skip_special_tokens=False,
         ignore_eos=False,
     )
+    # Optional floor on TRS length: suppress EOS until >= BLOOM_TRS_MIN_TOKENS tokens (default off).
+    # Forces the self-jail reward target to a minimum length instead of stopping naturally (~60 tok).
+    _min_tok = int(os.environ.get("BLOOM_TRS_MIN_TOKENS", "0") or "0")
+    if _min_tok > 0:
+        sampling_kwargs["min_tokens"] = min(_min_tok, int(max_tokens))
     outs = lm.worker.generate_n_tokens(prompts_ids, sampling_kwargs)
     results: List[str] = []
     for o in outs:
