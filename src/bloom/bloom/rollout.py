@@ -924,6 +924,7 @@ def run_rollout_batched_local(
                     "b2": 0.0, "b1": 1.0, "target_floor": 0.0, "target_only": True}
         jail_use_rollout = True; jail_on = True; jail_engine = "hf_full"
         jail_vllm = False; jail_hf = True
+        need_jail_model = True   # this path loads the hf_full target model (target_only); must NOT skip the load
 
     # vllm_topk jail proposals share the target GPU (halve its util so both fit). hf_full
     # corruption loads HF models in-process instead (no vLLM target worker).
