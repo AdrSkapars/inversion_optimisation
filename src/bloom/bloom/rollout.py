@@ -394,27 +394,21 @@ _STEERING_INSTRUCTIONS = _BASE_PROMPTS["steering_instructions"]
 _TAG_INSTRUCTIONS_MSG_ONLY = _BASE_PROMPTS["tag_instructions_msg_only"]
 
 
-def _tag_instructions(target_before_input: bool = False, include_trs: bool = True) -> str:
+def _tag_instructions() -> str:
     """Return the per-turn output-format instructions: the evaluator writes ONLY a
-    <message>. The targeted-response-start (TRS) is NEVER requested from the evaluator —
-    it is generated self-jail from the target model (see _jail_generate_trs), so the eval
-    must never produce a TRS tag nor see a TRS in its context. The legacy
-    `target_before_input` / `include_trs` args are accepted for signature compatibility
-    (legacy ConversationOrchestrator) but no longer change the output."""
+    <message>. The targeted-response-start (TRS) is generated self-jail from the target
+    model (see _jail_generate_trs), never requested from the evaluator — so the eval must
+    never produce a TRS tag nor see a TRS in its context."""
     return _TAG_INSTRUCTIONS_MSG_ONLY
 
 
-def _build_evaluator_followup(content: str, reasoning: Optional[str], current_turn: int, max_turns: int,
-                              target_before_input: bool = False,
-                              include_trs: bool = True) -> str:
+def _build_evaluator_followup(content: str, reasoning: Optional[str], current_turn: int, max_turns: int) -> str:
     """Build the evaluator follow-up prompt after a target response.
 
     The evaluator generates its next message directly (turns 2+ carry no mid-rollout
     <strategy> block; any refinement strategy is injected once at the round-2+ kickoff).
-
-    When `target_before_input=True`, asks for <targeted_response_start> BEFORE <message>, so
-    the message can be designed to fit a pre-committed target response. Helps BoN regenerate
-    on-topic messages by giving the model TRS context before sampling the body.
+    The evaluator only ever emits a <message>; the TRS reward is generated self-jail from
+    the target model, not requested here.
     """
     reasoning_block = f"<target_reasoning>\n{reasoning}\n</target_reasoning>\n\n" if reasoning else ""
     return _BASE_PROMPTS["evaluator_followup"].format(
@@ -423,12 +417,11 @@ def _build_evaluator_followup(content: str, reasoning: Optional[str], current_tu
         current_turn=current_turn,
         max_turns=max_turns,
         steering=_STEERING_INSTRUCTIONS,
-        tag_instructions=_tag_instructions(target_before_input, include_trs),
+        tag_instructions=_tag_instructions(),
     )
 
 
-def _kickoff_message(generate_kickoff_additional: str, target_before_input: bool,
-                     include_trs: bool, refine_context: str = "") -> str:
+def _kickoff_message(generate_kickoff_additional: str, refine_context: str = "") -> str:
     """Shared kickoff (first evaluator user turn) builder for both rollout paths.
     Round 1 has no refine block; rounds 2+ inject `refine_context` (the merged-refinement
     block: full progress log + guidance + last-N transcripts) so this ONE generation emits
@@ -437,7 +430,7 @@ def _kickoff_message(generate_kickoff_additional: str, target_before_input: bool
     kp = _BASE_PROMPTS["kickoff_prompt"].format(generate_kickoff_additional=gka) + "\n\n"
     if refine_context:
         kp += refine_context.strip() + "\n\n"
-    kp += _tag_instructions(target_before_input, include_trs)
+    kp += _tag_instructions()
     return kp
 
 
@@ -459,15 +452,11 @@ class ConversationOrchestrator:
         target_temperature: float = DEFAULT_TEMPERATURE_DETERMINISTIC,
         target_kickoff_prefix: str = "",
         generate_kickoff_additional: str = "",
-        target_before_input: bool = False,
-        include_trs: bool = True,
     ):
         self.evaluator_model = evaluator_model
         self.target_model = target_model
         self.evaluator_system_prompt = evaluator_system_prompt
         self.target_system_prompt = target_system_prompt
-        self.target_before_input = target_before_input
-        self.include_trs = include_trs
         # Set by setup() — merged into the first user message in run().
         self.pending_rollout_prompt: str = ""
         self.max_turns = max_turns
@@ -567,8 +556,6 @@ class ConversationOrchestrator:
         # Add to evaluator history with scaffolding
         self.evaluator_messages.append({"role": "user", "content": _build_evaluator_followup(
             content, reasoning, self.current_turn, self.max_turns,
-            target_before_input=self.target_before_input,
-            include_trs=self.include_trs,
         )})
 
         return parsed
@@ -591,8 +578,6 @@ class ConversationOrchestrator:
         target_temperature: float = DEFAULT_TEMPERATURE_DETERMINISTIC,
         target_kickoff_prefix: str = "",
         generate_kickoff_additional: str = "",
-        target_before_input: bool = False,
-        include_trs: bool = True,
     ) -> "ConversationOrchestrator":
         """Setup orchestrator with a fixed target system prompt (no LLM setup pass).
         The conversation_rollout_prompt is stashed and merged into the first user
@@ -615,9 +600,7 @@ class ConversationOrchestrator:
             evaluator_temperature=evaluator_temperature,
             target_temperature=target_temperature,
             target_kickoff_prefix=target_kickoff_prefix,
-            target_before_input=target_before_input,
             generate_kickoff_additional=generate_kickoff_additional,
-            include_trs=include_trs,
         )
 
         orchestrator.pending_rollout_prompt = conversation_rollout_prompt
@@ -631,11 +614,7 @@ class ConversationOrchestrator:
 
             # Kickoff (round 1 turn 1 path — no strategy block ever; refinement-driven
             # injection is local-batched-only for now).
-            kickoff_prompt = _kickoff_message(
-                self.generate_kickoff_additional,
-                self.target_before_input,
-                self.include_trs,
-            )
+            kickoff_prompt = _kickoff_message(self.generate_kickoff_additional)
 
             # Merge the stashed rollout prompt (scenario context) with the kickoff
             # into a single user turn — avoids two consecutive user messages now that
@@ -740,8 +719,6 @@ async def run_single_rollout(
                 target_temperature=cfg.get("temperature", DEFAULT_TEMPERATURE_DETERMINISTIC),
                 target_kickoff_prefix=target_kickoff_prefix,
                 generate_kickoff_additional=generate_kickoff_additional,
-                target_before_input=cfg.rollout.get("target_before_input", False),
-                include_trs=bool((cfg.get("search_input", {}) or {}).get("enabled", False)),
             ),
         )
 
@@ -1092,8 +1069,7 @@ def run_rollout_batched_local(
     target_kickoff_prefix    = _get_override(prompts_yaml, "target_kickoff_prefix")
     generate_kickoff_additional = _get_override(prompts_yaml, "generate_kickoff_additional")
 
-    target_before_input      = cfg.rollout.get("target_before_input", False)
-    input_search_on = bool(search_cfg.enabled)  # only ask the eval for a TRS when input_search will use it
+    input_search_on = bool(search_cfg.enabled)  # gates batched-jail eligibility below
     # Batched-jail eligibility: the clean jail hf_full case (no per-variation token
     # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-
     # time. Defined here (after input/output_search_on are known); consumed below to
@@ -1104,8 +1080,7 @@ def run_rollout_batched_local(
     def _build_kickoff_prompt(refine_context: str = "") -> str:
         """Build the per-variation kickoff prompt via the shared _kickoff_message helper.
         The merged-refinement block only appears on rounds 2+ (when refine_context is set)."""
-        return _kickoff_message(generate_kickoff_additional, target_before_input,
-                                input_search_on, refine_context)
+        return _kickoff_message(generate_kickoff_additional, refine_context)
 
     transcripts_dir = output_dir / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
@@ -1305,8 +1280,6 @@ def run_rollout_batched_local(
                     last = sd["transcript_msgs"][-1]
                     followup = _build_evaluator_followup(
                         last["content"], last.get("reasoning"), sd["current_turn"], max_turns,
-                        target_before_input=target_before_input,
-                        include_trs=input_search_on,
                     )
                     eval_msgs_turn = list(sd["eval_msgs"]) + [{"role": "user", "content": followup}]
                     sd["_eval_msgs_turn"] = eval_msgs_turn
@@ -1565,8 +1538,6 @@ def run_rollout_batched_local(
                 # Evaluator follow-up context
                 followup_prompt = _build_evaluator_followup(
                     target_resp, target_reason, current_turn, max_turns,
-                    target_before_input=target_before_input,
-                    include_trs=input_search_on,
                 )
                 eval_msgs_turn  = list(eval_msgs) + [{"role": "user", "content": followup_prompt}]
 
