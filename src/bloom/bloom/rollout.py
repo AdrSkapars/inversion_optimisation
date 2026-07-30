@@ -1466,17 +1466,22 @@ def run_rollout_batched_local(
                 active = [sd for sd in chunk if not sd["done"]]
                 if not active:
                     break
-                # ④ BATCH plain target reply (input_search leaves the target un-steered)
-                raws_t = batch_generate_local(
+                # ④ BATCH plain target reply (input_search leaves the target un-steered).
+                # Capture on-policy token probs in the SAME pass so prob_stats is persisted per
+                # target message exactly like the jail/BoN path (save_json rolls them up to the
+                # transcript-level prob_stats that score_pool reads).
+                gen_t = batch_generate_local_probs(
                     lm_target, [sd["target_msgs"] for sd in active],
                     target_max_tokens, temperature, no_think=no_think_target)
-                for sd, raw_target in zip(active, raws_t):
+                for sd, (raw_target, _tprobs) in zip(active, gen_t):
                     parsed_t = parse_message(_make_local_response(raw_target))
                     target_resp = parsed_t["content"] or raw_target
                     target_reason = parsed_t["reasoning"]
                     sd["target_msgs"].append({"role": "assistant", "content": target_resp})
                     sd["current_turn"] = turn + 1
                     tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
+                    if _tprobs and target_resp == raw_target:
+                        tmsg["prob_stats"] = _prob_summary(_tprobs)   # on-policy plausibility
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)

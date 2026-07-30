@@ -655,6 +655,39 @@ def _vllm_worker_main(req_q, res_q, hf_name: str, gpu_id: int,
                 out = llm.generate(prompts, sp, use_tqdm=False)
                 res_q.put(("ok", [r.outputs[0].text for r in out]))
 
+            elif op == "generate_text_probs":
+                # Same as generate_text but also returns, per prompt, the on-policy logprob of
+                # each SAMPLED token (logprobs=1 requests them without changing sampling). Used by
+                # the input-search plain-target reply so it can persist prob_stats inline, exactly
+                # like the jail/BoN path — no separate scoring pass. Returns [(text, [logprob,..])].
+                prompts, sampling_kwargs = msg[1], msg[2]
+                def _with_lp(kw):
+                    kw = dict(kw); kw.setdefault("logprobs", 1); return kw
+                sp = ([SamplingParams(**_with_lp(kw)) for kw in sampling_kwargs]
+                      if isinstance(sampling_kwargs, list)
+                      else SamplingParams(**_with_lp(sampling_kwargs)))
+                out = llm.generate(prompts, sp, use_tqdm=False)
+                tp_result: List[Tuple[str, List[float]]] = []
+                for r in out:
+                    o = r.outputs[0]
+                    lp_list = o.logprobs or []
+                    lps: List[float] = []
+                    for i, tid in enumerate(o.token_ids):
+                        d = lp_list[i] if i < len(lp_list) else None
+                        val = None
+                        if d:
+                            v = d.get(int(tid))
+                            if v is None:
+                                for k, vv in d.items():
+                                    if int(k) == int(tid):
+                                        v = vv; break
+                            if v is not None:
+                                val = float(v.logprob)
+                        if val is not None:
+                            lps.append(val)
+                    tp_result.append((o.text, lps))
+                res_q.put(("ok", tp_result))
+
             elif op == "generate_n_tokens":
                 # Per prompt, return n candidates; each candidate is a list of token IDs
                 # (length = sampling_kwargs["max_tokens"]). Caller flattens / truncates.
@@ -817,6 +850,13 @@ class VLLMWorker:
 
     def generate_text(self, prompts: List[str], sampling_kwargs: Dict) -> List[str]:
         return self._call("generate_text", prompts, sampling_kwargs)
+
+    def generate_text_probs(
+        self, prompts: List[str], sampling_kwargs: Dict
+    ) -> List[Tuple[str, List[float]]]:
+        """Like generate_text, but per prompt also returns the on-policy logprob of each
+        sampled token (for inline prob_stats). Returns [(text, [sampled_logprob, ...]), ...]."""
+        return self._call("generate_text_probs", prompts, sampling_kwargs)
 
     def generate_n_tokens(self, prompts_tids: List[List[int]],
                           sampling_kwargs: Dict) -> List[List[List[int]]]:
@@ -1087,6 +1127,53 @@ def batch_generate_local(
         per_prompt = [dict(sampling_kwargs, seed=int(effective_seed) + i) for i in range(len(prompts))]
         return lm.worker.generate_text(prompts, per_prompt)
     return lm.worker.generate_text(prompts, sampling_kwargs)
+
+
+def batch_generate_local_probs(
+    lm: "LocalModel",
+    messages_list: List[List[Dict]],
+    max_new_tokens: int,
+    temperature: float,
+    no_think: bool = False,
+    seed: Optional[int] = None,
+    no_think_prefix: Optional[str] = None,
+) -> List[Tuple[str, List[float]]]:
+    """Same as batch_generate_local, but ALSO returns per conversation the on-policy
+    probability (percent, 0-100) of each sampled token — so callers can persist prob_stats
+    inline (single pass), matching the jail/BoN plausibility metric. Returns [(text, probs)].
+
+    An ApiModel evaluator/target can't expose token probs, so its probs list is empty (the
+    input-search target is always local, so this branch is only a graceful fallback).
+    """
+    if not messages_list:
+        return []
+
+    if isinstance(lm, ApiModel):
+        return [(txt, []) for txt in batch_generate_local(
+            lm, messages_list, max_new_tokens, temperature, no_think=no_think, seed=seed)]
+
+    prompts: List[str] = []
+    for msgs in messages_list:
+        prompt = lm.tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
+        )
+        if no_think:
+            prompt += (no_think_prefix if no_think_prefix is not None else _NO_THINK_PREFIX)
+        prompts.append(prompt)
+
+    sampling_kwargs = dict(
+        max_tokens=max_new_tokens,
+        temperature=max(temperature, 1e-6),
+        skip_special_tokens=False,
+    )
+    effective_seed = seed if seed is not None else _DEFAULT_SEED
+    if effective_seed is not None:
+        per_prompt = [dict(sampling_kwargs, seed=int(effective_seed) + i) for i in range(len(prompts))]
+        raw = lm.worker.generate_text_probs(prompts, per_prompt)
+    else:
+        raw = lm.worker.generate_text_probs(prompts, sampling_kwargs)
+    # logprob -> probability percent (0-100), matching _prob_summary's expected scale.
+    return [(text, [math.exp(lp) * 100.0 for lp in lps]) for text, lps in raw]
 
 
 def _make_local_response(text: str):
@@ -1852,4 +1939,4 @@ def _resolve_eos_token_id(lm: "LocalModel", truncate_at_eos: bool) -> Optional[i
     suffixes are not truncated."""
     return lm.tokenizer.eos_token_id if truncate_at_eos else None
 
-__all__ = ['DotDict', 'NUM_RETRIES', 'SCRIPT_DIR', 'RUNS_ROOT', 'DEFAULT_TEMPERATURE', 'DEFAULT_TEMPERATURE_DETERMINISTIC', 'THINKING_BUDGETS', '_USES_THINK_BLOCK', '_THINK_PREFILL', 'normalize', 'uses_think_block', 'think_prefix', '_set_think_prefixes', '_effort', 'debug_print', 'load_prompts', '_prob_summary', '_agg_prob_summaries', 'save_json', '_cfg_for_dump', 'litellm_chat', 'parse_message', '_auto_close_tags', '_THINK_BLOCK_RE', '_strip_thinking', '_strip_thinking_from_msgs', 'extract_transcript_text', 'get_model_max_output_tokens', 'calculate_batch_size', '_LOCAL_MODEL_REGISTRY', '_LATIN_MASK_CACHE', 'DEFAULT_GPU_MEMORY_UTIL', '_vllm_worker_main', '_ALL_WORKERS', '_shutdown_all_workers', '_kill_gpu_processes', 'VLLMWorker', '_parse_local_spec', 'LocalModel', '_get_local_model', 'ApiModel', 'batch_generate_local', '_make_local_response', 'local_chat', 'batch_logprob_local', 'batch_token_logprobs_local', '_get_override', 'build_understanding_system', 'build_behavior_understanding_prompt', 'build_transcript_analysis_prompt', 'build_ideation_system', 'build_scenarios_prompt', 'build_rollout_system', 'build_rollout_prompt', 'build_judgment_system', 'build_judge_prompt', 'build_metajudge_system', 'build_metajudge_prompt', 'build_refine_context', '_RE_MESSAGE', '_RE_TRS', '_RE_TRS_CLEANUP', '_extract_message_tags', '_strip_eos_tail', '_resolve_yes_token_id', '_vllm_sample_extensions', '_turn_end_eos', '_hf_left_pad', '_hf_generate', '_summarize_token_probs', 'token_stats_from_stored', '_resolve_eos_token_id']
+__all__ = ['DotDict', 'NUM_RETRIES', 'SCRIPT_DIR', 'RUNS_ROOT', 'DEFAULT_TEMPERATURE', 'DEFAULT_TEMPERATURE_DETERMINISTIC', 'THINKING_BUDGETS', '_USES_THINK_BLOCK', '_THINK_PREFILL', 'normalize', 'uses_think_block', 'think_prefix', '_set_think_prefixes', '_effort', 'debug_print', 'load_prompts', '_prob_summary', '_agg_prob_summaries', 'save_json', '_cfg_for_dump', 'litellm_chat', 'parse_message', '_auto_close_tags', '_THINK_BLOCK_RE', '_strip_thinking', '_strip_thinking_from_msgs', 'extract_transcript_text', 'get_model_max_output_tokens', 'calculate_batch_size', '_LOCAL_MODEL_REGISTRY', '_LATIN_MASK_CACHE', 'DEFAULT_GPU_MEMORY_UTIL', '_vllm_worker_main', '_ALL_WORKERS', '_shutdown_all_workers', '_kill_gpu_processes', 'VLLMWorker', '_parse_local_spec', 'LocalModel', '_get_local_model', 'ApiModel', 'batch_generate_local', 'batch_generate_local_probs', '_make_local_response', 'local_chat', 'batch_logprob_local', 'batch_token_logprobs_local', '_get_override', 'build_understanding_system', 'build_behavior_understanding_prompt', 'build_transcript_analysis_prompt', 'build_ideation_system', 'build_scenarios_prompt', 'build_rollout_system', 'build_rollout_prompt', 'build_judgment_system', 'build_judge_prompt', 'build_metajudge_system', 'build_metajudge_prompt', 'build_refine_context', '_RE_MESSAGE', '_RE_TRS', '_RE_TRS_CLEANUP', '_extract_message_tags', '_strip_eos_tail', '_resolve_yes_token_id', '_vllm_sample_extensions', '_turn_end_eos', '_hf_left_pad', '_hf_generate', '_summarize_token_probs', 'token_stats_from_stored', '_resolve_eos_token_id']
