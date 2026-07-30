@@ -143,7 +143,6 @@ cfg = DotDict({
         "eval_beam_chunk_size": None,            # None = batch all 5 beams in one vLLM call (cheap at n=5); 1 only needed when candidates_per_beam is large (~100+) to avoid OOM after iter-1 beam divergence
         "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "temperature": 1.0,                      # sampling temperature for token expansion
-        "top_p": 1.0,                            # nucleus sampling p for token expansion
         "max_pool_size": 50,                     # max candidates accumulated across the search
         "latin_mask": False,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
@@ -160,7 +159,6 @@ cfg = DotDict({
         "max_pool_size": 20,
         "max_prefix_length": 0,                  # how much of the natural target response is preloaded before the cursor. None = full response (suffix attack); 0 = regenerate from scratch (typical BoN); N>0 = first N tokens; N<0 = drop last |N|.
         "temperature": 1.0,
-        "top_p": 1.0,
         "eval_beam_chunk_size": 1,
         "truncate_at_eos": False,                 # If True: allows EOS so target can naturally terminate. If False: target keeps generating until scored_candidate_length.
         "latin_mask": False,                     # Target should speak naturally; leave off unless you have a specific reason

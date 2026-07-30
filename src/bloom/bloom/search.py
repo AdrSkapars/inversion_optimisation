@@ -165,7 +165,7 @@ _TRIAL_KWARGS_KEYS: Tuple[str, ...] = (
     "num_beams", "candidates_per_beam",
     "scored_candidate_length", "kept_candidate_length",
     "max_num_iterations", "max_pool_size",
-    "temperature", "top_p", "eval_beam_chunk_size",
+    "temperature", "eval_beam_chunk_size",
 )
 
 
@@ -248,7 +248,6 @@ def _beast_single_trial_local(
     max_num_iterations: int,
     max_pool_size: int,
     temperature: float,
-    top_p: float,
     latin_token_ids: Optional[List[int]] = None,
     eval_beam_chunk_size: Optional[int] = None,
     eos_token_id: Optional[int] = None,
@@ -299,7 +298,7 @@ def _beast_single_trial_local(
         for start in range(0, len(beam), chunk):
             ext = _vllm_sample_extensions(
                 lm_sampler, beam[start:start + chunk], n=candidates_per_beam,
-                max_tokens=scored_candidate_length, temperature=temperature, top_p=top_p,
+                max_tokens=scored_candidate_length, temperature=temperature, top_p=1.0,
                 allowed_token_ids=latin_token_ids,
                 ignore_eos=(eos_token_id is not None),
             )
@@ -630,7 +629,7 @@ def output_search_target_response(
         n       = int(output_cfg.candidates_per_beam)
         max_tok = int(output_cfg.scored_candidate_length)
         temp    = float(output_cfg.get("temperature", 1.0))
-        top_p   = float(output_cfg.get("top_p", 1.0))
+        top_p   = 1.0
         print(
             f"    output search [contrastive PoE: β={beta}, K={top_k}, n={n}, "
             f"len={max_tok}, score={'jail' if use_jail_scoring else 'judge'}] "
