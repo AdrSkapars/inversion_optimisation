@@ -418,18 +418,21 @@ def input_search_evaluator_message(
     content = parsed["content"] or raw
     baseline_msg, trs, strategy = _extract_message_tags(content)
 
-    # ── Optional: overwrite TRS with a jail-generated response ─────────────
-    # When search_input.jail_search_loss=True, ignore the eval's TRS and instead feed the
-    # jailbroken model the conversation up through `baseline_msg` (as the latest
-    # user turn) and use jail's response as the BEAST reward signal. The eval-
-    # generated TRS is discarded; we don't try to prevent its generation.
-    if (lm_jail is not None and jail_runtime_cfg is not None
+    # ── Overwrite TRS with the self-jail response (default reward source) ───
+    # jail_in_loss: the BEAST reward target is a SELF-JAIL continuation — the TARGET
+    # model itself under the jail system prompt + prefill (carried in jail_runtime_cfg),
+    # conditioned on the eval's Phase-1 message (`baseline_msg`, i.e. the input BEFORE
+    # the search modifies it). We reuse the already-loaded target model (`lm_target`) as
+    # the generator; no separate jail model is loaded. The eval-generated
+    # <targeted_response_start> is discarded. Length = max_reward_output_length tokens.
+    if (jail_runtime_cfg is not None
             and jail_runtime_cfg.get("jail_in_loss", False)
             and baseline_msg):
+        _rlen = search_cfg.max_reward_output_length
         jail_trs = _jail_generate_trs(
-            lm_jail, jail_runtime_cfg,
+            lm_target, jail_runtime_cfg,
             target_msgs + [{"role": "user", "content": baseline_msg}],
-            max_tokens=max(search_cfg.get("max_reward_output_length", 50) * 2, 100),
+            max_tokens=(_rlen if _rlen and _rlen > 0 else 100),
             temperature=sample_temperature,
         )
         if jail_trs:

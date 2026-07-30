@@ -28,19 +28,21 @@ from . import core
 
 
 def _jail_generate_trs(
-    lm_jail: "LocalModel",
+    lm: "LocalModel",
     jail_runtime_cfg: Dict,
     target_msgs: List[Dict],
     max_tokens: int = 100,
     temperature: float = 1.0,
 ) -> str:
-    """Generate a jail-side response to be used as the BEAST TRS reward signal.
+    """Generate the self-jail response used as the BEAST TRS reward signal.
 
-    Mirrors `batch_generate_contrastive_local`'s prefix construction: swap the
-    system prompt to jail's, close Qwen3's auto <think>, append the prefill.
-    Then sample `max_tokens` tokens from jail alone (no contrastive PoE — this
-    is jail's own continuation, used downstream as the target response we want
-    BEAST to push the target toward).
+    Self-jail: the "jailbroken" distribution is the TARGET model itself under a jail
+    system prompt, so this reuses the already-loaded target model (`lm`) rather than a
+    separately-loaded jail model. Mirrors `batch_generate_contrastive_local`'s prefix
+    construction: swap in the jail system prompt, close Qwen3's auto <think>, append the
+    prefill. Then sample `max_tokens` tokens (no contrastive PoE — a plain jail-conditioned
+    continuation, used downstream as the target response we want BEAST to push the target
+    toward).
     """
     sys_prompt = jail_runtime_cfg.get("system_prompt", "")
     prefill    = jail_runtime_cfg.get("prefill", "") or ""
@@ -48,13 +50,13 @@ def _jail_generate_trs(
     j_msgs = [m for m in target_msgs if m.get("role") != "system"]
     if sys_prompt:
         j_msgs = [{"role": "system", "content": sys_prompt}] + j_msgs
-    j_prompt = lm_jail.tokenizer.apply_chat_template(
+    j_prompt = lm.tokenizer.apply_chat_template(
         j_msgs, tokenize=False, add_generation_prompt=True,
     )
     j_prompt += core._CORRUPT_NO_THINK_PREFIX
     if prefill:
         j_prompt += prefill
-    j_ids = lm_jail.tokenizer.encode(j_prompt, add_special_tokens=False)
+    j_ids = lm.tokenizer.encode(j_prompt, add_special_tokens=False)
 
     sampling_kwargs = dict(
         max_tokens=int(max_tokens),
@@ -63,10 +65,10 @@ def _jail_generate_trs(
         skip_special_tokens=False,
         ignore_eos=False,
     )
-    out = lm_jail.worker.generate_n_tokens([j_ids], sampling_kwargs)
+    out = lm.worker.generate_n_tokens([j_ids], sampling_kwargs)
     if not out or not out[0]:
         return ""
-    return lm_jail.tokenizer.decode(out[0][0], skip_special_tokens=True).strip()
+    return lm.tokenizer.decode(out[0][0], skip_special_tokens=True).strip()
 
 
 def batch_generate_contrastive_local(
