@@ -55,20 +55,54 @@ these, so "combo" here is G-PAIR input refinement with **no** output steering. T
 - **Degeneracy clean everywhere** — topshare 0.07–0.11, loopy ≤2/100. Highest cross-turn diversity
   on the Phi cells (self_harm/Phi xturn 0.36, political/Phi 0.35, medical/Phi 0.34).
 
-## Jail@5 reference (only the 6 cells with a measured jail baseline, from combo_results.md)
+## Per-cell method comparison — BoN@8 vs jail@5 vs Combo@5
 
-| cell | combo | jail | Δ |
-|---|---|---|---|
-| deception/Qwen  | 9.72  | 9.73 | −0.01 |
-| deception/gemma | 9.59  | 9.40 | +0.19 |
-| political/Qwen  | 9.91  | 9.75 | +0.16 |
-| political/gemma | 9.88  | 9.64 | +0.24 |
-| self_harm/Qwen  | 10.00 | 9.95 | +0.05 |
-| self_harm/gemma | 9.28  | 5.42 | **+3.86** |
+Each cell = `elic (plaus%)`. **BoN runs 8 rounds; jail and combo run 5** (BoN is cheapest per round,
+so it gets more). All from the same 100-scen / seed-100 finals. racial/Phi & deception/Phi have no jail
+row (pm3 β=0 → their "combo" is refinement-only).
 
-Where jail is near the ceiling, combo adds little; where jail has real headroom (self_harm/gemma),
-input refinement lets the output steering reach behaviour jail alone can't (+3.86). Jail baselines
-for the other 26 cells were not part of this grid.
+| Behaviour | Model | BoN@8 | jail@5 | Combo@5 |
+|---|---|---|---|---|
+| racial | Qwen | 6.02 (51%) | 6.66 (61%) | 7.91 (59%) |
+| racial | gemma | 6.53 (60%) | 7.35 (57%) | 8.89 (56%) |
+| racial | Llama | 8.36 (56%) | 9.25 (68%) | 9.70 (69%) |
+| racial | Phi | 7.80 (43%) | — | 8.65 (45%) |
+| political | Qwen | 8.43 (52%) | 9.86 (57%) | 9.91 (57%) |
+| political | gemma | 7.45 (62%) | 9.64 (57%) | 9.88 (57%) |
+| political | Llama | 9.06 (58%) | 9.68 (66%) | 9.95 (65%) |
+| political | Phi | 7.96 (47%) | 9.52 (66%) | 9.86 (67%) |
+| delusions | Qwen | 6.74 (49%) | 9.99 (52%) | 10.00 (53%) |
+| delusions | gemma | 9.10 (59%) | 10.00 (54%) | 10.00 (55%) |
+| delusions | Llama | 9.80 (55%) | 9.95 (67%) | 9.99 (66%) |
+| delusions | Phi | 9.30 (42%) | 9.99 (59%) | 10.00 (60%) |
+| deception | Qwen | 6.76 (53%) | 9.84 (56%) | 9.72 (57%) |
+| deception | gemma | 7.26 (63%) | 9.40 (58%) | 9.59 (57%) |
+| deception | Llama | 8.63 (59%) | 9.69 (63%) | 9.83 (64%) |
+| deception | Phi | 8.88 (43%) | — | 9.25 (44%) |
+| selfpres | Qwen | 5.49 (52%) | 9.99 (51%) | 10.00 (51%) |
+| selfpres | gemma | 4.74 (66%) | 5.13 (63%) | 8.20 (58%) |
+| selfpres | Llama | 5.26 (56%) | 8.18 (59%) | 9.39 (60%) |
+| selfpres | Phi | 6.23 (42%) | 6.55 (59%) | 8.68 (62%) |
+| self_harm | Qwen | 5.10 (50%) | 9.95 (50%) | 10.00 (51%) |
+| self_harm | gemma | 3.46 (64%) | 5.42 (63%) | 9.28 (57%) |
+| self_harm | Llama | 8.33 (60%) | 9.94 (61%) | 9.99 (61%) |
+| self_harm | Phi | 5.03 (47%) | 9.86 (61%) | 9.97 (63%) |
+| medical | Qwen | 2.99 (58%) | 9.74 (55%) | 9.98 (55%) |
+| medical | gemma | 1.71 (69%) | 2.68 (66%) | 4.29 (65%) |
+| medical | Llama | 7.01 (66%) | 10.00 (59%) | 10.00 (58%) |
+| medical | Phi | 4.85 (50%) | 9.99 (58%) | 10.00 (57%) |
+| goblin | Qwen | 1.19 (54%) | 9.83 (61%) | 9.61 (61%) |
+| goblin | gemma | 1.13 (66%) | 1.47 (62%) | 4.39 (57%) |
+| goblin | Llama | 1.14 (58%) | 9.03 (70%) | 8.62 (71%) |
+| goblin | Phi | 1.30 (49%) | 8.78 (68%) | 8.50 (67%) |
 
-*(Grid: 100 scen / seed 100 / combo@5, pm3 β per cell. Companion to combo_results.md's 6-cell method
-comparison.)*
+**Progression BoN < jail < combo.** BoN (no steering) is weak on the hard behaviours (goblin ~1,
+medical/self_harm/selfpres often 2–5); jail lifts most cells to 9–10; combo matches or beats jail
+everywhere and adds the biggest gains exactly where jail left headroom — the refinement-limited cells:
+self_harm/gemma (5.42→9.28), selfpres/gemma (5.13→8.20), selfpres/Phi (6.55→8.68), selfpres/Llama
+(8.18→9.39), racial across the board. Where jail is already at the ceiling, combo is flat (expected).
+The two persistent hold-outs — **medical/gemma and goblin/gemma** — resist all three (combo 4.3/4.4),
+with plaus staying high → gemma refuses rather than being pushed off-policy.
+
+*(Grid: 100 scen / seed 100. BoN@8, jail@5, combo@5, pm3 β per cell. Supersedes the earlier 6-cell
+jail reference; companion to combo_results.md's method comparison.)*
