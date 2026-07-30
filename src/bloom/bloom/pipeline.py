@@ -1208,15 +1208,17 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
     # Bank: persist understanding + ideation for later beta runs to reuse (no-op if already banked).
     _bank_save_stages(cfg.get("kickoff_bank"), cfg.rollout.model, output_dir)
 
-    # Kickoff bank at round 1 — INPUT-SEARCH ONLY. Reuse this round's banked kickoffs as each
-    # variation's fixed_kickoff so the search starts from them as its BASELINE (see the batched
-    # input_search rollout), rather than regenerating the Phase-1 message. This makes
-    # rounds=1 + reuse-kickoffs work; the rounds-2+ resample stage already loads the bank.
-    # Scoped to search_input.enabled so WILT/BoN/combo round-1 behaviour is unchanged. Read-only
-    # (round 1 never calls _bank_save_round). No bank / no matching round → fresh kickoffs.
+    # Kickoff bank at round 1 — ALL METHODS. Reuse this round's banked kickoffs as each variation's
+    # fixed_kickoff so round 1 starts from the SAME kickoff across every method (BoN, jail, combo,
+    # input_search, ...), rather than each regenerating its own. Non-search paths use the banked
+    # kickoff verbatim; input_search uses it as the search BASELINE (sliced by max_prefix_length).
+    # This closes the round-1 confound: previously the wrapper's _bank_inject ran BEFORE
+    # ideation.json existed and was silently skipped, so round 1 diverged per method while
+    # rounds 2+ reused the bank. Read-only: the wrapper only saves round 1 when it wasn't loaded
+    # (build-once). No bank / no matching round → fresh kickoffs.
     _ko_override = None
     _bank_dir = cfg.get("kickoff_bank")
-    if _bank_dir and bool((cfg.get("search_input") or {}).get("enabled", False)):
+    if _bank_dir:
         _cur_round = int(Path(output_dir).name.rsplit("_", 1)[-1])
         _bk = _bank_load_round(_bank_dir, _cur_round, cfg.rollout.model)
         if _bk:
@@ -1225,8 +1227,8 @@ async def run_pipeline(cfg: DotDict) -> Optional[Dict[str, Any]]:
                 _v = dict(_ov) if isinstance(_ov, dict) else {"description": str(_ov)}
                 _v["fixed_kickoff"] = _bk.get(_i)
                 _ko_override.append(_v)
-            print(f"  [kickoff-bank] round {_cur_round}: reused {len(_bk)} kickoffs from bank "
-                  f"(input-search baseline)", flush=True)
+            print(f"  [kickoff-bank] round {_cur_round}: reused {len(_bk)} kickoffs from bank",
+                  flush=True)
 
     # Stage 3: Rollout
     try:

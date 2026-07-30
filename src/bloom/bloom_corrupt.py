@@ -310,13 +310,10 @@ if __name__ == "__main__":
         else:
             if base_seed is not None:
                 core._DEFAULT_SEED = base_seed + 1
-            if _bk1:  # reuse bank round-1 kickoffs: inject into ideation before generating
-                _idp = round_1_dir / "ideation.json"
-                if _idp.exists():
-                    _idj = json.load(open(_idp, encoding="utf-8"))
-                    _n = _bank_inject(_idj.get("variations", []), _bk1)
-                    json.dump(_idj, open(_idp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-                    print(f"  [kickoff-bank] round 1: reused {_n} kickoffs from bank", flush=True)
+            # Round-1 kickoff-bank reuse is applied INSIDE run_pipeline (pipeline.py, after
+            # ideation loads), which works for fresh + resumed ideation. The old inject-here
+            # block ran before round_1/ideation.json existed and was silently skipped, so round 1
+            # diverged per method. `_bk1` above is kept only to gate the save below (build-once).
             result = await run_pipeline(cfg)
             if not result:
                 print("\n  Round 1 FAILED", flush=True)
