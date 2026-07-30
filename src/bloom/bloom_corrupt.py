@@ -87,12 +87,11 @@ cfg = DotDict({
     "batch_size": 5,                         # local models: variations per GPU forward pass; larger = faster but more VRAM
     "target_batch_size": 25,                 # target-model batch for input-search candidate scoring; defaults to batch_size if omitted. Target is much smaller so can usually go higher (up to num_beams*candidates_per_beam = 25)
 
-    # Each LLM runs in its own subprocess pinned to one GPU. With one LLM per device the
-    # worker can grab most of the memory; the small reserve covers framework overhead.
+    # Each LLM runs in its own subprocess pinned to one GPU
     "evaluator_gpu_id": 0,
     "target_gpu_id":    1,
-    "evaluator_gpu_memory_utilization": 0.80,
-    "target_gpu_memory_utilization":    0.80,
+    "evaluator_gpu_memory_utilization": 0.80, # Always using vLLM
+    "target_gpu_memory_utilization":    0.80, # Doesnt apply if using HF instead of vLLM
 
     "understanding": {
         "model": judge_model,                # model that analyses the behavior and any seed transcripts
@@ -129,27 +128,23 @@ cfg = DotDict({
         "metajudgment": False, #True,        # set False to skip the metajudge step entirely
     },
     "refinement_input": {
-        # Merged (PAIR-style) refinement: on rounds 2+ the evaluator itself sees prior history at
-        # the kickoff and emits <strategy>+<message> in one pass (no separate refiner model/call).
         "enabled": False,                    # True = merged refinement (round-2+ kickoff sees prior history + guidance and emits <strategy>+<message>). False = each round is a fresh resample with no learning (BoN baseline).
         "history_transcript_rounds": 2,      # how many prior FULL transcripts are shown at the kickoff: None=all, 0=none, N=last N
         "history_strategy_rounds": None,     # how many prior (round, score, strategy) log rows are shown (also drives the guidance): None=all, 0=none, N=last N
     },
     "search_input": {
-        # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
         "enabled": False,                        # ON: input-side BEAST search over the evaluator's <message> body. The BEAST reward TRS is ALWAYS generated self-jail from the target model (jail system prompt + prefill), never by the evaluator.
         "num_beams": 5,                          # classic BEAST: 5 beams of width 5
         "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
         "scored_candidate_length": 5,            # 5-token chunks scored per iter
         "kept_candidate_length": 5,              # commit 5 tokens per iter
         "max_num_iterations": 20,                # 20 iters × 5 tokens = ~100-token search
-        "max_pool_size": 20,                     # max candidates accumulated across the search
+        "max_prefix_length": -100,               # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
+        "eval_beam_chunk_size": None,            # None = batch all 5 beams in one vLLM call (cheap at n=5); 1 only needed when candidates_per_beam is large (~100+) to avoid OOM after iter-1 beam divergence
+        "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
         "temperature": 1.0,                      # sampling temperature for token expansion
         "top_p": 1.0,                            # nucleus sampling p for token expansion
-        "beast_temperature": 0.0,                # 0 = hard top-K (classic BEAST); >0 = SMC-style softmax resampling on scores; ∞ ≈ Best-of-N
-        "eval_beam_chunk_size": None,            # None = batch all 5 beams in one vLLM call (cheap at n=5); 1 only needed when candidates_per_beam is large (~100+) to avoid OOM after iter-1 beam divergence
-        "max_prefix_length": -100,               # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
-        "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
+        "max_pool_size": 50,                     # max candidates accumulated across the search
         "latin_mask": False,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
@@ -166,7 +161,6 @@ cfg = DotDict({
         "max_prefix_length": 0,                  # how much of the natural target response is preloaded before the cursor. None = full response (suffix attack); 0 = regenerate from scratch (typical BoN); N>0 = first N tokens; N<0 = drop last |N|.
         "temperature": 1.0,
         "top_p": 1.0,
-        "beast_temperature": 0.0,                # 0 = hard top-K; >0 = SMC softmax resampling on scores; ∞ ≈ Best-of-N
         "eval_beam_chunk_size": 1,
         "truncate_at_eos": False,                 # If True: allows EOS so target can naturally terminate. If False: target keeps generating until scored_candidate_length.
         "latin_mask": False,                     # Target should speak naturally; leave off unless you have a specific reason

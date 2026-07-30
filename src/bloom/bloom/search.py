@@ -1,5 +1,3 @@
-import math
-import random
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -153,33 +151,10 @@ def _score_output_candidates(
     return all_scores
 
 
-def _select_beam_indices(scores: List[float], num_to_select: int,
-                         beast_temperature: float) -> List[int]:
-    """Select beam indices from scored candidates.
-
-    beast_temperature == 0  → hard top-K selection (classic BEAST).
-    beast_temperature  > 0  → SMC-style stochastic resampling: indices drawn
-                              with replacement from softmax(scores / T).
-                              T → ∞ approaches uniform (Best-of-N-ish).
-
-    Falls back to top-K if all scores are -inf (numerical breakdown).
-    """
+def _select_beam_indices(scores: List[float], num_to_select: int) -> List[int]:
+    """Select the top-`num_to_select` beam indices by score (hard top-K, classic BEAST)."""
     n = len(scores)
-    if beast_temperature == 0 or n == 0:
-        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
-
-    # Numerically stable softmax over (scores / T).
-    scaled = [s / beast_temperature for s in scores]
-    finite = [x for x in scaled if math.isfinite(x)]
-    if not finite:
-        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
-    m = max(finite)
-    exps = [math.exp(x - m) if math.isfinite(x) else 0.0 for x in scaled]
-    total = sum(exps)
-    if total <= 0 or not math.isfinite(total):
-        return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
-    weights = [e / total for e in exps]
-    return random.choices(range(n), weights=weights, k=num_to_select)
+    return sorted(range(n), key=lambda i: scores[i])[-num_to_select:]
 
 
 # ── Shared search-stage helpers (used by both input_search and output_search) ──
@@ -190,7 +165,7 @@ _TRIAL_KWARGS_KEYS: Tuple[str, ...] = (
     "num_beams", "candidates_per_beam",
     "scored_candidate_length", "kept_candidate_length",
     "max_num_iterations", "max_pool_size",
-    "temperature", "top_p", "beast_temperature", "eval_beam_chunk_size",
+    "temperature", "top_p", "eval_beam_chunk_size",
 )
 
 
@@ -275,7 +250,6 @@ def _beast_single_trial_local(
     temperature: float,
     top_p: float,
     latin_token_ids: Optional[List[int]] = None,
-    beast_temperature: float = 0.0,
     eval_beam_chunk_size: Optional[int] = None,
     eos_token_id: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[float]]:
@@ -292,11 +266,9 @@ def _beast_single_trial_local(
                   cheap for small n); set to 1 when n is large to avoid OOM after iter-1 beam
                   divergence (vLLM can no longer share KV pages across beams).
       2. Score:   all `num_beams * candidates_per_beam` candidates → scorer_fn(candidates, prefix_length).
-      3. Commit:  select `num_beams` candidates and truncate each to `kept_candidate_length`
-                  tokens. Selection is hard top-K when `beast_temperature == 0` (classic BEAST),
-                  or SMC-style multinomial resampling on softmax(scores / T) with replacement
-                  when `beast_temperature > 0`. Setting kept < scored gives lookahead (score
-                  with more context, commit fewer tokens).
+      3. Commit:  select the top-`num_beams` candidates (hard top-K, classic BEAST) and
+                  truncate each to `kept_candidate_length` tokens. Setting kept < scored gives
+                  lookahead (score with more context, commit fewer tokens).
 
     Per-iteration token growth = kept_candidate_length.
     Implicit max suffix length = max_num_iterations * kept_candidate_length.
@@ -346,10 +318,10 @@ def _beast_single_trial_local(
         # ── Phase 3: Select num_beams; truncate to kept_candidate_length ────
         # All beams had the same length L at iteration start; all candidates have
         # length L + scored_candidate_length. Truncate to L + kept_candidate_length.
-        # beast_temperature=0 → hard top-K (classic BEAST). >0 → SMC resampling.
+        # Selection is hard top-K by score (classic BEAST).
         beam_len_at_start = len(beam[0])
         truncate_to = beam_len_at_start + kept_candidate_length
-        sel_idx = _select_beam_indices(scores, num_beams, beast_temperature)
+        sel_idx = _select_beam_indices(scores, num_beams)
         beam = [candidates[i][:truncate_to] for i in sel_idx]
         beam_scores = [scores[i] for i in sel_idx]
 
