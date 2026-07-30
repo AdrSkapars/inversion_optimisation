@@ -391,22 +391,17 @@ def run_ideation(cfg: DotDict, prompts_yaml: Dict, output_dir: Path,
 # with no per-behaviour override), so all prompt text lives in the yaml. Loaded once at import.
 _BASE_PROMPTS = yaml.safe_load(open(SCRIPT_DIR / "prompts" / "prompts.yaml", encoding="utf-8"))
 _STEERING_INSTRUCTIONS = _BASE_PROMPTS["steering_instructions"]
-_TAG_INSTRUCTIONS_MSG_FIRST = _BASE_PROMPTS["tag_instructions_msg_first"]
-_TAG_INSTRUCTIONS_TRS_FIRST = _BASE_PROMPTS["tag_instructions_trs_first"]
 _TAG_INSTRUCTIONS_MSG_ONLY = _BASE_PROMPTS["tag_instructions_msg_only"]
 
 
-def _tag_instructions(target_before_input: bool, include_trs: bool = True) -> str:
-    """Return the per-turn output-format instructions. When `target_before_input=True`,
-    asks the evaluator to commit to a target response (TRS) BEFORE writing the user
-    message, so the message can be crafted to fit the planned response. Otherwise the
-    original order (message then TRS) is used.
-
-    When `include_trs=False` (input_search disabled), the TRS is not requested at all —
-    the evaluator only writes the <message>, since the TRS would serve no purpose."""
-    if not include_trs:
-        return _TAG_INSTRUCTIONS_MSG_ONLY
-    return _TAG_INSTRUCTIONS_TRS_FIRST if target_before_input else _TAG_INSTRUCTIONS_MSG_FIRST
+def _tag_instructions(target_before_input: bool = False, include_trs: bool = True) -> str:
+    """Return the per-turn output-format instructions: the evaluator writes ONLY a
+    <message>. The targeted-response-start (TRS) is NEVER requested from the evaluator —
+    it is generated self-jail from the target model (see _jail_generate_trs), so the eval
+    must never produce a TRS tag nor see a TRS in its context. The legacy
+    `target_before_input` / `include_trs` args are accepted for signature compatibility
+    (legacy ConversationOrchestrator) but no longer change the output."""
+    return _TAG_INSTRUCTIONS_MSG_ONLY
 
 
 def _build_evaluator_followup(content: str, reasoning: Optional[str], current_turn: int, max_turns: int,
@@ -900,13 +895,13 @@ def run_rollout_batched_local(
     # Jail is loaded if any of:
     #   - `enabled` (jail steers the sampling proposal during target generation)
     #   - `output_search.jail_search_loss` AND output_search.enabled (BoN reward signal)
-    #   - `input_search.jail_search_loss`  AND input_search.enabled  (TRS reward signal for BEAST)
+    #   - `input_search.enabled` (BEAST-in TRS reward — always self-jail from the target)
     jail_cfg = cfg.get("jailbroken_output", {}) or {}
     output_cfg_peek = cfg.get("search_output", {}) or {}
     input_cfg_peek  = cfg.get("search_input", {}) or {}
     jail_use_rollout = bool(jail_cfg.get("enabled", False))
     jail_use_out_loss = bool(output_cfg_peek.get("jail_search_loss", False)) and bool(output_cfg_peek.get("enabled", False))
-    jail_use_in_loss  = bool(input_cfg_peek.get("jail_search_loss",  False)) and bool(input_cfg_peek.get("enabled",  False))
+    jail_use_in_loss  = bool(input_cfg_peek.get("enabled", False))  # BEAST-in TRS is always self-jail (generated from the target model)
     jail_on          = jail_use_rollout or jail_use_out_loss or jail_use_in_loss
     # A SEPARATE jail proposal model is loaded ONLY for roles that STEER the target's
     # output: rollout PoE (`enabled`) and output-search jail scoring (`jail_out_loss`).
@@ -1697,4 +1692,4 @@ def run_rollout_batched_local(
     print(f"ROLLOUT STAGE - COMPLETED ({len(rollouts)} rollouts)", flush=True)
     return rollout_results
 
-__all__ = ['run_understanding', 'parse_scenarios_response', 'run_ideation', '_STEERING_INSTRUCTIONS', '_TAG_INSTRUCTIONS_MSG_FIRST', '_TAG_INSTRUCTIONS_TRS_FIRST', '_TAG_INSTRUCTIONS_MSG_ONLY', '_tag_instructions', '_build_evaluator_followup', '_kickoff_message', 'ConversationOrchestrator', 'run_single_rollout', 'run_rollout', 'run_rollout_batched_local']
+__all__ = ['run_understanding', 'parse_scenarios_response', 'run_ideation', '_STEERING_INSTRUCTIONS', '_TAG_INSTRUCTIONS_MSG_ONLY', '_tag_instructions', '_build_evaluator_followup', '_kickoff_message', 'ConversationOrchestrator', 'run_single_rollout', 'run_rollout', 'run_rollout_batched_local']

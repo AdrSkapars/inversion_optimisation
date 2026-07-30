@@ -117,8 +117,7 @@ cfg = DotDict({
         "target_thinking": False,            # True = target reasoning enabled; False = no thinking
         "max_turns": 3,                      # conversation turns per rollout (each turn = one target response + one searched evaluator message)
         "num_rounds": 5,                     # total rounds; round 1 = full pipeline, rounds 2+ = rollout + judge (fresh resamples). WILT default = 5 (set via BLOOM_NUM_ROUNDS).
-        "target_before_input": False,       # True = evaluator outputs <targeted_response_start> BEFORE <message> (so BoN regenerates the message with the planned TRS already in context, encouraging on-topic messages). Extraction is unchanged.
-        "target_engine": "hf",                  # target decode engine for the WILT/BoN path: "hf" (exact full-vocab PoE) or "vllm" (vllm_topk). Override with BLOOM_TARGET_ENGINE.
+        "target_engine": "hf",                  # target decode engine for the WILT/BoN path: "hf" (exact full-vocab PoE) or "vllm" (vllm_topk). Override with BLOOM_TARGET_ENGINE. Ignored when any search/jail role is active (those pick the engine automatically).
     },
     "judgment": {
         "model": judge_model,                # model that scores transcripts for behavior presence
@@ -138,8 +137,7 @@ cfg = DotDict({
     },
     "search_input": {
         # Classic BEAST 5×5: 5 beams × 5 candidates × 19 iters × 1 token = 4750 target suffix-tokens.
-        "enabled": False,                        # ON: input-side BEAST search over the evaluator's <message> body
-        "jail_search_loss": False,               # overwrite the eval-generated TRS with a jail-generated TRS used as the BEAST reward signal; needs jailbroken_output.model loaded. Only active when enabled=True.
+        "enabled": False,                        # ON: input-side BEAST search over the evaluator's <message> body. The BEAST reward TRS is ALWAYS generated self-jail from the target model (jail system prompt + prefill), never by the evaluator.
         "num_beams": 5,                          # classic BEAST: 5 beams of width 5
         "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
         "scored_candidate_length": 5,            # 5-token chunks scored per iter
