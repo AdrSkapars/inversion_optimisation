@@ -210,6 +210,10 @@ if __name__ == "__main__":
         # refinement history-depth knobs: "all" -> None (all prior rounds), else int (0=none, N=last N)
         return None if v.strip().lower() == "all" else int(v)
 
+    def _int_or_none(v: str):
+        # max_prefix_length: "none"/"null" -> None (keep whole body, suffix attack); else int
+        return None if v.strip().lower() in ("none", "null") else int(v)
+
     def _set_nested(d, path, value):
         for k in path[:-1]:
             d = d.setdefault(k, {})
@@ -238,7 +242,7 @@ if __name__ == "__main__":
         ("BLOOM_REFINE_HIST_TRANSCRIPT", ("refinement_input", "history_transcript_rounds"), _int_or_all),  # "all"=None, 0=none, N=last N full transcripts
         ("BLOOM_REFINE_HIST_STRATEGY",   ("refinement_input", "history_strategy_rounds"),   _int_or_all),  # "all"=None, 0=none, N=last N (round,score,strategy) rows
         ("BLOOM_INPUT_SEARCH",   ("search_input", "enabled"),                 _envbool),
-        ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      int),   # explicit int only (e.g. -50, or 0 = regenerate whole body)
+        ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      _int_or_none),   # int (e.g. -50, 0=regen whole body) or "none"=keep whole body (suffix attack)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
