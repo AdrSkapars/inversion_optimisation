@@ -1343,17 +1343,24 @@ def run_rollout_batched_local(
         _reward_len  = search_cfg.max_reward_output_length
         _reward_toks = _reward_len if (_reward_len and _reward_len > 0) else 100
 
-        def _batch_input_search(active_seeds: List[Dict], ctx_key: str):
-            """Batched Phase-1 + batched self-jail TRS + per-seed BEAST for `active_seeds`.
-            Returns per seed: (pool, trs, strategy). `ctx_key` names the eval-context field to
-            sample from — the SAME (thinking-stripped) context is reused to build the BEAST
-            sampling prefix, and each seed's `target_msgs` is the scoring context."""
+        def _batch_phase1_gen(active_seeds: List[Dict], ctx_key: str):
+            """① Batched Phase-1 evaluator generation. Returns (ctxs, parsed) where ctxs[i] is
+            the thinking-stripped eval context (reused to build the BEAST sampling prefix) and
+            parsed[i] = (content, baseline_msg, strategy)."""
+            ctxs = [_strip_thinking_from_msgs(sd[ctx_key]) for sd in active_seeds]
+            if not active_seeds:
+                return [], []
+            raws = batch_generate_local(lm_eval, ctxs, eval_max_tokens, temperature,
+                                        no_think=no_think_eval)
+            return ctxs, [_parse_phase1(r) for r in raws]
+
+        def _batch_trs_and_beast(active_seeds: List[Dict], ctxs: List, parsed: List):
+            """② Batched self-jail TRS + ③ per-seed BEAST over pre-determined Phase-1 baselines
+            (`parsed[i]` = (content, baseline_msg, strategy); `ctxs[i]` = eval sampling context).
+            The baseline can come from a fresh Phase-1 sample OR a reused bank kickoff — either
+            way the TRS reward and the beam search run over it. Returns per seed (pool, trs, strategy)."""
             if not active_seeds:
                 return []
-            ctxs = [_strip_thinking_from_msgs(sd[ctx_key]) for sd in active_seeds]
-            raws = batch_generate_local(lm_eval, ctxs, eval_max_tokens, temperature,
-                                        no_think=no_think_eval)                        # ① BATCH INPUT
-            parsed = [_parse_phase1(r) for r in raws]      # (content, baseline_msg, strategy)
             trs_inputs = [sd["target_msgs"] + [{"role": "user", "content": p[1]}]
                           for sd, p in zip(active_seeds, parsed)]
             trs_list = _jail_generate_trs_batch(lm_target, jail_runtime_cfg, trs_inputs,
@@ -1407,17 +1414,23 @@ def run_rollout_batched_local(
             ]
             sd["target_msgs"] = ([{"role": "system", "content": target_sysprompt}] if target_sysprompt else [])
 
-        # ── KICKOFF (turn 0): batched input search for fresh seeds; frozen reuse fixed ──
-        fresh = [sd for sd in seeds if not sd["frozen"]]
-        for sd, (pool, trs, strat) in zip(fresh, _batch_input_search(fresh, "eval_kickoff_ctx")):
+        # ── KICKOFF (turn 0): search over the turn-1 input for EVERY seed ──────────────────
+        # A reused bank kickoff (fixed_kickoff) is used as the search BASELINE, not verbatim:
+        # it supplies the Phase-1 message (skipping the eval generation — the time saving),
+        # then the self-jail TRS + BEAST run over it, sliced by max_prefix_length. Fresh seeds
+        # generate their Phase-1 message first. Both then go through the same TRS + BEAST.
+        fresh  = [sd for sd in seeds if not sd["frozen"]]
+        banked = [sd for sd in seeds if sd["frozen"]]
+        ctxs_f, parsed_f = _batch_phase1_gen(fresh, "eval_kickoff_ctx")
+        ctxs_b = [_strip_thinking_from_msgs(sd["eval_kickoff_ctx"]) for sd in banked]
+        parsed_b = [(sd["fixed_kickoff"]["content"], sd["fixed_kickoff"]["content"],
+                     sd["fixed_kickoff"].get("strategy", "") or "") for sd in banked]
+        kseeds = fresh + banked
+        for sd, (pool, trs, strat) in zip(
+            kseeds, _batch_trs_and_beast(kseeds, ctxs_f + ctxs_b, parsed_f + parsed_b)
+        ):
             sd["kickoff"] = pool[0]; sd["kickoff_trs"] = trs; sd["kickoff_strategy"] = strat
             _save_beast_pool(sd, "kickoff", pool, trs)
-        for sd in seeds:
-            if sd["frozen"]:
-                fk = sd["fixed_kickoff"]
-                sd["kickoff"] = (fk["content"], None, fk.get("baseline", "") or "", fk.get("suffix", "") or "")
-                sd["kickoff_trs"] = fk.get("trs", "") or ""
-                sd["kickoff_strategy"] = fk.get("strategy", "") or ""
 
         # Deliver kickoff to each seed's target + transcript.
         for sd in seeds:
@@ -1477,7 +1490,9 @@ def run_rollout_batched_local(
                     followup = _build_evaluator_followup(
                         last["content"], last.get("reasoning"), sd["current_turn"], max_turns)
                     sd["_eval_msgs_turn"] = list(sd["eval_msgs"]) + [{"role": "user", "content": followup}]
-                for sd, (pool, trs, strat) in zip(cont, _batch_input_search(cont, "_eval_msgs_turn")):
+                # Followup inputs are always generated fresh (they depend on the target reply).
+                ctxs_t, parsed_t = _batch_phase1_gen(cont, "_eval_msgs_turn")
+                for sd, (pool, trs, strat) in zip(cont, _batch_trs_and_beast(cont, ctxs_t, parsed_t)):
                     next_msg, next_score, next_base, next_suf = pool[0]
                     if "<END>" in next_msg:
                         sd["done"] = True
