@@ -336,71 +336,40 @@ def _beast_single_trial_local(
 
 
 # =============================================================================
-def input_search_evaluator_message(
+def _parse_phase1(raw: str) -> Tuple[str, str, str]:
+    """Parse one raw Phase-1 evaluator output → (content, baseline_msg, strategy).
+    `content` = raw tagged output (drives the BEAST baseline_prefix); `baseline_msg` =
+    clean <message> body; `strategy` = <strategy> block (usually empty). The eval-side TRS
+    is discarded — the reward TRS is self-jail (see _jail_generate_trs[_batch])."""
+    parsed = parse_message(_make_local_response(raw))
+    content = parsed["content"] or raw
+    baseline_msg, _eval_trs, strategy = _extract_message_tags(content)
+    return content, baseline_msg, strategy
+
+
+def _input_search_beast_one(
     lm_eval: "LocalModel",
     lm_target: "LocalModel",
     eval_msgs: List[Dict],
     target_msgs: List[Dict],
+    content: str,
+    baseline_msg: str,
+    trs: str,
+    strategy: str,
     search_cfg: Dict,
     no_think_eval: bool,
-    sample_max_tokens: int,
-    sample_temperature: float,
     batch_size: int = 4,
-    lm_jail: Optional["LocalModel"] = None,
-    jail_runtime_cfg: Optional[Dict] = None,
 ) -> Tuple[List[Tuple[str, float, str, str]], str, str]:
-    """
-    Two-phase adversarial evaluator message search.
-
-    Phase 1 — normal sample: generate an evaluator message to obtain:
-      • baseline_msg: the suggested user message (from <message> tags)
-      • trs:          targeted response start (reward signal for scoring)
-      • strategy:     evaluator's between-turns reasoning (from <strategy> tags)
-
-    Phase 2 — token-level beam/BoN search: sample candidate continuations from
-      lm_eval and score each with log P(trs | target_msgs + decoded_candidate)
-      via lm_target. The top candidate replaces the Phase 1 baseline.
-
-    Returns:
-      pool     — List[(msg_text, score, baseline, suffix)] sorted best-first;
-                 baseline + suffix == msg_text; suffix is the searched part
-      trs      — the targeted response start string used as the reward signal
-      strategy — the evaluator's <strategy> reasoning block (empty string if absent)
-    """
-    # ── Phase 1: normal sample ──────────────────────────────────────────────
-    raw = batch_generate_local(lm_eval, [eval_msgs], sample_max_tokens, sample_temperature,
-                                no_think=no_think_eval)[0]
-    parsed = parse_message(_make_local_response(raw))
-    content = parsed["content"] or raw
-    baseline_msg, trs, strategy = _extract_message_tags(content)
-
-    # ── Overwrite TRS with the self-jail response (default reward source) ───
-    # jail_in_loss: the BEAST reward target is a SELF-JAIL continuation — the TARGET
-    # model itself under the jail system prompt + prefill (carried in jail_runtime_cfg),
-    # conditioned on the eval's Phase-1 message (`baseline_msg`, i.e. the input BEFORE
-    # the search modifies it). We reuse the already-loaded target model (`lm_target`) as
-    # the generator; no separate jail model is loaded. The eval-generated
-    # <targeted_response_start> is discarded. Length = max_reward_output_length tokens.
-    if (jail_runtime_cfg is not None
-            and jail_runtime_cfg.get("jail_in_loss", False)
-            and baseline_msg):
-        _rlen = search_cfg.max_reward_output_length
-        jail_trs = _jail_generate_trs(
-            lm_target, jail_runtime_cfg,
-            target_msgs + [{"role": "user", "content": baseline_msg}],
-            max_tokens=(_rlen if _rlen and _rlen > 0 else 100),
-            temperature=sample_temperature,
-        )
-        if jail_trs:
-            trs = jail_trs
-
+    """Per-scenario BEAST back-half of input search. Given the Phase-1 message
+    (`content` = raw tagged output, `baseline_msg` = clean body) and the already-generated
+    self-jail reward `trs`, run the token-level beam search and return (pool, trs,
+    strategy). The search body is lifted verbatim from the original
+    input_search_evaluator_message — it RECEIVES content/baseline_msg/trs instead of
+    generating them, so the Phase-1 sample and the jail TRS can be batched across
+    scenarios by the caller. The BEAST core (_beast_single_trial_local) is unchanged."""
     if not trs:
-        # No TRS generated — return just the normal message as the single pool entry
+        # No reward TRS — return the Phase-1 message as the single pool entry.
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
-
-    # Short-circuit if disabled — return Phase 1 baseline as-is (vanilla bloom).
-    if not search_cfg.enabled:
-        return [(baseline_msg, 0.0, baseline_msg, "")], trs, strategy
 
     eos_token_id = _resolve_eos_token_id(lm_eval, search_cfg.truncate_at_eos)
 
@@ -510,6 +479,59 @@ def input_search_evaluator_message(
         pool = [(baseline_msg, 0.0, baseline_msg, "")]  # fallback to Phase 1 baseline
 
     return pool, trs, strategy
+
+
+def input_search_evaluator_message(
+    lm_eval: "LocalModel",
+    lm_target: "LocalModel",
+    eval_msgs: List[Dict],
+    target_msgs: List[Dict],
+    search_cfg: Dict,
+    no_think_eval: bool,
+    sample_max_tokens: int,
+    sample_temperature: float,
+    batch_size: int = 4,
+    lm_jail: Optional["LocalModel"] = None,
+    jail_runtime_cfg: Optional[Dict] = None,
+) -> Tuple[List[Tuple[str, float, str, str]], str, str]:
+    """Serial (single-scenario) input search: Phase-1 sample → self-jail TRS →
+    per-scenario BEAST. Retained for the serial rollout path (e.g. output_search runs)
+    and as the reference implementation. The BATCHED input_search rollout instead calls
+    _parse_phase1 / _jail_generate_trs_batch / _input_search_beast_one directly so it can
+    batch the two generations across scenarios (see rollout.py).
+
+    Returns (pool, trs, strategy): pool = List[(msg_text, score, baseline, suffix)]
+    best-first (baseline+suffix == msg_text); trs = reward TRS; strategy = <strategy>."""
+    # ── Phase 1: normal sample ──
+    content, baseline_msg, strategy = _parse_phase1(
+        batch_generate_local(lm_eval, [eval_msgs], sample_max_tokens, sample_temperature,
+                             no_think=no_think_eval)[0])
+
+    # ── Self-jail TRS (default reward source; the eval never emits a usable TRS) ──
+    trs = ""
+    if (jail_runtime_cfg is not None
+            and jail_runtime_cfg.get("jail_in_loss", False)
+            and baseline_msg):
+        _rlen = search_cfg.max_reward_output_length
+        jail_trs = _jail_generate_trs(
+            lm_target, jail_runtime_cfg,
+            target_msgs + [{"role": "user", "content": baseline_msg}],
+            max_tokens=(_rlen if _rlen and _rlen > 0 else 100),
+            temperature=sample_temperature,
+        )
+        if jail_trs:
+            trs = jail_trs
+
+    if not trs:
+        return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
+    if not search_cfg.enabled:
+        return [(baseline_msg, 0.0, baseline_msg, "")], trs, strategy
+
+    return _input_search_beast_one(
+        lm_eval, lm_target, eval_msgs, target_msgs,
+        content, baseline_msg, trs, strategy,
+        search_cfg, no_think_eval, batch_size,
+    )
 
 
 def output_search_target_response(
@@ -699,4 +721,4 @@ def output_search_target_response(
 
     return pool
 
-__all__ = ['build_latin_token_ids', '_score_beast_candidates', '_score_output_candidates', '_select_beam_indices', '_TRIAL_KWARGS_KEYS', '_trial_kwargs', '_get_or_build_latin_mask', '_build_sampling_prefix', '_beast_single_trial_local', 'input_search_evaluator_message', 'output_search_target_response']
+__all__ = ['build_latin_token_ids', '_score_beast_candidates', '_score_output_candidates', '_select_beam_indices', '_TRIAL_KWARGS_KEYS', '_trial_kwargs', '_get_or_build_latin_mask', '_build_sampling_prefix', '_beast_single_trial_local', '_parse_phase1', '_input_search_beast_one', 'input_search_evaluator_message', 'output_search_target_response']

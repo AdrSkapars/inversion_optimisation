@@ -1076,6 +1076,13 @@ def run_rollout_batched_local(
     # gate the serial fallback.
     jail_batched = (jail_hf and jail_use_rollout
                     and not input_search_on and not output_search_on)
+    # Batched INPUT-SEARCH eligibility: pure input_search (no output_search) rolls variations
+    # out in LOCKSTEP, running each turn's Phase-1 messages, self-jail TRS rewards, and target
+    # replies in cross-scenario batches around the (per-scenario) BEAST. The serial fallback
+    # still handles output_search + any edge combos. BLOOM_INPUT_BATCHED=0 forces the serial
+    # path (equivalence testing / escape hatch).
+    input_search_batched = (input_search_on and not output_search_on
+                            and os.environ.get("BLOOM_INPUT_BATCHED", "1") != "0")
 
     def _build_kickoff_prompt(refine_context: str = "") -> str:
         """Build the per-variation kickoff prompt via the shared _kickoff_message helper.
@@ -1324,8 +1331,205 @@ def run_rollout_batched_local(
                     "transcript_file": filename, "kickoff_score": None,
                 })
 
+    elif input_search_batched:
+        # ══ Batched INPUT-SEARCH rollout (variations in LOCKSTEP) ════════════
+        # Same lockstep shape as the jail path, but each turn does the input_search work in
+        # cross-scenario batches around the (per-scenario) BEAST:
+        #   ① batch the Phase-1 evaluator messages, ② batch the self-jail TRS rewards,
+        #   ③ run BEAST per scenario (serial across scenarios; candidate scoring already
+        #      batched within), ④ batch the plain target reply (input_search leaves the
+        #      target un-steered). The BEAST core (_beast_single_trial_local) is unchanged.
+        is_var_batch = max(1, int(os.environ.get("BLOOM_INPUT_VAR_BATCH", target_batch_size)))
+        _reward_len  = search_cfg.max_reward_output_length
+        _reward_toks = _reward_len if (_reward_len and _reward_len > 0) else 100
+
+        def _batch_input_search(active_seeds: List[Dict], ctx_key: str):
+            """Batched Phase-1 + batched self-jail TRS + per-seed BEAST for `active_seeds`.
+            Returns per seed: (pool, trs, strategy). `ctx_key` names the eval-context field to
+            sample from — the SAME (thinking-stripped) context is reused to build the BEAST
+            sampling prefix, and each seed's `target_msgs` is the scoring context."""
+            if not active_seeds:
+                return []
+            ctxs = [_strip_thinking_from_msgs(sd[ctx_key]) for sd in active_seeds]
+            raws = batch_generate_local(lm_eval, ctxs, eval_max_tokens, temperature,
+                                        no_think=no_think_eval)                        # ① BATCH INPUT
+            parsed = [_parse_phase1(r) for r in raws]      # (content, baseline_msg, strategy)
+            trs_inputs = [sd["target_msgs"] + [{"role": "user", "content": p[1]}]
+                          for sd, p in zip(active_seeds, parsed)]
+            trs_list = _jail_generate_trs_batch(lm_target, jail_runtime_cfg, trs_inputs,
+                                                max_tokens=_reward_toks, temperature=temperature)  # ② BATCH TRS
+            out = []
+            for sd, ctx, (content, base_msg, strat), trs in zip(active_seeds, ctxs, parsed, trs_list):
+                out.append(_input_search_beast_one(                                    # ③ SERIAL BEAST
+                    lm_eval, lm_target, ctx, sd["target_msgs"],
+                    content, base_msg, trs, strat, search_cfg, no_think_eval, target_batch_size))
+            return out
+
+        def _save_beast_pool(sd: Dict, turn_label, pool, trs) -> None:
+            beast_pool_data.append({
+                "variation_number": sd["var_idx"], "turn": turn_label, "trs": trs,
+                "pool": [{"baseline": b, "suffix": sx, "message": m,
+                          "score": round(s, 4) if s not in (None, -float("inf")) else None}
+                         for m, s, b, sx in pool],
+            })
+
+        # One "seed" per transcript (variation x rep), honoring resume/skip.
+        seeds = []
+        for var_idx, (variation, var_desc, rollout_prompt_text, _sc) in enumerate(
+            zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1
+        ):
+            if _variation_done(var_idx):
+                print(f"  Variation {var_idx}/{len(variations)}: skipped (transcripts exist)", flush=True)
+                _resume_load_variation(var_idx, var_desc)
+                continue
+            fixed_kickoff = variation.get("fixed_kickoff") if isinstance(variation, dict) else None
+            frozen = bool(fixed_kickoff and fixed_kickoff.get("content"))
+            n_reps = max(1, int(variation.get("n_reps", 1))) if (frozen and isinstance(variation, dict)) else 1
+            for rep in range(1, n_reps + 1):
+                seeds.append({"var_idx": var_idx, "variation": variation, "var_desc": var_desc,
+                              "rollout_prompt_text": rollout_prompt_text, "rep": rep,
+                              "frozen": frozen, "fixed_kickoff": fixed_kickoff})
+
+        # Per-seed kickoff eval-context + base target msgs (system prompt only; the base is the
+        # scoring context for the kickoff BEAST, before the kickoff message is delivered).
+        for sd in seeds:
+            variation = sd["variation"]
+            frozen_tsp = variation.get("target_system_prompt", "") if isinstance(variation, dict) else ""
+            target_sysprompt = frozen_tsp or prompts_yaml.get("target_system_prompt", "")
+            if target_sysprompt_prefix and target_sysprompt_prefix.strip() and target_sysprompt and not frozen_tsp:
+                target_sysprompt = f"{target_sysprompt_prefix.strip()}\n\n{target_sysprompt}"
+            per_var_refine_context = variation.get("refine_context", "") if isinstance(variation, dict) else ""
+            kickoff_prompt = _build_kickoff_prompt(refine_context=per_var_refine_context)
+            sd["target_sysprompt"] = target_sysprompt
+            sd["eval_kickoff_ctx"] = [
+                {"role": "system", "content": evaluator_system_prompt},
+                {"role": "user",   "content": f"{sd['rollout_prompt_text']}\n\n{kickoff_prompt}"},
+            ]
+            sd["target_msgs"] = ([{"role": "system", "content": target_sysprompt}] if target_sysprompt else [])
+
+        # ── KICKOFF (turn 0): batched input search for fresh seeds; frozen reuse fixed ──
+        fresh = [sd for sd in seeds if not sd["frozen"]]
+        for sd, (pool, trs, strat) in zip(fresh, _batch_input_search(fresh, "eval_kickoff_ctx")):
+            sd["kickoff"] = pool[0]; sd["kickoff_trs"] = trs; sd["kickoff_strategy"] = strat
+            _save_beast_pool(sd, "kickoff", pool, trs)
+        for sd in seeds:
+            if sd["frozen"]:
+                fk = sd["fixed_kickoff"]
+                sd["kickoff"] = (fk["content"], None, fk.get("baseline", "") or "", fk.get("suffix", "") or "")
+                sd["kickoff_trs"] = fk.get("trs", "") or ""
+                sd["kickoff_strategy"] = fk.get("strategy", "") or ""
+
+        # Deliver kickoff to each seed's target + transcript.
+        for sd in seeds:
+            kmsg, kscore, kbase, ksuf = sd["kickoff"]
+            trmsgs = []
+            if sd["target_sysprompt"]:
+                trmsgs.append({"role": "system", "content": sd["target_sysprompt"], "source": "target_system"})
+            target_content = kmsg
+            if target_kickoff_prefix and not sd["frozen"]:
+                target_content = target_kickoff_prefix.strip() + " " + kmsg
+            sd["target_msgs"].append({"role": "user", "content": target_content})
+            kick_entry: Dict[str, Any] = {
+                "role": "user", "content": target_content, "source": "evaluator",
+                "targeted_response_start": sd["kickoff_trs"],
+                "beast_baseline": kbase, "beast_suffix": ksuf,
+            }
+            if sd["kickoff_strategy"]:
+                kick_entry["strategy"] = sd["kickoff_strategy"]
+            if kscore not in (None, -float("inf")):
+                kick_entry["targeted_response_start_logprob"] = round(kscore, 4)
+            trmsgs.append(kick_entry)
+            sd["transcript_msgs"] = trmsgs
+            sd["eval_msgs"] = list(sd["eval_kickoff_ctx"]) + [{"role": "assistant", "content": kmsg}]
+            sd["current_turn"] = 0
+            sd["done"] = False
+            sd["kickoff_score"] = kscore
+
+        # ── TURN LOOP (chunked lockstep) ─────────────────────────────────────
+        for _b in range(0, len(seeds), is_var_batch):
+            chunk = seeds[_b:_b + is_var_batch]
+            for turn in range(max_turns):
+                active = [sd for sd in chunk if not sd["done"]]
+                if not active:
+                    break
+                # ④ BATCH plain target reply (input_search leaves the target un-steered)
+                raws_t = batch_generate_local(
+                    lm_target, [sd["target_msgs"] for sd in active],
+                    target_max_tokens, temperature, no_think=no_think_target)
+                for sd, raw_target in zip(active, raws_t):
+                    parsed_t = parse_message(_make_local_response(raw_target))
+                    target_resp = parsed_t["content"] or raw_target
+                    target_reason = parsed_t["reasoning"]
+                    sd["target_msgs"].append({"role": "assistant", "content": target_resp})
+                    sd["current_turn"] = turn + 1
+                    tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
+                    if target_reason:
+                        tmsg["reasoning"] = target_reason
+                    sd["transcript_msgs"].append(tmsg)
+                    if sd["current_turn"] >= max_turns:
+                        sd["done"] = True
+
+                cont = [sd for sd in chunk if not sd["done"]]
+                if not cont:
+                    break
+                for sd in cont:
+                    last = sd["transcript_msgs"][-1]
+                    followup = _build_evaluator_followup(
+                        last["content"], last.get("reasoning"), sd["current_turn"], max_turns)
+                    sd["_eval_msgs_turn"] = list(sd["eval_msgs"]) + [{"role": "user", "content": followup}]
+                for sd, (pool, trs, strat) in zip(cont, _batch_input_search(cont, "_eval_msgs_turn")):
+                    next_msg, next_score, next_base, next_suf = pool[0]
+                    if "<END>" in next_msg:
+                        sd["done"] = True
+                        continue
+                    sd["eval_msgs"] = sd["_eval_msgs_turn"] + [{"role": "assistant", "content": next_msg}]
+                    sd["target_msgs"].append({"role": "user", "content": next_msg})
+                    turn_entry: Dict[str, Any] = {
+                        "role": "user", "content": next_msg, "source": "evaluator",
+                        "targeted_response_start": trs,
+                        "beast_baseline": next_base, "beast_suffix": next_suf,
+                    }
+                    if strat:
+                        turn_entry["strategy"] = strat
+                    if next_score not in (None, -float("inf")):
+                        turn_entry["targeted_response_start_logprob"] = round(next_score, 4)
+                    sd["transcript_msgs"].append(turn_entry)
+
+            # ── Save transcripts for this chunk ──
+            for sd in chunk:
+                var_idx, rep = sd["var_idx"], sd["rep"]
+                transcript_data = {
+                    "metadata": {
+                        "evaluator_model": evaluator_model_id,
+                        "target_model": target_model_id,
+                        "target_system_prompt": sd["target_sysprompt"],
+                        "setup_content": "",
+                        "variation_number": var_idx,
+                        "repetition_number": rep,
+                        "created_at": datetime.now().isoformat(),
+                    },
+                    "messages": sd["transcript_msgs"],
+                    "judgment": None,
+                }
+                turn_logprobs = [m["targeted_response_start_logprob"] for m in sd["transcript_msgs"]
+                                 if m.get("targeted_response_start_logprob") is not None]
+                avg_logprob = round(sum(turn_logprobs) / len(turn_logprobs), 4) if turn_logprobs else None
+                filename = f"transcript_v{var_idx}r{rep}.json"
+                save_json(transcript_data, transcripts_dir / filename)
+                print(f"  Rollout v{var_idx}r{rep} done ({sd['current_turn']} turns, "
+                      f"avg_logprob={avg_logprob}) [batched-input-search]", flush=True)
+                rollout_entry: Dict[str, Any] = {
+                    "variation_number": var_idx, "variation_description": sd["var_desc"],
+                    "repetition_number": rep, "num_turns": len(sd["transcript_msgs"]),
+                    "transcript_file": filename,
+                    "kickoff_score": round(sd["kickoff_score"], 4) if sd.get("kickoff_score") is not None else None,
+                }
+                if avg_logprob is not None:
+                    rollout_entry["avg_logprob"] = avg_logprob
+                rollouts.append(rollout_entry)
+
     # Non-corruption path (input/output search, jail, plain): one variation at a time.
-    _noncorr_iter = [] if jail_batched else list(enumerate(
+    _noncorr_iter = [] if (jail_batched or input_search_batched) else list(enumerate(
         zip(variations, var_descs, rollout_prompt_texts, setup_contents), 1))
     for var_idx, (variation, var_desc, rollout_prompt_text, setup_content) in _noncorr_iter:
         # Resume: variation already has all its transcripts on disk → load and skip search.

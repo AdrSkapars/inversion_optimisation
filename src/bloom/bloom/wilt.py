@@ -71,6 +71,54 @@ def _jail_generate_trs(
     return lm.tokenizer.decode(out[0][0], skip_special_tokens=True).strip()
 
 
+def _jail_generate_trs_batch(
+    lm: "LocalModel",
+    jail_runtime_cfg: Dict,
+    target_msgs_list: List[List[Dict]],
+    max_tokens: int = 100,
+    temperature: float = 1.0,
+) -> List[str]:
+    """Batched form of `_jail_generate_trs`: generate a self-jail TRS for EACH conversation
+    in `target_msgs_list` in ONE `generate_n_tokens` call. Returns one TRS string per input
+    (empty string where generation failed), index-aligned with the input list. Per-scenario
+    prefix construction is identical to `_jail_generate_trs` (jail system prompt + closed
+    <think> + prefill). Used by the batched input_search rollout so every scenario's reward
+    TRS is produced together instead of one at a time."""
+    if not target_msgs_list:
+        return []
+    sys_prompt = jail_runtime_cfg.get("system_prompt", "")
+    prefill    = jail_runtime_cfg.get("prefill", "") or ""
+
+    prompts_ids: List[List[int]] = []
+    for target_msgs in target_msgs_list:
+        j_msgs = [m for m in target_msgs if m.get("role") != "system"]
+        if sys_prompt:
+            j_msgs = [{"role": "system", "content": sys_prompt}] + j_msgs
+        j_prompt = lm.tokenizer.apply_chat_template(
+            j_msgs, tokenize=False, add_generation_prompt=True,
+        )
+        j_prompt += core._CORRUPT_NO_THINK_PREFIX
+        if prefill:
+            j_prompt += prefill
+        prompts_ids.append(lm.tokenizer.encode(j_prompt, add_special_tokens=False))
+
+    sampling_kwargs = dict(
+        max_tokens=int(max_tokens),
+        temperature=max(float(temperature), 1e-6),
+        top_p=1.0,
+        skip_special_tokens=False,
+        ignore_eos=False,
+    )
+    outs = lm.worker.generate_n_tokens(prompts_ids, sampling_kwargs)
+    results: List[str] = []
+    for o in outs:
+        if o and o[0]:
+            results.append(lm.tokenizer.decode(o[0], skip_special_tokens=True).strip())
+        else:
+            results.append("")
+    return results
+
+
 def batch_generate_contrastive_local(
     lm_target: "LocalModel",
     lm_jail: "LocalModel",
@@ -615,4 +663,4 @@ def _contrastive_sample_extensions(
         out.append([sampled_tokens[i * n + j] for j in range(n)])
     return out
 
-__all__ = ['_jail_generate_trs', 'batch_generate_contrastive_local', '_load_hf_poe_models', '_TOKBIAS_CACHE', '_tokbias_vector', '_hf_poe_generate', '_jail_generate_hf', '_contrastive_sample_extensions']
+__all__ = ['_jail_generate_trs', '_jail_generate_trs_batch', 'batch_generate_contrastive_local', '_load_hf_poe_models', '_TOKBIAS_CACHE', '_tokbias_vector', '_hf_poe_generate', '_jail_generate_hf', '_contrastive_sample_extensions']
