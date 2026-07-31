@@ -136,15 +136,15 @@ cfg = DotDict({
         "enabled": False,                        # ON: input-side BEAST search over the evaluator's <message> body. The BEAST reward TRS is ALWAYS generated self-jail from the target model (jail system prompt + prefill), never by the evaluator.
         "num_beams": 5,                          # classic BEAST: 5 beams of width 5
         "candidates_per_beam": 5,                # 5 candidates per beam → 25 scored per iter
-        "scored_candidate_length": 5,            # 5-token chunks scored per iter
-        "kept_candidate_length": 5,              # commit 5 tokens per iter
-        "max_num_iterations": 20,                # 20 iters × 5 tokens = ~100-token search
-        "max_prefix_length": -100,               # how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
+        "scored_candidate_length": 15,           # TUNED (racial/Qwen, 2 seeds): 15 > 5
+        "kept_candidate_length": 15,             # TUNED: commit 15 tokens/iter (15 > 5 both seeds)
+        "max_num_iterations": 10,                # compute dial (linear in wall-clock); kept at our validated 10-iter budget
+        "max_prefix_length": None,               # TUNED: None (suffix attack) is best over 2 seeds; full-rewrite (0) is worst. how much of Phase 1's <message> body is pre-loaded into the BoN prompt before the cursor. Phase 1's <strategy>/preamble/opening <message> are ALWAYS in the context. None = keep full body (cursor right before </message>, classic suffix attack); 0 = keep nothing (cursor right after <message>, BoN samples whole body); N>0 = first N tokens of body; N<0 = drop last |N| tokens of body.
         "eval_beam_chunk_size": None,            # None = batch all 5 beams in one vLLM call (cheap at n=5); 1 only needed when candidates_per_beam is large (~100+) to avoid OOM after iter-1 beam divergence
-        "max_reward_output_length": 50,          # first N tokens of TRS used as reward signal (0 = full TRS)
-        "temperature": 1.0,                      # sampling temperature for token expansion
+        "max_reward_output_length": 150,         # TUNED: 150 > 25 both seeds. first N tokens of TRS used as reward signal (0 = full TRS)
+        "temperature": 1.0,                      # sampling temperature for token expansion (never tuned; fixed at 1.0)
         "max_pool_size": 50,                     # max candidates accumulated across the search
-        "latin_mask": False,                      # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
+        "latin_mask": True,                       # TUNED: True gives higher elicitation on BOTH seeds (keeps the suffix coherent, ASCII-only). Verify on a 2nd cell before final. restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "search_output": {
