@@ -244,6 +244,8 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_SEARCH",   ("search_input", "enabled"),                 _envbool),
         ("BLOOM_INPUT_MAXPREFIX", ("search_input", "max_prefix_length"),      _int_or_none),   # int (e.g. -50, 0=regen whole body) or "none"=keep whole body (suffix attack)
         ("BLOOM_INPUT_ITERS",    ("search_input", "max_num_iterations"),      int),
+        ("BLOOM_INPUT_NUM_BEAMS", ("search_input", "num_beams"),              int),   # BEAST beam width (hypotheses kept after selection)
+        ("BLOOM_INPUT_CAND_PER_BEAM", ("search_input", "candidates_per_beam"), int),  # samples drawn per beam per iter; scored/iter = num_beams * candidates_per_beam
         ("BLOOM_INPUT_EVAL_CHUNK", ("search_input", "eval_beam_chunk_size"),  int),   # beams per eval vLLM call during BEAST candidate gen; 1 = sequential (cuts GPU-0 peak ~num_beams x), None default = all beams at once
         ("BLOOM_INPUT_SCORED_LEN", ("search_input", "scored_candidate_length"), int),  # tokens scored per BEAST iter (keep == kept_candidate_length)
         ("BLOOM_INPUT_KEPT_LEN",   ("search_input", "kept_candidate_length"),   int),  # tokens committed per BEAST iter (must be <= scored_candidate_length)
