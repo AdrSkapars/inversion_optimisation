@@ -145,7 +145,7 @@ cfg = DotDict({
         "temperature": 1.0,                      # sampling temperature for token expansion (never tuned; fixed at 1.0)
         "max_pool_size": 50,                     # max candidates accumulated across the search
         "latin_mask": True,                       # TUNED: True gives higher elicitation on BOTH seeds (keeps the suffix coherent, ASCII-only). Verify on a 2nd cell before final. restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
-        "truncate_at_eos": True,                # If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
+        "truncate_at_eos": False,               # TUNED: False gives higher elicitation on BOTH seeds (2.80/4.00 vs baseline 1.87/2.87), elapsed-neutral. Pairs with latin_mask=True (the mask blocks the terminator chars so the model keeps writing). If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "search_output": {
         "enabled": False,                        # True = run output search on every target response
