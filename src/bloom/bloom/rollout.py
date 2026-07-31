@@ -1273,7 +1273,8 @@ def run_rollout_batched_local(
                         tmsg["gen_token_ids"] = _ids           # exact ids -> free token stats
                     if _tprobs and target_resp == raw_target:
                         tmsg["gen_token_probs"] = _tprobs      # on-policy probs (plausibility)
-                        tmsg["prob_stats"] = _prob_summary(_tprobs)
+                    if _tprobs:
+                        tmsg["prob_stats"] = _prob_summary(_tprobs)  # summary valid even when parse strips channel/reasoning markers (e.g. gemma-4)
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -1480,8 +1481,8 @@ def run_rollout_batched_local(
                     sd["target_msgs"].append({"role": "assistant", "content": target_resp})
                     sd["current_turn"] = turn + 1
                     tmsg: Dict[str, Any] = {"role": "assistant", "content": target_resp, "source": "target"}
-                    if _tprobs and target_resp == raw_target:
-                        tmsg["prob_stats"] = _prob_summary(_tprobs)   # on-policy plausibility
+                    if _tprobs:
+                        tmsg["prob_stats"] = _prob_summary(_tprobs)   # on-policy plausibility (summary valid even when parse strips channel markers, e.g. gemma-4)
                     if target_reason:
                         tmsg["reasoning"] = target_reason
                     sd["transcript_msgs"].append(tmsg)
@@ -1747,7 +1748,8 @@ def run_rollout_batched_local(
                     tmsg["gen_token_ids"] = _corr_gen_ids  # exact ids -> exact token-prob scoring (no re-encode)
                 if _jail_tprobs and target_resp == raw_target:
                     tmsg["gen_token_probs"] = _jail_tprobs  # on-policy probs captured at jail gen time -> free token stats
-                    tmsg["prob_stats"] = _prob_summary(_jail_tprobs)
+                if _jail_tprobs:
+                    tmsg["prob_stats"] = _prob_summary(_jail_tprobs)  # summary valid even when parse strips channel markers (e.g. gemma-4)
                 if target_reason:
                     tmsg["reasoning"] = target_reason
                 if output_search_on:
