@@ -252,6 +252,7 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_REWARD_LEN", ("search_input", "max_reward_output_length"), int),  # first N tokens of self-jail TRS used as the BEAST reward signal (0 = full TRS)
         ("BLOOM_INPUT_TRUNCATE_EOS", ("search_input", "truncate_at_eos"),       _envbool),  # True: candidate may emit </message>/EOS and truncate; False: keep raw content to scored_candidate_length
         ("BLOOM_INPUT_LATIN_MASK", ("search_input", "latin_mask"),             _envbool),  # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
+        ("BLOOM_TARGET_BATCH_SIZE", ("target_batch_size",),                    int),  # target-model batch for input-search candidate scoring (raise to score more candidates per pass)
     ]
     for _env, _path, _conv in ENV_OVERRIDES:
         _v = os.environ.get(_env)
