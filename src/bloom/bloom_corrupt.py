@@ -148,7 +148,41 @@ cfg = DotDict({
         "truncate_at_eos": False,               # TUNED: False gives higher elicitation on BOTH seeds (2.80/4.00 vs baseline 1.87/2.87), elapsed-neutral. Pairs with latin_mask=True (the mask blocks the terminator chars so the model keeps writing). If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "flrt_search_input": {
-        "enabled": False,                        # FLRT-style input-side search (placeholder — only the enabled flag for now)
+        "enabled": False,                        # ON: FLRT-style input-side search over the evaluator's <message> body. Black-box mutation-buffer search (append/insert/delete/swap) scored by a FULL-VOCAB distillation loss: pull the target's per-token distribution TOWARD the self-jail teacher's over a shared continuation (FLRT L_D; Thompson & Sklar 2024). The reward continuation is generated self-jail from the target (jail prompt + prefill), exactly like search_input's TRS. Defaults follow the ORIGINAL FLRT paper except our agreed adaptations (self-jail teacher instead of a LoRA toxic model; HF engine; teacher task-only by default).
+        "engine": "hf_full",                     # FIXED: FLRT needs exact full-vocab distributions (L_D is a whole-vocab expectation), so HF only — vLLM top-K is insufficient. Mirrors jailbroken_output's hf_full path.
+        # ── Search compute (BEAST param names reused where same-function) ──
+        "buffer_size": 8,                        # PAPER default: active search buffer; the single best in the buffer is mutated each iteration, top-buffer_size retained.
+        "k1": 32,                                # PAPER: mutated candidates generated + scored per iteration.
+        "k2": 16,                                # PAPER: candidate replacement tokens sampled per position (swap/insert) from the auditor's per-position distribution.
+        "max_num_iterations": 40,                # iterations per trial (the compute dial; PAPER bounds by wall-clock/runtime_limit, we bound by iters). Override BLOOM_FLRT_ITERS.
+        "n_trials": 1,                           # PAPER: independent restarts (fresh init), merged into one pool.
+        "max_pool_size": 50,                     # max candidates accumulated across the search (== search_input).
+        "eval_beam_chunk_size": None,            # HF batch chunk for scoring the k1 candidates/iter; None = one batched forward.
+        "temperature": 1.0,                      # auditor mutation-proposal sampling temperature.
+        # ── Mutation mix (PAPER = delete/insert/swap 1/3 each; here append is HIGHEST, rest spread evenly, per user) ──
+        "p_append": 0.4,                         # append a sampled token at the END (BEAST-style end-insert) — highest-probability op.
+        "p_insert": 0.2,                         # insert a sampled token at a random INTERIOR position.
+        "p_delete": 0.2,                         # delete a random token.
+        "p_swap": 0.2,                           # swap a random token for a sampled replacement.
+        # ── Suffix bounds / init ──
+        "start_tokens": 10,                      # initial suffix length (PAPER-ish).
+        "min_tokens": 5,                         # delete disabled below this suffix length.
+        "max_tokens": 40,                        # insert/append disabled above this suffix length.
+        "sample_init_suffix": True,              # init the suffix by sampling autoregressively from the auditor (vs random tokens).
+        "init_suffix": None,                     # explicit init-suffix string; overrides start_tokens/sampling when set.
+        # ── max_prefix_length / masking / eos (BEAST names, same meaning as search_input) ──
+        "max_prefix_length": None,               # how much of Phase-1's <message> body is preloaded before the mutation region. None = keep full body (suffix mutation, classic); 0 = keep nothing (whole body generated/mutated — pair with teacher_sees_attack=True); N>0 = first N tokens; N<0 = drop last |N|.
+        "latin_mask": True,                      # restrict mutation tokens to Latin/ASCII (== search_input default).
+        "truncate_at_eos": False,                # allow a candidate to emit EOS/terminator and truncate (== search_input).
+        "max_reward_output_length": 150,         # first N target-model tokens of the self-jail continuation used as the distillation target (0 = full). == search_input reward length.
+        # ── Distillation loss (the ONLY default-on objective) ──
+        "p_threshold": 0.6,                      # PAPER: per-token reward CAP — stop rewarding a continuation token once the target already matches the teacher well (per-token contribution capped at log(p_threshold)). NOT a numerical -C floor (that stays as an internal -inf guard only).
+        "teacher_sees_attack": False,            # PAPER default OFF: the self-jail teacher is conditioned on task/context ONLY, not the attack message. Toggle ON manually (e.g. with max_prefix_length=0, whole-input generation) so the teacher reads the same input the victim does. No auto-logic.
+        # ── Auxiliary losses (PAPER has them; DEFAULT OFF; combined by PLAIN weighted SUM — no z-norm/min/delta) ──
+        "w_fluency": 0.0,                        # fluency-loss weight (perplexity of the attack tokens). 0 = off.
+        "fluency_on": "auditor",                 # which model scores fluency perplexity: "auditor" or "target" (whichever's loaded/cheap).
+        "w_repetition": 0.0,                     # repetition-penalty weight on the attack tokens. 0 = off.
+        "repetition_exponent": 1.5,              # PAPER: penalty = sum((count-1)^exp) / suffix_len.
     },
     "search_output": {
         "enabled": False,                        # True = run output search on every target response
@@ -255,6 +289,31 @@ if __name__ == "__main__":
         ("BLOOM_INPUT_TRUNCATE_EOS", ("search_input", "truncate_at_eos"),       _envbool),  # True: candidate may emit </message>/EOS and truncate; False: keep raw content to scored_candidate_length
         ("BLOOM_INPUT_LATIN_MASK", ("search_input", "latin_mask"),             _envbool),  # restrict beam search to Latin/ASCII tokens only (blocks unicode/digits/punctuation)
         ("BLOOM_TARGET_BATCH_SIZE", ("target_batch_size",),                    int),  # target-model batch for input-search candidate scoring (raise to score more candidates per pass)
+        # ── flrt_search_input (FLRT-in) hooks: mutation-buffer black-box search, full-vocab distillation loss ──
+        ("BLOOM_FLRT_SEARCH",    ("flrt_search_input", "enabled"),            _envbool),
+        ("BLOOM_FLRT_MAXPREFIX", ("flrt_search_input", "max_prefix_length"), _int_or_none),  # None=keep whole body (suffix mutation); 0=whole-input (pair with teacher_sees_attack=1)
+        ("BLOOM_FLRT_ITERS",     ("flrt_search_input", "max_num_iterations"), int),   # iterations/trial (compute dial)
+        ("BLOOM_FLRT_NTRIALS",   ("flrt_search_input", "n_trials"),          int),    # independent restarts merged into the pool
+        ("BLOOM_FLRT_BUFFER",    ("flrt_search_input", "buffer_size"),       int),    # active buffer (best is mutated each iter)
+        ("BLOOM_FLRT_K1",        ("flrt_search_input", "k1"),               int),     # mutated candidates generated + scored per iter
+        ("BLOOM_FLRT_K2",        ("flrt_search_input", "k2"),               int),     # replacement tokens sampled per position (swap/insert)
+        ("BLOOM_FLRT_EVAL_CHUNK", ("flrt_search_input", "eval_beam_chunk_size"), int),  # HF scoring batch chunk for the k1 candidates
+        ("BLOOM_FLRT_P_APPEND",  ("flrt_search_input", "p_append"),         float),
+        ("BLOOM_FLRT_P_INSERT",  ("flrt_search_input", "p_insert"),         float),
+        ("BLOOM_FLRT_P_DELETE",  ("flrt_search_input", "p_delete"),         float),
+        ("BLOOM_FLRT_P_SWAP",    ("flrt_search_input", "p_swap"),           float),
+        ("BLOOM_FLRT_START_TOKENS", ("flrt_search_input", "start_tokens"),  int),
+        ("BLOOM_FLRT_MIN_TOKENS", ("flrt_search_input", "min_tokens"),      int),
+        ("BLOOM_FLRT_MAX_TOKENS", ("flrt_search_input", "max_tokens"),      int),
+        ("BLOOM_FLRT_REWARD_LEN", ("flrt_search_input", "max_reward_output_length"), int),  # first N target tokens of the self-jail continuation used as the distillation target
+        ("BLOOM_FLRT_LATIN_MASK", ("flrt_search_input", "latin_mask"),      _envbool),
+        ("BLOOM_FLRT_TRUNCATE_EOS", ("flrt_search_input", "truncate_at_eos"), _envbool),
+        ("BLOOM_FLRT_PTHRESHOLD", ("flrt_search_input", "p_threshold"),     float),   # per-token reward cap = log(p_threshold)
+        ("BLOOM_FLRT_TEACHER_SEES_ATTACK", ("flrt_search_input", "teacher_sees_attack"), _envbool),  # toggle ON (e.g. mp=0 whole-input) so the self-jail teacher reads the attack
+        ("BLOOM_FLRT_TEMP",      ("flrt_search_input", "temperature"),      float),
+        ("BLOOM_FLRT_W_FLUENCY", ("flrt_search_input", "w_fluency"),        float),   # 0 = off
+        ("BLOOM_FLRT_FLUENCY_ON", ("flrt_search_input", "fluency_on"),      str),     # "auditor" | "target"
+        ("BLOOM_FLRT_W_REPETITION", ("flrt_search_input", "w_repetition"),  float),   # 0 = off
         # ── search_output (BEAST-out) hooks: mirror of the input set, roles swapped ──
         # Target GENERATES response candidates; the auditor SCORES them by log P("Yes")
         # on the judge prompt.

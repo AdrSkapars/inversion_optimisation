@@ -17,6 +17,7 @@ from .core import *
 from . import core
 from .wilt import *
 from .search import *
+from .flrt import flrt_search_input_one, flrt_search_input_message
 
 
 
@@ -892,6 +893,20 @@ def run_rollout_batched_local(
     jail_vllm = need_jail_model and jail_engine == "vllm_topk"
     jail_hf   = need_jail_model and jail_engine == "hf_full"
 
+    # ── FLRT-in (flrt_search_input): needs the target + self-jail teacher as HF models for the
+    # full-vocab distillation loss. They are loaded INDEPENDENTLY below (a separate handle,
+    # `flrt_hf`) and do NOT change the target-reply path — the vLLM target still generates the
+    # transcript replies. FLRT runs the serial rollout path (it never sets input_search_on). When
+    # a vLLM target is also present (jail_hf False), reserve GPU room by halving its util, mirroring
+    # the jail_vllm co-location policy. ──
+    flrt_cfg_peek = cfg.get("flrt_search_input", {}) or {}
+    flrt_on = bool(flrt_cfg_peek.get("enabled", False))
+    if flrt_on and not jail_vllm and not jail_hf:
+        target_gpu_util = target_gpu_util / 2.0
+        print(f"  [flrt_search_input] enabled — halving target_gpu_memory_utilization to "
+              f"{target_gpu_util:.3f} to fit the HF distillation models alongside the vLLM target",
+              flush=True)
+
     # Corruption-model rewrite PoE. Standalone in v1 (mutually exclusive with jail and
     # all input/output/io search). Two engines:
     #   hf_full (default) — exact full-vocab PoE; target+corruption load as HF models in
@@ -936,6 +951,7 @@ def run_rollout_batched_local(
         _api_eval_conflicts = []
         if bool((cfg.get("search_input", {})  or {}).get("enabled", False)): _api_eval_conflicts.append("input_search")
         if bool((cfg.get("search_output", {}) or {}).get("enabled", False)): _api_eval_conflicts.append("output_search")
+        if flrt_on: _api_eval_conflicts.append("flrt_search_input")
         if _api_eval_conflicts:
             raise RuntimeError(
                 f"rollout.model={evaluator_model_id!r} is a hosted API model (non-'local/'). It can only "
@@ -1030,6 +1046,44 @@ def run_rollout_batched_local(
                   f"(b2={jail_runtime_cfg['b2']})", flush=True)
 
     search_cfg = cfg.search_input
+    flrt_cfg   = cfg.flrt_search_input
+
+    # ── FLRT-in self-jail teacher + target HF models (full-vocab distillation scorer) ──
+    # Independent of the jail rollout path: `flrt_hf` holds (mt=target victim, mc=self-jail
+    # teacher). For self-jail (teacher model == target) mc IS mt (one copy). When jailbroken_output
+    # is ALSO on in hf_full mode, reuse its already-loaded pair. `flrt_teacher_cfg` carries only the
+    # jail system prompt + prefill that condition the teacher (read by flrt._jail_teacher_prefix).
+    flrt_hf = None
+    flrt_teacher_cfg = None
+    if flrt_on:
+        _fj_model = (jail_cfg.get("model", "") or "self").strip()
+        _fj_model_id = target_model_id if _fj_model in ("", "self", "local/self") else _fj_model
+        if not _fj_model_id.startswith("local/"):
+            raise RuntimeError(
+                f"flrt_search_input teacher model must be 'self' or 'local/...', got {_fj_model_id!r}")
+        _fj_sys = prompts_yaml.get("jailbroken_output_system_prompt", "")
+        if not _fj_sys:
+            raise RuntimeError(
+                "flrt_search_input requires 'jailbroken_output_system_prompt' in prompts.yaml "
+                "(the self-jail teacher's system prompt)")
+        _fj_prefill = prompts_yaml.get("jailbroken_output_prefill", "") or ""
+        # Reuse an already-loaded HF pair ONLY when it is provably the right one: a self-jail
+        # FLRT teacher (teacher == target) can reuse a self-jail single-copy pair (mc IS mt, e.g.
+        # the BoN target_only load or a self-jail jailbroken_output). A distinct teacher — or a
+        # loaded pair whose mc is a distinct jail model — always loads its own, so we never
+        # silently score against the wrong teacher.
+        _cand_hf = jail_runtime_cfg.get("hf") if (jail_hf and jail_runtime_cfg is not None) else None
+        if (_fj_model_id == target_model_id and _cand_hf is not None
+                and _cand_hf["mc"] is _cand_hf["mt"]):
+            flrt_hf = _cand_hf
+            print("  [flrt_search_input] reusing the loaded self-jail HF pair as teacher/victim", flush=True)
+        else:
+            flrt_hf = _load_hf_poe_models(
+                target_model_id[len("local/"):], _fj_model_id[len("local/"):], target_gpu_id,
+                target_only=(_fj_model_id == target_model_id))  # self-jail → mc=mt (single copy)
+            print(f"  [flrt_search_input] loaded teacher/victim HF models on GPU "
+                  f"{target_gpu_id} (teacher={_fj_model_id})", flush=True)
+        flrt_teacher_cfg = {"system_prompt": _fj_sys, "prefill": _fj_prefill}
 
 
     # Output search (optional): regenerate target responses to maximise
@@ -1605,6 +1659,13 @@ def run_rollout_batched_local(
             trs_kickoff = fixed_kickoff.get("trs", "") or ""
             kickoff_strategy = fixed_kickoff.get("strategy", "") or ""
             print(f"  v{var_idx}: fixed kickoff reused x{_n_reps} reps (kickoff bank)", flush=True)
+        elif flrt_on:
+            # FLRT-in: mutation-buffer search scored by the full-vocab distillation loss.
+            kickoff_pool, trs_kickoff, kickoff_strategy = flrt_search_input_message(
+                lm_eval, flrt_hf, flrt_teacher_cfg,
+                _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
+                flrt_cfg, no_think_eval, no_think_target, eval_max_tokens, temperature,
+            )
         else:
             # Strip <thinking> blocks from past evaluator messages before passing
             # to search (cheap defense in depth even if parse_message already handled them).
@@ -1777,12 +1838,19 @@ def run_rollout_batched_local(
                 eval_msgs_for_search = _strip_thinking_from_msgs(eval_msgs_turn)
 
                 # Input search for next evaluator message (keep top 1 — conversation committed)
-                turn_pool, turn_trs, turn_strategy = input_search_evaluator_message(
-                    lm_eval, lm_target,
-                    eval_msgs_for_search, target_msgs,
-                    search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
-                    lm_jail=lm_jail, jail_runtime_cfg=jail_runtime_cfg,
-                )
+                if flrt_on:
+                    turn_pool, turn_trs, turn_strategy = flrt_search_input_message(
+                        lm_eval, flrt_hf, flrt_teacher_cfg,
+                        eval_msgs_for_search, target_msgs,
+                        flrt_cfg, no_think_eval, no_think_target, eval_max_tokens, temperature,
+                    )
+                else:
+                    turn_pool, turn_trs, turn_strategy = input_search_evaluator_message(
+                        lm_eval, lm_target,
+                        eval_msgs_for_search, target_msgs,
+                        search_cfg, no_think_eval, eval_max_tokens, temperature, target_batch_size,
+                        lm_jail=lm_jail, jail_runtime_cfg=jail_runtime_cfg,
+                    )
                 next_msg, next_score, next_baseline, next_suffix = turn_pool[0]
 
                 if "<END>" in next_msg:
