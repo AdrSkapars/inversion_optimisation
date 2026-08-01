@@ -1,3 +1,4 @@
+import math
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -121,7 +122,12 @@ def _score_output_candidates(
     is set, the suffix is truncated at the first EOS so candidates are scored as
     their natural-end form.
     """
-    target_str = core._NO_THINK_PREFIX + "Yes" if no_think_judge else "Yes"
+    # The judge runs under the AUDITOR (lm_eval), so its closed-<think> prefill must come
+    # from the auditor's own think-block setting — NOT core._NO_THINK_PREFIX, which is the
+    # TARGET's prefix (wrong model). think_prefix() returns "" for auditors with no auto
+    # think block (e.g. the gemma-4 family), so this is a no-op there and correct otherwise.
+    judge_no_think_prefix = core.think_prefix(lm_eval.spec_str)
+    target_str = judge_no_think_prefix + "Yes" if no_think_judge else "Yes"
 
     # Escape literal `{` / `}` in free-form user inputs so str.format() doesn't
     # try to interpret them as placeholders. Candidates can easily contain code
@@ -548,7 +554,7 @@ def output_search_target_response(
     batch_size: int = 4,
     lm_jail: Optional["LocalModel"] = None,
     jail_runtime_cfg: Optional[Dict] = None,
-) -> List[Tuple[str, float, str, str]]:
+) -> Tuple[List[Tuple[str, float, str, str]], List[float]]:
     """
     Search over the TARGET's response tokens, scored by lm_eval's log P("Yes")
     on a judge prompt asking whether the response exhibits the named behavior.
@@ -561,15 +567,18 @@ def output_search_target_response(
     already produced upstream in the rollout loop; it serves as the Phase 1
     baseline that `max_prefix_length` slices into.
 
-    Returns pool sorted best-first as
-      List[(response_text, score, baseline, suffix)]
-    where baseline + suffix == response_text. `baseline` is the slice of the
-    natural response that was carried over (the body_prefix); `suffix` is the
-    searched continuation.
+    Returns (pool, best_token_probs):
+      • pool sorted best-first as List[(response_text, score, baseline, suffix)]
+        where baseline + suffix == response_text. `baseline` is the slice of the
+        natural response that was carried over (the body_prefix); `suffix` is the
+        searched continuation.
+      • best_token_probs: on-policy per-token target probs (percent) for the SELECTED
+        candidate's suffix — captured here so the rollout can persist prob_stats without
+        a second pass (empty list if disabled / no suffix).
     """
     # ── Short-circuit if output search is disabled ─────────────────────────
     if not output_cfg.enabled:
-        return [(baseline_response, 0.0, baseline_response, "")]
+        return [(baseline_response, 0.0, baseline_response, "")], []
 
     eos_token_id = _resolve_eos_token_id(lm_target, output_cfg.truncate_at_eos)
 
@@ -619,14 +628,10 @@ def output_search_target_response(
         lm_jail is not None and jail_runtime_cfg is not None
         and jail_runtime_cfg.get("enabled", False)
     )
-    use_jail_scoring = (
-        lm_jail is not None and jail_runtime_cfg is not None
-        and jail_runtime_cfg.get("jail_out_loss", False)
-    )
 
-    # Build jail's prefix once if we need it (sampling and/or scoring).
+    # Build jail's prefix once, only for contrastive (jail-tilted) sampling.
     j_prefix: Optional[List[int]] = None
-    if lm_jail is not None and jail_runtime_cfg is not None and (use_contrastive_sampling or use_jail_scoring):
+    if use_contrastive_sampling:
         sys_prompt = jail_runtime_cfg.get("system_prompt", "")
         prefill    = jail_runtime_cfg.get("prefill", "") or ""
         j_msgs = [m for m in target_msgs if m.get("role") != "system"]
@@ -654,7 +659,7 @@ def output_search_target_response(
         top_p   = 1.0
         print(
             f"    output search [contrastive PoE: β={beta}, K={top_k}, n={n}, "
-            f"len={max_tok}, score={'jail' if use_jail_scoring else 'judge'}] "
+            f"len={max_tok}, score=judge] "
             f"(behavior={behavior_name!r}) ...", flush=True,
         )
         extensions = _contrastive_sample_extensions(
@@ -672,7 +677,7 @@ def output_search_target_response(
     else:
         print(
             f"    output search {dict(_trial_kwargs(output_cfg))} "
-            f"(behavior={behavior_name!r}, score={'jail' if use_jail_scoring else 'judge'}) ...",
+            f"(behavior={behavior_name!r}, score=judge) ...",
             flush=True,
         )
         global_pool_seqs, _ = _beast_single_trial_local(
@@ -684,26 +689,15 @@ def output_search_target_response(
             **_trial_kwargs(output_cfg),
         )
 
-    # ── Scoring ───────────────────────────────────────────────────────────
-    if use_jail_scoring:
-        # Score each candidate as log p_jail(ext | jail_prefix) via teacher forcing.
-        items: List[Tuple[List[int], int, int]] = []
-        for seq in global_pool_seqs:
-            ext = seq[prefix_length:]
-            if not ext:
-                items.append(([], 0, 0))
-            else:
-                items.append((j_prefix + ext, len(j_prefix), len(ext)))
-        raw = lm_jail.worker.compute_target_logprobs(items)
-        global_pool_scores = [s if s is not None else -float("inf") for s in raw]
-    else:
-        global_pool_scores = _scorer(global_pool_seqs, prefix_length)
+    # ── Scoring (judge log P("Yes")) ──────────────────────────────────────
+    global_pool_scores = _scorer(global_pool_seqs, prefix_length)
 
     # ── Decode pool into (response_text, score, baseline, suffix), best first ──
     order = sorted(range(len(global_pool_scores)),
                    key=lambda i: global_pool_scores[i], reverse=True)
     pool: List[Tuple[str, float, str, str]] = []
     seen: set = set()
+    winner_suffix_ids: Optional[List[int]] = None  # tokens of the selected (best) candidate's suffix
     for i in order:
         seq         = global_pool_seqs[i]
         score       = global_pool_scores[i]
@@ -714,11 +708,25 @@ def output_search_target_response(
         if full_text and full_text not in seen:
             seen.add(full_text)
             pool.append((full_text, score, baseline_prefix, suffix_text))
+            if winner_suffix_ids is None:  # first (highest-scoring) unique = the one rollout uses
+                winner_suffix_ids = suffix_ids
 
     if not pool:
         # All candidates degenerated; fall back to the natural target response.
         pool = [(baseline_response, 0.0, baseline_response, "")]
 
-    return pool
+    # On-policy plausibility for the SELECTED output: score its suffix tokens under the
+    # TARGET in ONE forward (not a wasteful end-of-run recompute), as percent per-token
+    # probs matching BoN/input_search (_prob_summary format). Covers the searched suffix;
+    # for the default max_prefix=0 (BoN) the suffix IS the whole response.
+    best_token_probs: List[float] = []
+    if winner_suffix_ids:
+        _lps = lm_target.worker.compute_target_logprobs(
+            [(prefix_tokens + list(winner_suffix_ids), prefix_length, len(winner_suffix_ids))]
+        )[0]
+        if _lps:
+            best_token_probs = [math.exp(l) * 100.0 for l in _lps]
+
+    return pool, best_token_probs
 
 __all__ = ['build_latin_token_ids', '_score_beast_candidates', '_score_output_candidates', '_select_beam_indices', '_TRIAL_KWARGS_KEYS', '_trial_kwargs', '_get_or_build_latin_mask', '_build_sampling_prefix', '_beast_single_trial_local', '_parse_phase1', '_input_search_beast_one', 'input_search_evaluator_message', 'output_search_target_response']
