@@ -1119,8 +1119,12 @@ def run_rollout_batched_local(
     # search) can roll variations out in LOCKSTEP like corruption instead of one-at-a-
     # time. Defined here (after input/output_search_on are known); consumed below to
     # gate the serial fallback.
+    # NOTE: FLRT-in forces the hf_full self-jail BoN path for its target replies (which sets
+    # jail_hf + jail_use_rollout), but its search runs in the SERIAL rollout path (where the
+    # flrt fork lives). So exclude flrt_on here, else the batched-jail path would produce plain
+    # BoN replies and never run the FLRT search.
     jail_batched = (jail_hf and jail_use_rollout
-                    and not input_search_on and not output_search_on)
+                    and not input_search_on and not output_search_on and not flrt_on)
     # Batched INPUT-SEARCH eligibility: pure input_search (no output_search) rolls variations
     # out in LOCKSTEP, running each turn's Phase-1 messages, self-jail TRS rewards, and target
     # replies in cross-scenario batches around the (per-scenario) BEAST. The serial fallback
