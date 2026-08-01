@@ -401,12 +401,19 @@ def flrt_search_input_one(
             bm_ids = lm_eval.tokenizer.encode(baseline_msg, add_special_tokens=False)
             baseline_prefix = lm_eval.tokenizer.decode(bm_ids[:mpl], skip_special_tokens=True)
 
-    # ── self-jail teacher continuation + p_jail (task-only by default; +attack if toggled) ──
+    # ── self-jail teacher continuation + p_jail ──
+    # The teacher needs a user turn to respond to. In BLOOM the "task" the teacher conditions on is
+    # the Phase-1 BASELINE message (the base intent), while the victim additionally reads the
+    # searched suffix — so teacher_sees_attack=False (paper default) still gives the teacher the
+    # baseline message as its task (NOT the searched suffix). At the kickoff there is no prior user
+    # turn, so this base message is also what makes the teacher prompt well-formed.
+    # teacher_sees_attack=True (manual, e.g. max_prefix_length=0 whole-input generation): the teacher
+    # is conditioned on the same generated input the victim reads — per-candidate teacher conditioning
+    # is a follow-up; for now it likewise uses the baseline message as a representative full attack.
     reward_len = search_cfg.max_reward_output_length
     reward_len = reward_len if (reward_len and reward_len > 0) else 100
-    attack_for_teacher = baseline_msg if search_cfg.teacher_sees_attack else None
     jail_prefix = _jail_teacher_prefix(hf, jail_runtime_cfg, target_msgs, no_think_target,
-                                       attack_for_teacher)
+                                       attack_msg=baseline_msg)
     continuation_ids, p_jail = _teacher_continuation_and_pjail(
         hf, jail_prefix, reward_len, search_cfg.temperature)
     if not continuation_ids or p_jail is None:
