@@ -1672,7 +1672,12 @@ def run_rollout_batched_local(
                 # the target's natural reply is generated via PoE-weighted
                 # sampling against the jailbroken model; otherwise the standard
                 # vLLM generation path is used.
-                if (jail_runtime_cfg is not None
+                # OPT: when output search regenerates from scratch (max_prefix_length == 0),
+                # the natural reply is sliced to "" and discarded — skip generating it entirely.
+                skip_natural_reply = (output_search_on and output_cfg.max_prefix_length == 0)
+                if skip_natural_reply:
+                    raw_target = ""
+                elif (jail_runtime_cfg is not None
                         and jail_runtime_cfg.get("enabled", False)):
                     if jail_runtime_cfg.get("engine") == "hf_full":
                         _jr = _jail_generate_hf(
@@ -1691,9 +1696,13 @@ def run_rollout_batched_local(
                     raw_target = batch_generate_local(
                         lm_target, [target_msgs], target_max_tokens, temperature, no_think=no_think_target
                     )[0]
-                parsed_target = parse_message(_make_local_response(raw_target))
-                target_resp   = parsed_target["content"] or raw_target
-                target_reason = parsed_target["reasoning"]
+                if skip_natural_reply:
+                    target_resp   = ""
+                    target_reason = ""
+                else:
+                    parsed_target = parse_message(_make_local_response(raw_target))
+                    target_resp   = parsed_target["content"] or raw_target
+                    target_reason = parsed_target["reasoning"]
 
                 # ── Output search (optional) ──────────────────────────────
                 # Replace the natural target response with one that maximises
