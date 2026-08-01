@@ -98,6 +98,7 @@ _USES_THINK_BLOCK = {
     "duoneural/phi-4-mini-abliterated": False,
     "google/gemma-3-4b-it": False,
     "google/gemma-4-e4b-it": False,
+    "redhatai/gemma-4-26b-a4b-it-fp8-dynamic": False,   # default AUDITOR (gemma-4 family = no auto think block); registered so the output_search judge can resolve its OWN think-prefix
     # abliterated corruptor variants (same arch/vocab as their originals)
     "huihui-ai/huihui-qwen3.5-4b-abliterated": True,
     "huihui-ai/phi-4-mini-instruct-abliterated": False,
