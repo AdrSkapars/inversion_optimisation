@@ -347,13 +347,64 @@ def _flrt_single_trial(
     return pool_seqs, pool_scores
 
 
+# ── Teacher continuation preparation (single + cross-scenario batch) ─────────
+
+def flrt_prepare_continuation(
+    hf: Dict, teacher_cfg: Dict, target_msgs: List[Dict], baseline_msg: str,
+    no_think_target: bool, reward_len: int, temperature: float,
+) -> Tuple[List[int], Optional["torch.Tensor"], str]:
+    """Sample the self-jail teacher's continuation for ONE scenario and read its full per-position
+    p_jail. Returns (continuation_ids, p_jail [T,V], continuation_text); ([], None, "") if empty."""
+    reward_len = reward_len if (reward_len and reward_len > 0) else 100
+    jail_prefix = _jail_teacher_prefix(hf, teacher_cfg, target_msgs, no_think_target, task_msg=baseline_msg)
+    cont_ids, p_jail = _teacher_continuation_and_pjail(hf, jail_prefix, reward_len, temperature)
+    if not cont_ids or p_jail is None:
+        return [], None, ""
+    return cont_ids, p_jail, hf["tok"].decode(cont_ids, skip_special_tokens=True)
+
+
+@torch.no_grad()
+def flrt_prepare_continuation_batch(
+    hf: Dict, teacher_cfg: Dict, target_msgs_list: List[List[Dict]], baseline_msgs: List[str],
+    no_think_target: bool, reward_len: int, temperature: float,
+) -> List[Tuple[List[int], Optional["torch.Tensor"], str]]:
+    """Cross-scenario batch of flrt_prepare_continuation. The expensive autoregressive teacher
+    GENERATION is batched across scenarios in one _hf_generate call; the (cheap, single-forward)
+    p_jail teacher-forcing is then read per scenario. Returns a list aligned with the inputs.
+
+    This is the cross-scenario-batchable step (teacher is task-only, so each continuation depends
+    only on its scenario's baseline, not on any per-candidate attack)."""
+    if not target_msgs_list:
+        return []
+    mc, device, pad_id, eos_id = hf["mc"], hf["device"], hf["pad_id"], hf["eos_id"]
+    reward_len = reward_len if (reward_len and reward_len > 0) else 100
+    jail_prefixes = [
+        _jail_teacher_prefix(hf, teacher_cfg, tm, no_think_target, task_msg=bm)
+        for tm, bm in zip(target_msgs_list, baseline_msgs)
+    ]
+    gens = _hf_generate(mc, jail_prefixes, max_new=reward_len, temperature=temperature,
+                        pad_id=pad_id, eos_id=eos_id, device=device)   # BATCHED generation
+    out: List[Tuple[List[int], Optional["torch.Tensor"], str]] = []
+    for jp, gen in zip(jail_prefixes, gens):
+        cont = [t for t in gen if t != eos_id]
+        if not cont:
+            out.append(([], None, ""))
+            continue
+        T = len(cont)
+        full = torch.tensor([jp + cont], dtype=torch.long, device=device)
+        logits = mc(input_ids=full, use_cache=False, logits_to_keep=T + 1).logits[0, :T, :].float()
+        out.append((cont, torch.softmax(logits, dim=-1), hf["tok"].decode(cont, skip_special_tokens=True)))
+    return out
+
+
 # ── Public entry (mirrors search._input_search_beast_one) ────────────────────
 
 def flrt_search_input_one(
-    lm_eval, hf: Dict, jail_runtime_cfg: Dict,
+    lm_eval, hf: Dict,
     eval_msgs: List[Dict], target_msgs: List[Dict],
     content: str, baseline_msg: str, strategy: str,
     search_cfg, no_think_eval: bool, no_think_target: bool,
+    continuation: Tuple[List[int], "torch.Tensor", str],
 ) -> Tuple[List[Tuple[str, float, str, str]], str, str]:
     """Per-scenario FLRT input search. Given the Phase-1 auditor message (`content` = raw tagged
     output, `baseline_msg` = clean body), generate the self-jail teacher continuation, then run
@@ -394,21 +445,13 @@ def flrt_search_input_one(
             bm_ids = lm_eval.tokenizer.encode(baseline_msg, add_special_tokens=False)
             baseline_prefix = lm_eval.tokenizer.decode(bm_ids[:mpl], skip_special_tokens=True)
 
-    # ── self-jail teacher continuation + p_jail ──
-    # The teacher is ALWAYS task-only: it conditions on the Phase-1 BASELINE message (the base
-    # intent), never the searched suffix. This is paper-faithful, gives the teacher a well-formed
-    # user turn (at the kickoff there is no prior user turn), and — crucially — makes the
-    # continuation depend only on the scenario (not the per-candidate attack), so it is computed
-    # ONCE per scenario and can be batched across scenarios.
-    reward_len = search_cfg.max_reward_output_length
-    reward_len = reward_len if (reward_len and reward_len > 0) else 100
-    jail_prefix = _jail_teacher_prefix(hf, jail_runtime_cfg, target_msgs, no_think_target,
-                                       task_msg=baseline_msg)
-    continuation_ids, p_jail = _teacher_continuation_and_pjail(
-        hf, jail_prefix, reward_len, search_cfg.temperature)
+    # ── self-jail teacher continuation + p_jail (precomputed by the caller) ──
+    # The teacher is ALWAYS task-only (conditions on the Phase-1 baseline message, never the
+    # searched suffix), so the continuation depends only on the scenario and is prepared ONCE —
+    # by flrt_prepare_continuation (serial) or flrt_prepare_continuation_batch (cross-scenario).
+    continuation_ids, p_jail, continuation_text = continuation
     if not continuation_ids or p_jail is None:
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
-    continuation_text = hf["tok"].decode(continuation_ids, skip_special_tokens=True)
 
     # ── auditor sampling prefix + Latin mask (reuse the shared helpers) ──
     _, prefix_tokens = _build_sampling_prefix(lm_eval, eval_msgs, no_think_eval, baseline_prefix)
@@ -484,9 +527,13 @@ def flrt_search_input_message(
                              no_think=no_think_eval)[0])
     if not baseline_msg or not search_cfg.enabled:
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
+    continuation = flrt_prepare_continuation(
+        hf, teacher_cfg, target_msgs, baseline_msg, no_think_target,
+        search_cfg.max_reward_output_length, sample_temperature)
     return flrt_search_input_one(
-        lm_eval, hf, teacher_cfg, eval_msgs, target_msgs,
-        content, baseline_msg, strategy, search_cfg, no_think_eval, no_think_target)
+        lm_eval, hf, eval_msgs, target_msgs,
+        content, baseline_msg, strategy, search_cfg, no_think_eval, no_think_target, continuation)
 
 
-__all__ = ["flrt_search_input_one", "flrt_search_input_message"]
+__all__ = ["flrt_search_input_one", "flrt_search_input_message",
+           "flrt_prepare_continuation", "flrt_prepare_continuation_batch"]

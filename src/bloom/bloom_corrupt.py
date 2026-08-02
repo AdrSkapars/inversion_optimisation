@@ -172,15 +172,11 @@ cfg = DotDict({
         "latin_mask": True,                      # restrict mutation tokens to Latin/ASCII (== search_input default).
         "truncate_at_eos": False,                # allow a candidate to emit EOS/terminator and truncate (== search_input).
         "max_reward_output_length": 32,          # PAPER n_match: length K of the self-jail continuation the distillation loss L_D is averaged over (one teacher-forced forward gives all K positions). NOT single-token. 0 = full continuation. (Same-function as search_input's reward length, hence the shared name.)
-        # ── Distillation loss (the ONLY default-on objective) ──
-        "p_threshold": 0.6,                      # PAPER: per-token reward CAP — stop rewarding a continuation token once the target already matches the teacher well (per-token contribution capped at log(p_threshold)). NOT a numerical -C floor (that stays as an internal -inf guard only).
-        # (teacher is ALWAYS task-only: it conditions on the Phase-1 baseline message, never the
-        #  searched attack — paper-faithful, and lets the continuation be computed once/scenario and
-        #  batched across scenarios. The teacher-sees-attack variant is intentionally not offered.)
-        # ── Auxiliary losses (PAPER has them; DEFAULT OFF; combined by PLAIN weighted SUM — no z-norm/min/delta) ──
-        "w_fluency": 0.0,                        # fluency-loss weight (perplexity of the attack tokens). 0 = off.
-        "fluency_on": "auditor",                 # which model scores fluency perplexity: "auditor" or "target" (whichever's loaded/cheap).
-        "w_repetition": 0.0,                     # repetition-penalty weight on the attack tokens. 0 = off.
+        # ── Losses: distillation L_D is the only default-on objective; L_XE (fluency) + L_Rep default off, combined by plain weighted sum (no z-norm) ──
+        "p_threshold": 0.6,                      # PAPER: L_D per-token reward cap = log(p_threshold) — stop rewarding a continuation token once the target already matches the teacher.
+        "w_fluency": 0.0,                        # L_XE weight (perplexity of the attack tokens). 0 = off.
+        "fluency_on": "auditor",                 # which model scores fluency perplexity: "auditor" or "target".
+        "w_repetition": 0.0,                     # L_Rep weight (repetition penalty on the attack tokens). 0 = off.
         "repetition_exponent": 1.5,              # PAPER: penalty = sum((count-1)^exp) / suffix_len.
     },
     "search_output": {
