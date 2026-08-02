@@ -168,13 +168,15 @@ cfg = DotDict({
         "min_tokens": 5,                         # delete disabled below this suffix length.
         "max_tokens": 40,                        # insert/append disabled above this suffix length.
         # ── max_prefix_length / masking / eos (BEAST names, same meaning as search_input) ──
-        "max_prefix_length": None,               # how much of Phase-1's <message> body is preloaded before the mutation region. None = keep full body (suffix mutation, classic); 0 = keep nothing (whole body generated/mutated — pair with teacher_sees_attack=True); N>0 = first N tokens; N<0 = drop last |N|.
+        "max_prefix_length": None,               # how much of Phase-1's <message> body is preloaded before the mutation region. None = keep full body (suffix mutation, classic); 0 = keep nothing (whole body generated/mutated); N>0 = first N tokens; N<0 = drop last |N|.
         "latin_mask": True,                      # restrict mutation tokens to Latin/ASCII (== search_input default).
         "truncate_at_eos": False,                # allow a candidate to emit EOS/terminator and truncate (== search_input).
         "max_reward_output_length": 32,          # PAPER n_match: length K of the self-jail continuation the distillation loss L_D is averaged over (one teacher-forced forward gives all K positions). NOT single-token. 0 = full continuation. (Same-function as search_input's reward length, hence the shared name.)
         # ── Distillation loss (the ONLY default-on objective) ──
         "p_threshold": 0.6,                      # PAPER: per-token reward CAP — stop rewarding a continuation token once the target already matches the teacher well (per-token contribution capped at log(p_threshold)). NOT a numerical -C floor (that stays as an internal -inf guard only).
-        "teacher_sees_attack": False,            # PAPER default OFF: the self-jail teacher is conditioned on task/context ONLY, not the attack message. Toggle ON manually (e.g. with max_prefix_length=0, whole-input generation) so the teacher reads the same input the victim does. No auto-logic.
+        # (teacher is ALWAYS task-only: it conditions on the Phase-1 baseline message, never the
+        #  searched attack — paper-faithful, and lets the continuation be computed once/scenario and
+        #  batched across scenarios. The teacher-sees-attack variant is intentionally not offered.)
         # ── Auxiliary losses (PAPER has them; DEFAULT OFF; combined by PLAIN weighted SUM — no z-norm/min/delta) ──
         "w_fluency": 0.0,                        # fluency-loss weight (perplexity of the attack tokens). 0 = off.
         "fluency_on": "auditor",                 # which model scores fluency perplexity: "auditor" or "target" (whichever's loaded/cheap).
@@ -288,7 +290,7 @@ if __name__ == "__main__":
         ("BLOOM_TARGET_BATCH_SIZE", ("target_batch_size",),                    int),  # target-model batch for input-search candidate scoring (raise to score more candidates per pass)
         # ── flrt_search_input (FLRT-in) hooks: mutation-buffer black-box search, full-vocab distillation loss ──
         ("BLOOM_FLRT_SEARCH",    ("flrt_search_input", "enabled"),            _envbool),
-        ("BLOOM_FLRT_MAXPREFIX", ("flrt_search_input", "max_prefix_length"), _int_or_none),  # None=keep whole body (suffix mutation); 0=whole-input (pair with teacher_sees_attack=1)
+        ("BLOOM_FLRT_MAXPREFIX", ("flrt_search_input", "max_prefix_length"), _int_or_none),  # None=keep whole body (suffix mutation); 0=whole-input regeneration
         ("BLOOM_FLRT_ITERS",     ("flrt_search_input", "max_num_iterations"), int),   # iterations/trial (compute dial)
         ("BLOOM_FLRT_NTRIALS",   ("flrt_search_input", "n_trials"),          int),    # independent restarts merged into the pool
         ("BLOOM_FLRT_BUFFER",    ("flrt_search_input", "buffer_size"),       int),    # active buffer (best is mutated each iter)
@@ -306,7 +308,6 @@ if __name__ == "__main__":
         ("BLOOM_FLRT_LATIN_MASK", ("flrt_search_input", "latin_mask"),      _envbool),
         ("BLOOM_FLRT_TRUNCATE_EOS", ("flrt_search_input", "truncate_at_eos"), _envbool),
         ("BLOOM_FLRT_PTHRESHOLD", ("flrt_search_input", "p_threshold"),     float),   # per-token reward cap = log(p_threshold)
-        ("BLOOM_FLRT_TEACHER_SEES_ATTACK", ("flrt_search_input", "teacher_sees_attack"), _envbool),  # toggle ON (e.g. mp=0 whole-input) so the self-jail teacher reads the attack
         ("BLOOM_FLRT_TEMP",      ("flrt_search_input", "temperature"),      float),
         ("BLOOM_FLRT_W_FLUENCY", ("flrt_search_input", "w_fluency"),        float),   # 0 = off
         ("BLOOM_FLRT_FLUENCY_ON", ("flrt_search_input", "fluency_on"),      str),     # "auditor" | "target"

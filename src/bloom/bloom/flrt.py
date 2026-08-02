@@ -130,19 +130,18 @@ def _pick_mutation(cfg, suffix_len: int) -> Optional[str]:
 # ── Self-jail teacher: prefix, continuation, and p_jail ──────────────────────
 
 def _jail_teacher_prefix(hf: Dict, jail_runtime_cfg: Dict, target_msgs: List[Dict],
-                         no_think_target: bool, attack_msg: Optional[str]) -> List[int]:
+                         no_think_target: bool, task_msg: str) -> List[int]:
     """Build the self-jail teacher's prompt token ids (in the jail model's tokenizer):
-    jail system prompt + conversation-so-far + (optional attack turn) + generation prompt +
-    no-think closer + prefill. Mirrors output_search_target_response's j_prompt construction.
+    jail system prompt + conversation-so-far + task user-turn + generation prompt + no-think
+    closer + prefill. Mirrors output_search_target_response's j_prompt construction.
 
-    `attack_msg` is appended as a user turn ONLY when teacher_sees_attack is on (caller passes
-    None otherwise → paper-default task/context-only teacher)."""
+    `task_msg` is the teacher's user turn — the Phase-1 baseline message (the base intent), NOT
+    the searched attack. The teacher is always task-only (see flrt_search_input_one)."""
     tok_c = hf["tok_c"]
     sys_prompt = jail_runtime_cfg.get("system_prompt", "") or ""
     prefill = jail_runtime_cfg.get("prefill", "") or ""
     j_msgs = [m for m in target_msgs if m.get("role") != "system"]
-    if attack_msg is not None:
-        j_msgs = j_msgs + [{"role": "user", "content": attack_msg}]
+    j_msgs = j_msgs + [{"role": "user", "content": task_msg}]
     if sys_prompt:
         j_msgs = [{"role": "system", "content": sys_prompt}] + j_msgs
     j_prompt = tok_c.apply_chat_template(j_msgs, tokenize=False, add_generation_prompt=True)
@@ -396,18 +395,15 @@ def flrt_search_input_one(
             baseline_prefix = lm_eval.tokenizer.decode(bm_ids[:mpl], skip_special_tokens=True)
 
     # ── self-jail teacher continuation + p_jail ──
-    # The teacher needs a user turn to respond to. In BLOOM the "task" the teacher conditions on is
-    # the Phase-1 BASELINE message (the base intent), while the victim additionally reads the
-    # searched suffix — so teacher_sees_attack=False (paper default) still gives the teacher the
-    # baseline message as its task (NOT the searched suffix). At the kickoff there is no prior user
-    # turn, so this base message is also what makes the teacher prompt well-formed.
-    # teacher_sees_attack=True (manual, e.g. max_prefix_length=0 whole-input generation): the teacher
-    # is conditioned on the same generated input the victim reads — per-candidate teacher conditioning
-    # is a follow-up; for now it likewise uses the baseline message as a representative full attack.
+    # The teacher is ALWAYS task-only: it conditions on the Phase-1 BASELINE message (the base
+    # intent), never the searched suffix. This is paper-faithful, gives the teacher a well-formed
+    # user turn (at the kickoff there is no prior user turn), and — crucially — makes the
+    # continuation depend only on the scenario (not the per-candidate attack), so it is computed
+    # ONCE per scenario and can be batched across scenarios.
     reward_len = search_cfg.max_reward_output_length
     reward_len = reward_len if (reward_len and reward_len > 0) else 100
     jail_prefix = _jail_teacher_prefix(hf, jail_runtime_cfg, target_msgs, no_think_target,
-                                       attack_msg=baseline_msg)
+                                       task_msg=baseline_msg)
     continuation_ids, p_jail = _teacher_continuation_and_pjail(
         hf, jail_prefix, reward_len, search_cfg.temperature)
     if not continuation_ids or p_jail is None:
@@ -424,8 +420,7 @@ def flrt_search_input_one(
 
     print(f"    flrt input search buffer={search_cfg.buffer_size} k1={search_cfg.k1} "
           f"iters={search_cfg.max_num_iterations} n_trials={search_cfg.n_trials} "
-          f"p_append={search_cfg.p_append} teacher_sees_attack={search_cfg.teacher_sees_attack} "
-          f"(cont_len={len(continuation_ids)}) ...", flush=True)
+          f"p_append={search_cfg.p_append} (cont_len={len(continuation_ids)}) ...", flush=True)
 
     prefix_length = len(prefix_tokens)
     global_pool_seqs: List[List[int]] = []
