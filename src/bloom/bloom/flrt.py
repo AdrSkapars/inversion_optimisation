@@ -273,19 +273,13 @@ def _flrt_single_trial(
     prefix_length = len(prefix_tokens)
     tok_e = lm_eval.tokenizer
 
-    # ── init suffix ──
-    if cfg.init_suffix:
-        suffix = tok_e.encode(cfg.init_suffix, add_special_tokens=False)
-    elif cfg.sample_init_suffix:
-        ext = _vllm_sample_extensions(
-            lm_eval, [list(prefix_tokens)], n=1, max_tokens=int(cfg.start_tokens),
-            temperature=cfg.temperature, top_p=1.0,
-            allowed_token_ids=allowed_token_ids, ignore_eos=True,
-        )
-        suffix = list(ext[0][0]) if ext and ext[0] and ext[0][0] else []
-    else:
-        allowed = allowed_token_ids or list(range(tok_e.vocab_size))
-        suffix = [random.choice(allowed) for _ in range(int(cfg.start_tokens))]
+    # ── init suffix: always sampled autoregressively from the auditor ──
+    ext = _vllm_sample_extensions(
+        lm_eval, [list(prefix_tokens)], n=1, max_tokens=int(cfg.start_tokens),
+        temperature=cfg.temperature, top_p=1.0,
+        allowed_token_ids=allowed_token_ids, ignore_eos=True,
+    )
+    suffix = list(ext[0][0]) if ext and ext[0] and ext[0][0] else []
 
     current = list(prefix_tokens) + suffix
 

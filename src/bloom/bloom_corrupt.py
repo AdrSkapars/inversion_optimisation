@@ -148,8 +148,7 @@ cfg = DotDict({
         "truncate_at_eos": False,               # TUNED: False gives higher elicitation on BOTH seeds (2.80/4.00 vs baseline 1.87/2.87), elapsed-neutral. Pairs with latin_mask=True (the mask blocks the terminator chars so the model keeps writing). If True: also allows the model to emit `<`, `/`, `>` (so it can naturally produce </message> to terminate the body) and EOS. _extract_message_tags then truncates the candidate at the first </message>. If False: latin mask blocks those characters so the model keeps writing message content until max_tokens, and the entire suffix is the message body (no truncation needed).
     },
     "flrt_search_input": {
-        "enabled": False,                        # ON: FLRT-style input-side search over the evaluator's <message> body. Black-box mutation-buffer search (append/insert/delete/swap) scored by a FULL-VOCAB distillation loss: pull the target's per-token distribution TOWARD the self-jail teacher's over a shared continuation (FLRT L_D; Thompson & Sklar 2024). The reward continuation is generated self-jail from the target (jail prompt + prefill), exactly like search_input's TRS. Defaults follow the ORIGINAL FLRT paper except our agreed adaptations (self-jail teacher instead of a LoRA toxic model; HF engine; teacher task-only by default).
-        "engine": "hf_full",                     # FIXED: FLRT needs exact full-vocab distributions (L_D is a whole-vocab expectation), so HF only — vLLM top-K is insufficient. Mirrors jailbroken_output's hf_full path.
+        "enabled": False,                        # ON: FLRT-style input-side search over the evaluator's <message> body. Black-box mutation-buffer search (append/insert/delete/swap) scored by a FULL-VOCAB distillation loss: pull the target's per-token distribution TOWARD the self-jail teacher's over a shared continuation (FLRT L_D; Thompson & Sklar 2024). The reward continuation is generated self-jail from the target (jail prompt + prefill), exactly like search_input's TRS. Engine is fixed HF (full-vocab distributions; vLLM top-K is insufficient). Defaults follow the ORIGINAL FLRT paper except our agreed adaptations (self-jail teacher instead of a LoRA toxic model; teacher task-only by default).
         # ── Search compute (BEAST param names reused where same-function) ──
         "buffer_size": 8,                        # PAPER default: active search buffer; the single best in the buffer is mutated each iteration, top-buffer_size retained.
         "k1": 32,                                # PAPER: mutated candidates generated + scored per iteration.
@@ -164,17 +163,15 @@ cfg = DotDict({
         "p_insert": 0.2,                         # insert a sampled token at a random INTERIOR position.
         "p_delete": 0.2,                         # delete a random token.
         "p_swap": 0.2,                           # swap a random token for a sampled replacement.
-        # ── Suffix bounds / init ──
+        # ── Suffix bounds / init (init suffix is always sampled autoregressively from the auditor) ──
         "start_tokens": 10,                      # initial suffix length (PAPER-ish).
         "min_tokens": 5,                         # delete disabled below this suffix length.
         "max_tokens": 40,                        # insert/append disabled above this suffix length.
-        "sample_init_suffix": True,              # init the suffix by sampling autoregressively from the auditor (vs random tokens).
-        "init_suffix": None,                     # explicit init-suffix string; overrides start_tokens/sampling when set.
         # ── max_prefix_length / masking / eos (BEAST names, same meaning as search_input) ──
         "max_prefix_length": None,               # how much of Phase-1's <message> body is preloaded before the mutation region. None = keep full body (suffix mutation, classic); 0 = keep nothing (whole body generated/mutated — pair with teacher_sees_attack=True); N>0 = first N tokens; N<0 = drop last |N|.
         "latin_mask": True,                      # restrict mutation tokens to Latin/ASCII (== search_input default).
         "truncate_at_eos": False,                # allow a candidate to emit EOS/terminator and truncate (== search_input).
-        "max_reward_output_length": 150,         # first N target-model tokens of the self-jail continuation used as the distillation target (0 = full). == search_input reward length.
+        "max_reward_output_length": 32,          # PAPER n_match: length K of the self-jail continuation the distillation loss L_D is averaged over (one teacher-forced forward gives all K positions). NOT single-token. 0 = full continuation. (Same-function as search_input's reward length, hence the shared name.)
         # ── Distillation loss (the ONLY default-on objective) ──
         "p_threshold": 0.6,                      # PAPER: per-token reward CAP — stop rewarding a continuation token once the target already matches the teacher well (per-token contribution capped at log(p_threshold)). NOT a numerical -C floor (that stays as an internal -inf guard only).
         "teacher_sees_attack": False,            # PAPER default OFF: the self-jail teacher is conditioned on task/context ONLY, not the attack message. Toggle ON manually (e.g. with max_prefix_length=0, whole-input generation) so the teacher reads the same input the victim does. No auto-logic.
