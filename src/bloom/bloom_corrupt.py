@@ -153,18 +153,18 @@ cfg = DotDict({
         "buffer_size": 8,                        # PAPER default: active search buffer; the single best in the buffer is mutated each iteration, top-buffer_size retained.
         "k1": 32,                                # PAPER: mutated candidates generated + scored per iteration.
         "k2": 16,                                # PAPER: candidate replacement tokens sampled per position (swap/insert) from the auditor's per-position distribution.
-        "max_num_iterations": 40,                # iterations per trial (the compute dial; PAPER bounds by wall-clock/runtime_limit, we bound by iters). Override BLOOM_FLRT_ITERS.
-        "n_trials": 1,                           # PAPER: independent restarts (fresh init), merged into one pool.
-        "max_pool_size": 50,                     # max candidates accumulated across the search (== search_input).
-        "eval_beam_chunk_size": None,            # HF batch chunk for scoring the k1 candidates/iter; None = one batched forward.
-        "temperature": 1.0,                      # auditor mutation-proposal sampling temperature.
-        # ── Mutation mix (PAPER = delete/insert/swap 1/3 each; here append is HIGHEST, rest spread evenly, per user) ──
-        "p_append": 0.4,                         # append a sampled token at the END (BEAST-style end-insert) — highest-probability op.
-        "p_insert": 0.2,                         # insert a sampled token at a random INTERIOR position.
-        "p_delete": 0.2,                         # delete a random token.
-        "p_swap": 0.2,                           # swap a random token for a sampled replacement.
+        "max_num_iterations": 100,               # iterations per trial (the compute dial). Sourced from the PAPER demo schedule Settings(100, ...); the paper/ExperimentFLRT.py actually bound by wall-clock/budget (max_iters is a safety cap), which we replace with an iteration bound. Override BLOOM_FLRT_ITERS (tune down for cost).
+        "n_trials": 5,                           # ExperimentFLRT.py: independent restarts (fresh init), merged into one pool.
+        "max_pool_size": 50,                     # ExperimentFLRT.py pool_size=50 — max candidates accumulated across the search.
+        "eval_beam_chunk_size": None,            # HF batch chunk for scoring the k1 candidates/iter (BLOOM infra knob); None = one batched forward.
+        "temperature": 1.0,                      # ExperimentFLRT.py: auditor mutation-proposal sampling temperature.
+        # ── Mutation mix (ExperimentFLRT.py: append highest, rest even → 1/2, 1/6, 1/6, 1/6) ──
+        "p_append": 1/2,                         # append a sampled token at the END (BEAST-style end-insert) — highest-probability op.
+        "p_insert": 1/6,                         # insert a sampled token at a random INTERIOR position.
+        "p_delete": 1/6,                         # delete a random token.
+        "p_swap": 1/6,                           # swap a random token for a sampled replacement.
         # ── Suffix bounds / init (init suffix is always sampled autoregressively from the auditor) ──
-        "start_tokens": 10,                      # initial suffix length (PAPER-ish).
+        "start_tokens": 10,                      # ExperimentFLRT.py: initial suffix length.
         "min_tokens": 5,                         # delete disabled below this suffix length.
         "max_tokens": 40,                        # insert/append disabled above this suffix length.
         # ── max_prefix_length / masking / eos (BEAST names, same meaning as search_input) ──
