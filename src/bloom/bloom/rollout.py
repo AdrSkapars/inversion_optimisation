@@ -1865,20 +1865,23 @@ def run_rollout_batched_local(
         # n_reps: how many independent resamples of this scenario to roll this round (option B
         # gives unfinished scenarios extra reps). Each rep reuses the same frozen kickoff.
         _n_reps = max(1, int(variation.get("n_reps", 1))) if isinstance(variation, dict) else 1
-        if use_frozen_kickoff:
+        if flrt_on:
+            # FLRT-in: mutation-buffer search scored by the full-vocab distillation loss. A banked
+            # kickoff is passed as the search BASELINE (reuse the Phase-1 message, but STILL search
+            # over it, sliced by max_prefix) — mirrors BEAST input_search; NOT frozen/verbatim.
+            kickoff_pool, trs_kickoff, kickoff_strategy = flrt_search_input_message(
+                lm_eval, flrt_hf, flrt_teacher_cfg,
+                _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
+                flrt_cfg, no_think_eval, no_think_target, eval_max_tokens, temperature,
+                fixed_kickoff=(fixed_kickoff if use_frozen_kickoff else None),
+            )
+        elif use_frozen_kickoff:
             kickoff_pool = [(fixed_kickoff["content"], None,
                              fixed_kickoff.get("baseline", "") or "",
                              fixed_kickoff.get("suffix", "") or "")] * _n_reps
             trs_kickoff = fixed_kickoff.get("trs", "") or ""
             kickoff_strategy = fixed_kickoff.get("strategy", "") or ""
             print(f"  v{var_idx}: fixed kickoff reused x{_n_reps} reps (kickoff bank)", flush=True)
-        elif flrt_on:
-            # FLRT-in: mutation-buffer search scored by the full-vocab distillation loss.
-            kickoff_pool, trs_kickoff, kickoff_strategy = flrt_search_input_message(
-                lm_eval, flrt_hf, flrt_teacher_cfg,
-                _strip_thinking_from_msgs(eval_msgs_kickoff_ctx), target_msgs_base,
-                flrt_cfg, no_think_eval, no_think_target, eval_max_tokens, temperature,
-            )
         else:
             # Strip <thinking> blocks from past evaluator messages before passing
             # to search (cheap defense in depth even if parse_message already handled them).

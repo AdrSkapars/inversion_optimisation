@@ -562,16 +562,27 @@ def flrt_search_input_message(
     lm_eval, hf: Dict, teacher_cfg: Dict, eval_msgs: List[Dict], target_msgs: List[Dict],
     search_cfg, no_think_eval: bool, no_think_target: bool,
     sample_max_tokens: int, sample_temperature: float,
+    fixed_kickoff: Optional[Dict] = None,
 ) -> Tuple[List[Tuple[str, float, str, str]], str, str]:
     """Serial FLRT input search: Phase-1 auditor sample → FLRT mutation-buffer search. Mirrors
     search.input_search_evaluator_message's signature/return so the rollout forks between them
-    with a single `if flrt_on`. Returns (pool, continuation_text, strategy)."""
+    with a single `if flrt_on`. Returns (pool, continuation_text, strategy).
+
+    `fixed_kickoff` (from the kickoff bank): when present, its content is the reused Phase-1
+    message and is used as the search BASELINE (skip the auditor Phase-1 generation), exactly
+    like BEAST input_search — FLRT still runs its full search over the banked message (sliced by
+    max_prefix_length). NOT frozen/verbatim."""
     from .core import batch_generate_local
     from .search import _parse_phase1
 
-    content, baseline_msg, strategy = _parse_phase1(
-        batch_generate_local(lm_eval, [eval_msgs], sample_max_tokens, sample_temperature,
-                             no_think=no_think_eval)[0])
+    if fixed_kickoff and fixed_kickoff.get("content"):
+        baseline_msg = fixed_kickoff["content"]
+        content = baseline_msg
+        strategy = fixed_kickoff.get("strategy", "") or ""
+    else:
+        content, baseline_msg, strategy = _parse_phase1(
+            batch_generate_local(lm_eval, [eval_msgs], sample_max_tokens, sample_temperature,
+                                 no_think=no_think_eval)[0])
     if not baseline_msg or not search_cfg.enabled:
         return [(baseline_msg, 0.0, baseline_msg, "")], "", strategy
     continuation = flrt_prepare_continuation(
