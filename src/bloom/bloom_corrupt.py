@@ -175,6 +175,8 @@ cfg = DotDict({
         "max_reward_output_length": 32,          # PAPER n_match: length K of the self-jail continuation the distillation loss L_D is averaged over (one teacher-forced forward gives all K positions). NOT single-token. 0 = full continuation. (Same-function as search_input's reward length, hence the shared name.)
         # ── Losses: distillation L_D is the only default-on objective; L_XE (fluency) + L_Rep default off, combined by plain weighted sum (no z-norm) ──
         "p_threshold": 0.6,                      # PAPER: L_D per-token reward cap = log(p_threshold) — stop rewarding a continuation token once the target already matches the teacher.
+        "w_distillation": 1.0,                   # weight on the distillation term. Only matters RELATIVE to w_force (a lone scalar doesn't change ranking). When w_force>0, distillation is z-normed across the candidate batch before weighting.
+        "w_force": 0.0,                          # weight on TEACHER FORCING = target's log-prob of the teacher's ACTUAL continuation tokens (log q_base(forced_i)), over the SAME reward positions as distillation, same p_threshold cap. 0 = distillation-only (legacy). >0 activates z-normed weighted combine: w_distillation*z(L_D) + w_force*z(forcing). Free (reuses the log_q already built). Override BLOOM_FLRT_W_FORCE.
         "w_fluency": 0.0,                        # L_XE weight (perplexity of the attack tokens). 0 = off.
         "fluency_on": "auditor",                 # which model scores fluency perplexity: "auditor" or "target".
         "w_repetition": 0.0,                     # L_Rep weight (repetition penalty on the attack tokens). 0 = off.
@@ -306,6 +308,8 @@ if __name__ == "__main__":
         ("BLOOM_FLRT_LATIN_MASK", ("flrt_search_input", "latin_mask"),      _envbool),
         ("BLOOM_FLRT_TRUNCATE_EOS", ("flrt_search_input", "truncate_at_eos"), _envbool),
         ("BLOOM_FLRT_PTHRESHOLD", ("flrt_search_input", "p_threshold"),     float),   # per-token reward cap = log(p_threshold)
+        ("BLOOM_FLRT_W_DISTILL", ("flrt_search_input", "w_distillation"),   float),   # weight on distillation term (relative to w_force; z-normed when w_force>0)
+        ("BLOOM_FLRT_W_FORCE",   ("flrt_search_input", "w_force"),          float),   # weight on teacher-forcing term (target logprob of teacher's actual tokens); >0 activates z-normed combine
         ("BLOOM_FLRT_TEMP",      ("flrt_search_input", "temperature"),      float),
         ("BLOOM_FLRT_W_FLUENCY", ("flrt_search_input", "w_fluency"),        float),   # 0 = off
         ("BLOOM_FLRT_FLUENCY_ON", ("flrt_search_input", "fluency_on"),      str),     # "auditor" | "target"

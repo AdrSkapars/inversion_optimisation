@@ -202,12 +202,19 @@ def _teacher_continuation_and_pjail(
 def _score_distillation(
     hf: Dict, victim_prefixes: List[List[int]], continuation_ids: List[int],
     p_jail: torch.Tensor, p_threshold: float, chunk: Optional[int],
+    w_distillation: float = 1.0, w_force: float = 0.0,
 ) -> List[float]:
-    """L_D per candidate: mean over continuation positions of
-        min( sum_x p_jail(x) * log q_base(x),  log(p_threshold) )
-    with the first continuation token weighted x1.5 (paper). q_base is the TARGET (victim)
-    reading [candidate message + continuation]; p_jail is the fixed teacher distribution.
-    Higher = victim distribution closer to the jailbroken teacher's.
+    """Two per-candidate terms, computed over the SAME reward positions (first token weighted x1.5):
+      • distillation L_D = mean_i pos_w[i] * min( sum_x p_jail(x) log q_base(x),  log p_threshold )
+      • teacher forcing  = mean_i pos_w[i] * min( log q_base(forced_token_i),     log p_threshold )
+    q_base is the TARGET (victim) reading [candidate message + continuation]; p_jail the fixed
+    teacher distribution; forced_token_i = continuation_ids[i] (the teacher's actually-sampled
+    token). The forcing term is free — it's a single gather from the log_q we already build.
+
+    w_force <= 0  → returns the raw distillation score (exact legacy behaviour, no z-norm).
+    w_force >  0  → both terms are z-normed across the scored candidate batch (so the weights are
+                    on the same scale and actually control the trade-off) and combined as
+                    w_distillation * z(L_D) + w_force * z(forcing). Higher = better.
     """
     mt, device, pad_id = hf["mt"], hf["device"], hf["pad_id"]
     T = len(continuation_ids)
@@ -216,9 +223,11 @@ def _score_distillation(
     if T > 0:
         pos_w[0] = 1.5
     w_sum = float(pos_w.sum())
+    do_force = w_force is not None and w_force > 0.0
 
     full_seqs = [vp + continuation_ids for vp in victim_prefixes]
-    scores: List[float] = []
+    distill_scores: List[float] = []
+    force_scores: List[float] = []
     step = chunk or len(full_seqs)
     for b in range(0, len(full_seqs), step):
         batch = full_seqs[b:b + step]
@@ -226,14 +235,29 @@ def _score_distillation(
         out = mt(input_ids=inp, attention_mask=attn, use_cache=False, logits_to_keep=T + 1)
         logits = out.logits[:, :T, :].float()                       # [B, T, V]
         Bn = logits.shape[0]
-        acc = torch.zeros(Bn, device=device)
+        d_acc = torch.zeros(Bn, device=device)
+        f_acc = torch.zeros(Bn, device=device)
         for i in range(T):
             log_q = torch.log_softmax(logits[:, i, :], dim=-1)      # [B, V]
-            contrib = (p_jail[i].unsqueeze(0) * log_q).sum(dim=-1)  # [B]  E_pjail[log q_base]
-            contrib = torch.clamp(contrib, max=cap)                 # paper cap (stop over-rewarding)
-            acc = acc + pos_w[i] * contrib
-        scores.extend((acc / max(w_sum, 1e-6)).tolist())
-    return scores
+            d = (p_jail[i].unsqueeze(0) * log_q).sum(dim=-1)        # [B]  E_pjail[log q_base]
+            d_acc = d_acc + pos_w[i] * torch.clamp(d, max=cap)      # paper cap (stop over-rewarding)
+            if do_force:
+                f = log_q[:, continuation_ids[i]]                   # [B]  log q_base(forced token) — free gather
+                f_acc = f_acc + pos_w[i] * torch.clamp(f, max=cap)  # same per-token p_threshold cap
+        distill_scores.extend((d_acc / max(w_sum, 1e-6)).tolist())
+        if do_force:
+            force_scores.extend((f_acc / max(w_sum, 1e-6)).tolist())
+
+    if not do_force:
+        return distill_scores                                       # legacy: raw distillation only
+
+    def _z(x: torch.Tensor) -> torch.Tensor:
+        return (x - x.mean()) / (x.std() + 1e-6) if x.numel() > 1 else torch.zeros_like(x)
+
+    d = torch.tensor(distill_scores)
+    f = torch.tensor(force_scores)
+    combined = w_distillation * _z(d) + w_force * _z(f)
+    return combined.tolist()
 
 
 # ── Auxiliary losses (default off) ───────────────────────────────────────────
@@ -324,7 +348,9 @@ def _flrt_single_trial(
             suffix_tok_lists.append(suf_ids)
 
         ld = _score_distillation(hf, victim_prefixes, continuation_ids, p_jail,
-                                 cfg.p_threshold, cfg.eval_beam_chunk_size)
+                                 cfg.p_threshold, cfg.eval_beam_chunk_size,
+                                 float(getattr(cfg, "w_distillation", 1.0)),
+                                 float(getattr(cfg, "w_force", 0.0)))
         total = list(ld)
         if cfg.w_fluency and cfg.w_fluency > 0:
             fl = _fluency_reward(hf, lm_eval, suffix_texts, cfg.fluency_on)  # f = -perplexity (higher = better)
