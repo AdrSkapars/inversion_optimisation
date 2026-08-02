@@ -61,58 +61,78 @@ def _sample_at(lm_eval, prompts_tids: List[List[int]], n: int,
 
 def _mutate(lm_eval, best_seq: List[int], prefix_length: int, mutation_type: str,
             k1: int, allowed_token_ids: Optional[List[int]], temperature: float,
-            min_tokens: int, max_tokens: int) -> List[List[int]]:
+            min_tokens: int, max_tokens, n_mut: int = 1) -> List[List[int]]:
     """Produce up to k1 mutated candidates of `best_seq` (mutating only the SUFFIX region
-    [prefix_length:]). One mutation TYPE per call (chosen by the caller).
+    [prefix_length:]). One mutation TYPE per call (chosen by the caller); the chosen operator
+    is applied `n_mut` times to each candidate. Because every candidate shares the operator
+    AND the count, they all take the SAME token-length delta (append/insert +n_mut, delete −m,
+    swap ±0), so the returned batch stays rectangular for lockstep scoring.
 
-    • append : sample k1 end tokens from the auditor → append each (BEAST-style end-insert).
-    • swap   : k1 random suffix positions; sample a replacement per position → replace.
-    • insert : k1 random suffix positions; sample a token per position → insert before it.
-    • delete : k1 random suffix positions → drop each (no model call).
+    • append : sample an n_mut-token continuation per candidate → append it (BEAST-style end-insert).
+    • swap   : apply a single-position swap n_mut times (sampled replacement each time).
+    • insert : apply a single-position insert n_mut times (sampled token each time).
+    • delete : drop n_mut distinct random suffix positions (no model call). GUARDED so the
+               suffix never falls below `min_tokens` (m = min(n_mut, suffix_len − min_tokens)).
     """
+    n_mut = max(1, int(n_mut))
     suffix_len = len(best_seq) - prefix_length
     if mutation_type == "append":
-        toks = _sample_at(lm_eval, [best_seq], n=k1, allowed_token_ids=allowed_token_ids,
-                          temperature=temperature)
-        toks = toks[0] if toks else []
-        return [list(best_seq) + [t] for t in toks]
+        # one auditor call: k1 continuations of length n_mut (autoregressive = appending n_mut tokens).
+        ext = _vllm_sample_extensions(
+            lm_eval, [best_seq], n=k1, max_tokens=n_mut, temperature=temperature, top_p=1.0,
+            allowed_token_ids=allowed_token_ids, ignore_eos=True,
+        )
+        cands = ext[0] if ext else []
+        return [list(best_seq) + list(c) for c in cands if len(c) == n_mut]
 
     if mutation_type == "delete":
-        if suffix_len <= 0:
+        # GUARD: never shrink the suffix below min_tokens.
+        m = min(n_mut, suffix_len - int(min_tokens))
+        if m <= 0:
             return []
         out: List[List[int]] = []
         for _ in range(k1):
-            pos = prefix_length + random.randrange(suffix_len)
-            out.append(best_seq[:pos] + best_seq[pos + 1:])
+            positions = sorted(random.sample(range(prefix_length, len(best_seq)), m), reverse=True)
+            seq = list(best_seq)
+            for pos in positions:
+                del seq[pos]
+            out.append(seq)
         return out
 
-    # swap / insert both need one sampled token per chosen position.
+    # swap / insert: apply the single-position operator n_mut times to each of k1 candidates.
     if suffix_len <= 0 and mutation_type == "swap":
         return []
-    positions = [prefix_length + random.randrange(max(suffix_len, 1)) for _ in range(k1)]
-    prompts = [best_seq[:p] for p in positions]                 # auditor sees the seq up to the mutation site
-    per_prompt_tok = _sample_at(lm_eval, prompts, n=1, allowed_token_ids=allowed_token_ids,
-                                temperature=temperature)
-    out = []
-    for p, toks in zip(positions, per_prompt_tok):
-        if not toks:
-            continue
-        t = toks[0]
-        if mutation_type == "swap":
-            new = list(best_seq); new[p] = t
-        else:  # insert
-            new = best_seq[:p] + [t] + best_seq[p:]
-        out.append(new)
-    return out
+    seqs = [list(best_seq) for _ in range(k1)]
+    for _ in range(n_mut):
+        positions = [prefix_length + random.randrange(max(len(s) - prefix_length, 1)) for s in seqs]
+        prompts = [s[:p] for s, p in zip(seqs, positions)]     # auditor sees the seq up to the mutation site
+        per_prompt_tok = _sample_at(lm_eval, prompts, n=1, allowed_token_ids=allowed_token_ids,
+                                    temperature=temperature)
+        new_seqs = []
+        for s, p, toks in zip(seqs, positions, per_prompt_tok):
+            if not toks:
+                new_seqs.append(s)                              # sample failed → leave as-is (filtered below)
+                continue
+            t = toks[0]
+            if mutation_type == "swap":
+                ns = list(s); ns[p] = t
+            else:  # insert
+                ns = s[:p] + [t] + s[p:]
+            new_seqs.append(ns)
+        seqs = new_seqs
+    # keep only fully-mutated candidates so the batch is rectangular.
+    want = len(best_seq) + (n_mut if mutation_type == "insert" else 0)
+    return [s for s in seqs if len(s) == want]
 
 
 def _pick_mutation(cfg, suffix_len: int) -> Optional[str]:
     """Pick a mutation type by the configured probabilities, disabling ops that would violate
     the min/max suffix-length bounds (paper behaviour: no delete when too short; no insert/append
     when too long)."""
+    under_max = (cfg.max_tokens is None) or (suffix_len < cfg.max_tokens)   # None = unbounded suffix
     p_del = cfg.p_delete if suffix_len > cfg.min_tokens else 0.0
-    p_ins = cfg.p_insert if suffix_len < cfg.max_tokens else 0.0
-    p_app = cfg.p_append if suffix_len < cfg.max_tokens else 0.0
+    p_ins = cfg.p_insert if under_max else 0.0
+    p_app = cfg.p_append if under_max else 0.0
     p_swp = cfg.p_swap if suffix_len > 0 else 0.0
     total = p_del + p_ins + p_app + p_swp
     if total <= 1e-12:
@@ -327,7 +347,8 @@ def _flrt_single_trial(
         if mtype is None:
             continue
         new_seqs = _mutate(lm_eval, best_seq, prefix_length, mtype, int(cfg.k1),
-                           allowed_token_ids, cfg.temperature, cfg.min_tokens, cfg.max_tokens)
+                           allowed_token_ids, cfg.temperature, cfg.min_tokens, cfg.max_tokens,
+                           int(getattr(cfg, "num_mutations", 1)))
         if not new_seqs:
             continue
         new_scores = _score(new_seqs)

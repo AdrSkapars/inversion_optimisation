@@ -163,10 +163,11 @@ cfg = DotDict({
         "p_insert": 1/6,                         # insert a sampled token at a random INTERIOR position.
         "p_delete": 1/6,                         # delete a random token.
         "p_swap": 1/6,                           # swap a random token for a sampled replacement.
+        "num_mutations": 1,                      # how many times the chosen operator is applied to EACH candidate per iteration (append/insert +N tokens, delete −N, swap N positions). 1 = original single-mutation behaviour. All candidates share operator+count → identical length delta → batch stays rectangular. Override BLOOM_FLRT_N_MUT.
         # ── Suffix bounds / init (init suffix is always sampled autoregressively from the auditor) ──
         "start_tokens": 10,                      # ExperimentFLRT.py: initial suffix length.
-        "min_tokens": 5,                         # delete disabled below this suffix length.
-        "max_tokens": 40,                        # insert/append disabled above this suffix length.
+        "min_tokens": 5,                         # delete disabled below this suffix length (also the floor num_mutations delete is guarded against).
+        "max_tokens": None,                      # upper bound above which insert/append are disabled. None = UNBOUNDED (let the suffix grow freely — the higher-headroom default for future runs). Set an int (e.g. 40) via BLOOM_FLRT_MAX_TOKENS to cap.
         # ── max_prefix_length / masking / eos (BEAST names, same meaning as search_input) ──
         "max_prefix_length": None,               # how much of Phase-1's <message> body is preloaded before the mutation region. None = keep full body (suffix mutation, classic); 0 = keep nothing (whole body generated/mutated); N>0 = first N tokens; N<0 = drop last |N|.
         "latin_mask": True,                      # restrict mutation tokens to Latin/ASCII (== search_input default).
@@ -297,9 +298,10 @@ if __name__ == "__main__":
         ("BLOOM_FLRT_P_INSERT",  ("flrt_search_input", "p_insert"),         float),
         ("BLOOM_FLRT_P_DELETE",  ("flrt_search_input", "p_delete"),         float),
         ("BLOOM_FLRT_P_SWAP",    ("flrt_search_input", "p_swap"),           float),
+        ("BLOOM_FLRT_N_MUT",     ("flrt_search_input", "num_mutations"),    int),     # mutations applied to each candidate per iter (>1 = multi-token append/insert, multi-position delete/swap)
         ("BLOOM_FLRT_START_TOKENS", ("flrt_search_input", "start_tokens"),  int),
         ("BLOOM_FLRT_MIN_TOKENS", ("flrt_search_input", "min_tokens"),      int),
-        ("BLOOM_FLRT_MAX_TOKENS", ("flrt_search_input", "max_tokens"),      int),
+        ("BLOOM_FLRT_MAX_TOKENS", ("flrt_search_input", "max_tokens"),      _int_or_none),  # int cap, or "none" = unbounded suffix growth
         ("BLOOM_FLRT_REWARD_LEN", ("flrt_search_input", "max_reward_output_length"), int),  # first N target tokens of the self-jail continuation used as the distillation target
         ("BLOOM_FLRT_LATIN_MASK", ("flrt_search_input", "latin_mask"),      _envbool),
         ("BLOOM_FLRT_TRUNCATE_EOS", ("flrt_search_input", "truncate_at_eos"), _envbool),
