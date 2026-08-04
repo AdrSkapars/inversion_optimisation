@@ -271,6 +271,7 @@ if __name__ == "__main__":
         ("BLOOM_JUDGE_THINKING", ("judgment", "thinking"),                    _envbool),
         ("BLOOM_EVAL_MAXTOK",    ("rollout", "evaluator_max_tokens"),         int),   # raise eval cap for hosted-API eval WITH thinking (budget reserved inside max_tokens)
         ("BLOOM_JUDGE_MAXTOK",   ("judgment", "max_tokens"),                  int),
+        ("BLOOM_MAX_CONCURRENT", ("max_concurrent",),                         int),   # max simultaneous hosted-API requests in flight (auditor/judge); default 10, raise (~30-50) for API-auditor throughput
         ("BLOOM_KICKOFF_BANK",   ("kickoff_bank",),                           str),
         ("BLOOM_REFINE",         ("refinement_input", "enabled"),                   _envbool),
         ("BLOOM_REFINE_HIST_TRANSCRIPT", ("refinement_input", "history_transcript_rounds"), _int_or_all),  # "all"=None, 0=none, N=last N full transcripts
