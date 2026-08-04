@@ -374,6 +374,8 @@ if __name__ == "__main__":
         # (jailbroken_output_neg_system_prompt / _neg_user_prompt / _neg_prefill).
         if os.environ.get("BLOOM_JAIL_B3") is not None and os.environ.get("BLOOM_JAIL_B3") != "":
             cfg["jailbroken_output"]["b3"] = float(os.environ["BLOOM_JAIL_B3"])
+        if os.environ.get("BLOOM_JAIL_NEG_NORMAL") not in (None, ""):
+            cfg["jailbroken_output"]["neg_normal"] = _envbool(os.environ["BLOOM_JAIL_NEG_NORMAL"])  # DELTA mode: neg = jail model under NORMAL prompt -> z = target + b2*jail - b3*normal (small-model jailbreak transplant)
     if any(os.environ.get(k) for k in ("BLOOM_FOLDER", "BLOOM_MAX_TURNS", "BLOOM_NUM_ROUNDS")):
         print(f"  [env override] folder={cfg.get('folder_name')} "
               f"max_turns={cfg.get('rollout', {}).get('max_turns')} "

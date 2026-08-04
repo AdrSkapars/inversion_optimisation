@@ -1021,6 +1021,7 @@ def run_rollout_batched_local(
             "neg_system_prompt": (jail_cfg.get("neg_system_prompt") or prompts_yaml.get("jailbroken_output_neg_system_prompt", "") or ""), # input-conditioned negative persona
             "neg_user_prompt":   (jail_cfg.get("neg_user_prompt")   or prompts_yaml.get("jailbroken_output_neg_user_prompt", "")   or ""), # harmful user turn -> ELICITED refusal direction
             "neg_prefill":       (jail_cfg.get("neg_prefill")       or prompts_yaml.get("jailbroken_output_neg_prefill", "")       or ""),
+            "neg_normal":        bool(jail_cfg.get("neg_normal", False)),  # DELTA/proxy-tuning: neg = jail model under NORMAL (no-jail) prompt (BLOOM_JAIL_NEG_NORMAL)
             "top_k_logprobs": (int(jail_cfg["top_k_logprobs"]) if jail_cfg.get("top_k_logprobs") is not None else None),  # vllm_topk only; None on the default hf_full path
             "tokbias":      _tb,  # static logit-bias baseline: cfg.tokbias_output knobs + yaml prompt content; BLOOM_TOKBIAS_* override
         }

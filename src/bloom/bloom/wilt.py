@@ -507,7 +507,13 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
     jail_neg_pf  = jail_runtime_cfg.get("neg_prefill", "") or ""    # default: no prefill on the negative branch
     NO_THINK = hf.get("target_no_think", core._NO_THINK_PREFIX)       # target wrapper
     NO_THINK_C = hf.get("corrupt_no_think", core._CORRUPT_NO_THINK_PREFIX)  # jail/corruptor wrapper
-    neg_on = (jail_b3 != 0.0) and (bool(jail_neg_sys) or bool(jail_neg_user))
+    # DELTA / proxy-tuning mode (BLOOM_JAIL_NEG_NORMAL): neg = the jail model (mc) under its
+    # NORMAL prompt (no jail system, no neg persona), so z = b1*target + b2*jail(mc,jail) -
+    # b3*jail(mc,normal). With mc a SMALL model and b2==b3==beta this is target + beta*(jail_small
+    # - normal_small): transplant the small model's jailbreak DIRECTION onto the big target. Inert
+    # unless the flag is set, so WILT stays normal by default.
+    jail_neg_normal = bool(jail_runtime_cfg.get("neg_normal", False))
+    neg_on = (jail_b3 != 0.0) and (bool(jail_neg_sys) or bool(jail_neg_user) or jail_neg_normal)
     t_prefs: List[List[int]] = []
     j_prefs: List[List[int]] = []
     n_prefs: List[List[int]] = []
@@ -533,6 +539,11 @@ def _jail_generate_hf(hf: Dict, jail_runtime_cfg: Dict,
                 # continued along the tokens generated so far.
                 n_msgs = ([{"role": "system", "content": jail_neg_sys}] if jail_neg_sys else []) \
                          + [{"role": "user", "content": jail_neg_user}]
+            elif jail_neg_normal:
+                # DELTA mode: neg = the jail model on the PLAIN conversation (NO system prompt),
+                # same tokenizer + wrapper as the jail branch, differing ONLY in the system prompt
+                # (jail persona vs none). Subtracting it yields the pure jail-vs-normal direction.
+                n_msgs = conv
             else:
                 n_msgs = [{"role": "system", "content": jail_neg_sys}] + conv
             ns = tok_c.apply_chat_template(n_msgs, tokenize=False, add_generation_prompt=True) + NO_THINK_C
