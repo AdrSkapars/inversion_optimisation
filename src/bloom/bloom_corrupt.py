@@ -364,6 +364,8 @@ if __name__ == "__main__":
             cfg["jailbroken_output"]["b1"] = float(os.environ["BLOOM_JAIL_B1"])       # 0 = floor-only jail (drop target term; keep floor). unset = legacy z=target+b2*jail
         if os.environ.get("BLOOM_JAIL_FLOOR"):
             cfg["jailbroken_output"]["target_floor"] = float(os.environ["BLOOM_JAIL_FLOOR"])  # mask jail samples to tokens with target prob >= floor
+        if os.environ.get("BLOOM_JAIL_PREFILL") not in (None, ""):
+            cfg["jailbroken_output"]["prefill"] = _envbool(os.environ["BLOOM_JAIL_PREFILL"])  # False = no compliance prefill (ablation row)
         # NEGATIVE STEERING for jail: z = target + beta*jail - b3*neg, where neg is the jail expert
         # prompted with a negative persona + the SAME input (a continuation, NOT a rewrite). b3 is the
         # only knob here (0 = off = legacy jail); the neg prompts load from the behaviour yaml
