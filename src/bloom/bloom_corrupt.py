@@ -11,6 +11,7 @@ import yaml
 # Suppress LiteLLM verbose output
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
+litellm.drop_params = True   # Anthropic (Sonnet auditor/judge) rejects unsupported params like `seed`; drop them
 from bloom.core import *
 from bloom import core
 from bloom.wilt import *

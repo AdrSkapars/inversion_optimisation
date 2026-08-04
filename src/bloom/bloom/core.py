@@ -23,6 +23,7 @@ from litellm import completion_with_retries
 # Suppress LiteLLM verbose output
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
+litellm.drop_params = True   # silently drop params a provider doesn't support (e.g. Anthropic ignores `seed`)
 import logging
 
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
