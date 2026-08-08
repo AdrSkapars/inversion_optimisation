@@ -98,6 +98,20 @@ def run(args):
     core._DEFAULT_LOCAL_GPU_ID = args.gpu   # physical GPU index; the worker sets CUDA_VISIBLE_DEVICES=gpu_id itself
     MLABEL = {d: X.MODELS[d][0] for d in X.MODELS}
 
+    # RESUME: skip (steered, model, judged) combos already fully judged in ANY records file.
+    from collections import Counter
+    _cnt = Counter()
+    for rp in glob.glob(os.path.join(args.outdir, "records_*.jsonl")):
+        for line in open(rp, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            _cnt[(r["steered"], r["model"], r["judged"])] += 1
+    done = {k for k, v in _cnt.items() if v >= 90}   # a fully-judged rubric writes ~100 recs atomically
+    if done:
+        print(f"[xjudge] resume: {len(done)} (steered,model,rubric) combos already done -> skipping them", flush=True)
+
     cells = [(s, m) for s in BEHS for m in X.MODELS]
     if args.only:
         want = set(args.only.split(","))
@@ -111,6 +125,10 @@ def run(args):
     recf = open(os.path.join(args.outdir, f"records_{tag}.jsonl"), "a", encoding="utf-8")
 
     for (S, mdir) in cells:
+        rubrics = [S] if args.sanity else BEHS
+        todo = [jb for jb in rubrics if (S, MLABEL[mdir], jb) not in done]
+        if not todo:
+            print(f"[xjudge] {S}/{MLABEL[mdir]}: all rubrics already done, skip", flush=True); continue
         combo = X._combo_dir(args.root, S, mdir)
         if not combo:
             print(f"[xjudge] no combo for {S}/{mdir}", flush=True); continue
@@ -118,9 +136,9 @@ def run(args):
         chosen = X.select_in_band(X.load_points(combo, rmax=args.max_round), xbon)
         cell_dir = os.path.join(args.tmp, S, mdir)
         stored = stage_copies(chosen, cell_dir)
-        print(f"[xjudge] === {S}/{MLABEL[mdir]}: {len(chosen)} WILT transcripts staged ===", flush=True)
+        print(f"[xjudge] === {S}/{MLABEL[mdir]}: {len(chosen)} WILT transcripts staged; {len(todo)}/{len(rubrics)} rubrics to do ===", flush=True)
 
-        for jb in ([S] if args.sanity else BEHS):
+        for jb in todo:
             cfg, prompts = build_cfg_prompts(jb, B, load_prompts)
             und = understanding_of(jb, args.root)
             out_name = f"judgment_under_{jb}.json"
@@ -149,13 +167,15 @@ def run(args):
 def aggregate(args):
     """Roll records_*.jsonl -> 8x8 (rows=steered, cols=judged) mean presence over models+scenarios."""
     from collections import defaultdict
-    cell = defaultdict(list)          # (S, X) -> [score*10 ...]
-    percell = defaultdict(list)       # (S, X, model) -> [...]
-    for rp in glob.glob(os.path.join(args.outdir, "records_shard*.jsonl")):
+    # dedup by (steered, model, judged, var) -- last write wins -- so a re-judged rubric isn't double-counted
+    latest = {}   # includes records_sanity.jsonl (the 2 diagonal cells judged during the sanity check)
+    for rp in sorted(glob.glob(os.path.join(args.outdir, "records_*.jsonl"))):
         for line in open(rp, encoding="utf-8"):
             r = json.loads(line)
-            cell[(r["steered"], r["judged"])].append(10 * r["score"])
-            percell[(r["steered"], r["judged"], r["model"])].append(10 * r["score"])
+            latest[(r["steered"], r["model"], r["judged"], r["var"])] = r["score"]
+    cell = defaultdict(list)          # (S, X) -> [score*10 ...]
+    for (s, m, j, v), sc in latest.items():
+        cell[(s, j)].append(10 * sc)
     mat = {s: {x: (round(st.mean(cell[(s, x)]), 1) if cell[(s, x)] else None) for x in BEHS} for s in BEHS}
     out = {"order": BEHS, "presence_pct": mat,
            "n": {s: {x: len(cell[(s, x)]) for x in BEHS} for s in BEHS}}
