@@ -1,18 +1,14 @@
 # Inversion and Elicitation of LLMs Through Discrete Optimisation
 
-This repository holds the code for the paper **GPT, But Backwards: Exactly Inverting Language Model Outputs**. The paper introduces SODA, a gradient-based search that recovers the exact input that produced a given output. The repository also contains later experiments that apply the same kind of input search to *elicitation*: finding natural-looking inputs that make a model produce a target behaviour. The behaviour-elicitation work that became BLOOM-WILT has moved to its own repository, [AdrSkapars/bloom-wilt](https://github.com/AdrSkapars/bloom-wilt).
+This repository holds the code for the paper **GPT, But Backwards: Exactly Inverting Language Model Outputs**. The paper introduces SODA, a gradient-based search that recovers the exact input that produced a given output. The repository also contains later experiments that apply the same kind of input search to *elicitation*: finding natural-looking inputs that make a model produce a target behaviour.
 
-## Requirements
-
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- A CUDA GPU. The notebooks were developed on a Colab L4.
-- `OPENAI_API_KEY`, needed only for the elicitation experiments that use an API judge
+## Setup
 
 ```bash
 uv sync
 ```
 
-This installs the `inversion_optimisation` package in editable mode, along with its dependencies (TransformerLens, Hugging Face `datasets`, `peft`, ...). The notebooks also run on Google Colab: clone the repo and run `uv pip install -e .`.
+This installs the `inversion_optimisation` package and its dependencies (Python 3.12, CUDA GPU).
 
 ## Inversion (paper)
 
@@ -94,21 +90,6 @@ These experiments came after the paper. They are self-contained notebooks and sc
 | `experiments/elicit_beast_flrt/` | Standalone BEAST and FLRT implementations in Hugging Face `transformers` (default target: Qwen3-4B). Their losses are a weighted mix of target-string likelihood, judge score and input perplexity. |
 | `experiments/elicit_diffusion/` | Uses inpainting with the LLaDA-8B diffusion LLM to generate inputs, following Lüdke et al. (2025), "Diffusion LLMs are Natural Adversaries for any LLM". Inpainting can be guided by target likelihood, a judge or both. |
 | `experiments/elicit_llm/` | A scratch notebook for LLM-based input optimisation, currently built on the diffusion pipeline above. |
-
-The BEAST and FLRT experiments also run as plain scripts:
-
-```bash
-uv run python experiments/elicit_beast_flrt/ExperimentBeast.py
-```
-
-The script prints the best candidates ranked by target likelihood, judge score and perplexity. Before running it, edit the `cfg` dict in the script to set:
-
-- `prompt` and `target`;
-- the loss weights `w_target`, `w_judge` and `w_perplexity`;
-- `use_api_judge` and `api_judge_model`;
-- the time `budget`.
-
-`experiments/Analysis.ipynb` contains a perplexity analysis for the BEAST experiments.
 
 ## Layout
 
